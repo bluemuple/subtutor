@@ -95,10 +95,13 @@ html.st-panel-open { --st-panel-w: 400px; }
 .st-btn.st-mini { padding: 3px 7px; font-size: 11px; }
 
 /* 플레이어 컨트롤 바의 켜기/끄기 버튼 */
-.st-ctl { all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: top; }
-.st-ctl-badge { font: 700 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; letter-spacing: .5px; color: #fff; background: #7c3aed; border-radius: 6px; padding: 5px 6px; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
-.st-ctl:hover .st-ctl-badge { filter: brightness(1.15); }
-.st-ctl.off .st-ctl-badge { background: #555; color: #ccc; text-decoration: line-through; }
-.st-ctl-netflix { width: 2.6em; height: 100%; margin: 0 .2em; }
-.st-ctl-youtube { width: 48px; height: 100%; }
-.st-ctl-prime, .st-ctl-disney { width: 2.6em; height: 100%; margin: 0 .2em; }
+.st-ctl { all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: top; color: #fff; opacity: .95; transition: transform .12s ease, opacity .12s ease; }
+.st-ctl-svg { display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+.st-ctl .st-ctl-slash { display: none; }
+.st-ctl:hover { transform: scale(1.12); opacity: 1; }
+.st-ctl.off { opacity: .5; }
+.st-ctl.off .st-ctl-slash { display: block; }
+.st-ctl-wrap { display: flex; align-items: center; justify-content: center; }
+.st-ctl-netflix { width: 100%; height: 100%; min-width: 2.4em; } .st-ctl-netflix .st-ctl-svg { width: 2em; height: 2em; min-width: 30px; min-height: 30px; }
+.st-ctl-youtube { width: 48px; height: 100%; } .st-ctl-youtube .st-ctl-svg { width: 26px; height: 26px; }
+.st-ctl-prime, .st-ctl-disney { width: 2.6em; height: 100%; margin: 0 .2em; min-width: 40px; } .st-ctl-prime .st-ctl-svg, .st-ctl-disney .st-ctl-svg { width: 32px; height: 32px; }

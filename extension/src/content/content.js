@@ -189,7 +189,7 @@
       else { cancelModesPending(); state.loop = false; state.loopIdx = -1; if (ui.root) { ui.overlay.classList.add('st-hidden'); applySettings(); } }
     }
     if (active) { ensureOverlayMounted(); mountControlButton(); if (adapter.deep && (state.tickCount % 4 === 0)) syncShadowNativeStyles(); }
-    if (ui.root) fitVideoBesidePanel();
+    if (ui.root) { syncPanelWidth(); fitVideoBesidePanel(); }
   }
   function startVideo(id) {
     state.runToken++;
@@ -649,7 +649,7 @@
     else result = await captureViaTab(startV, endV);
     if (!result) return;
     if (result.silent) { toast('이 영상의 오디오는 캡처가 차단되어 있습니다(보호된 재생)'); return; }
-    const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, storeFormat: result.storeFormat || 'wav', storeMime: result.storeMime || 'audio/wav', storeRate: result.storeRate || 16000, download: result.download, downloadMime: result.downloadMime || 'audio/wav', fileName: fileNameFor(item, result.downloadFormat || 'wav'), durationMs: result.durationMs });
+    const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, storeFormat: result.storeFormat || 'wav', storeMime: result.storeMime || 'audio/wav', storeRate: result.storeRate || 16000, download: result.download, downloadMime: result.downloadMime || 'audio/wav', fileName: fileNameFor(item, result.downloadFormat || 'wav'), durationMs: result.durationMs, leadMs: Number.isFinite(result.leadMs) ? result.leadMs : 250, stats: result.stats || null });
     const fmt = (result.downloadFormat || 'wav').toUpperCase();
     if (mode === 'store') toast('🔊 오디오를 웹 퀴즈용으로 보관했습니다', 2500);
     else {
@@ -661,7 +661,7 @@
     if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
   }
   async function captureViaTab(startV, endV) {
-    const started = await frameRequest('start', { tabId: state.tabId, limitMs: 60000 }, 15000);
+    const started = await frameRequest('start', { tabId: state.tabId, limitMs: 60000, test: settings.captureTest || undefined }, 15000);
     if (!started || !started.ok) {
       if (started && started.unavailable === 'grant') {
         toast('오디오 저장 권한: 크롬 툴바의 SubTutor 아이콘을 한 번 누른 뒤(이 탭 허용) 다시 저장해 주세요', 4000);
@@ -671,7 +671,7 @@
     }
     const cap = await playSegmentForCapture(startV, endV);
     if (cap.reason === 'timeout' && cap.anchors.length < 3) { await frameRequest('stop', {}, 3000).catch(() => {}); throw new Error('재생이 진행되지 않아 녹음을 중단했습니다'); }
-    const res = await frameRequest('finish', { startMs: startV, endMs: endV, anchors: cap.anchors, downloadRate: 0, storeRate: 16000 }, 20000);
+    const res = await frameRequest('finish', { startMs: startV, endMs: endV, anchors: cap.anchors, downloadRate: 0, storeRate: 32000 }, 20000);
     if (!res || !res.ok) throw new Error((res && res.error) || '녹음 마무리 실패');
     return res;
   }
@@ -712,7 +712,8 @@
     const norm = Au.normalize(samples, 0.95);
     const dl = Au.encodeClip(norm, rate, { kbps: 128 });
     const st = Au.encodeClip(norm, rate, { rate: 32000, kbps: 64 });
-    return { ok: true, durationMs: Math.round((samples.length * 1000) / rate), download: Au.bytesToBase64(dl.bytes), downloadFormat: dl.format, downloadMime: dl.mime, store: Au.bytesToBase64(st.bytes), storeFormat: st.format, storeMime: st.mime, storeRate: st.rate };
+    const leadMs = Math.max(0, Math.round(Math.min(PAD, startV + offset - recStartWall)));
+    return { ok: true, durationMs: Math.round((samples.length * 1000) / rate), leadMs, download: Au.bytesToBase64(dl.bytes), downloadFormat: dl.format, downloadMime: dl.mime, store: Au.bytesToBase64(st.bytes), storeFormat: st.format, storeMime: st.mime, storeRate: st.rate };
   }
 
   // ───────────── 제목 ─────────────
@@ -747,7 +748,7 @@
     ui.nativeStyle = el('style', { id: 'st-native-style' });
     document.documentElement.append(ui.nativeStyle);
 
-    ui.panel = el('div', { id: 'st-panel' });
+    ui.panel = el('div', { id: 'st-panel', class: 'st-pf-' + adapter.name });
     ui.title = el('div', { class: 'st-brand', text: 'SubTutor' });
     ui.btnAP = el('button', { class: 'st-mode', title: '자동 일시정지 (P): 자막이 끝나면 멈춥니다. F로 다시 듣기', onclick: () => setMode('autoPause', !settings.autoPause) }, 'AP');
     ui.btnShadow = el('button', { class: 'st-mode st-shadow', title: '쉐도잉 (W): 자막이 끝나면 쉬었다가 자동으로 이어 재생합니다', onclick: () => setMode('shadowing', !settings.shadowing) }, '쉐도잉');
@@ -878,8 +879,19 @@
     }
   }
   // 플랫폼 CSS(adapter.layoutCss)로 영상이 안 줄어들면, video 의 조상 중 화면을 꽉 채우는 요소를 바깥쪽부터 골라 너비를 패널만큼 줄여 본다 (효과를 확인하며 다음 후보로)
-  const fit = { el: null, prev: null, appliedAt: 0, tried: 0, cycleAt: 0 };
+  const fit = { el: null, prev: null, appliedAt: 0, tried: 0, cycleAt: 0, phase: 0 };
+  const FIT_ANCHOR_PROPS = [['left', '0px'], ['right', 'auto'], ['margin-left', '0px'], ['margin-right', '0px'], ['transform', 'none']];
   function panelWidth() { const w = ui.panel ? ui.panel.getBoundingClientRect().width : 0; return w > 50 ? w : 400; }
+  // 어댑터가 panelWidth(기본 400) 를 주면 그 값을 쓴다 (유튜브: 오른쪽 추천 영상 칸 전체를 덮는 너비)
+  let lastPanelW = 0;
+  function syncPanelWidth() {
+    let w = 400;
+    try { if (typeof adapter.panelWidth === 'function') w = adapter.panelWidth() || 400; } catch (e) { w = 400; }
+    w = Math.round(Math.min(Math.max(w, 400), Math.max(400, window.innerWidth * 0.6)));
+    if (w === lastPanelW) return;
+    lastPanelW = w;
+    document.documentElement.style.setProperty('--st-panel-w', w + 'px');
+  }
   function videoOverlapsPanel(v) { const r = v.getBoundingClientRect(); return r.width > 0 && r.right > window.innerWidth - panelWidth() + 4; }
   function fitCandidates(v) {
     const out = [];
@@ -892,9 +904,15 @@
   }
   function restoreFit() {
     if (fit.el) {
-      try { if (fit.prev && fit.prev.value) fit.el.style.setProperty('width', fit.prev.value, fit.prev.priority); else fit.el.style.removeProperty('width'); } catch (e) { /* ignore */ }
+      try {
+        for (const [prop, saved] of Object.entries(fit.prev || {})) { if (saved.value) fit.el.style.setProperty(prop, saved.value, saved.priority); else fit.el.style.removeProperty(prop); }
+      } catch (e) { /* ignore */ }
     }
-    fit.el = null; fit.prev = null; fit.appliedAt = 0;
+    fit.el = null; fit.prev = null; fit.appliedAt = 0; fit.phase = 0;
+  }
+  function fitSet(el, prop, value) {
+    if (!fit.prev[prop]) fit.prev[prop] = { value: el.style.getPropertyValue(prop), priority: el.style.getPropertyPriority(prop) };
+    el.style.setProperty(prop, value, 'important');
   }
   function fitVideoBesidePanel() {
     const v = adapter.video();
@@ -903,16 +921,21 @@
     if (!videoOverlapsPanel(v)) { fit.tried = 0; return; } // CSS 규칙이나 이전 적용으로 이미 맞음
     if (fit.el && now() - fit.appliedAt < 700) return; // 적용 직후: 반영을 기다린다
     if (now() < fit.cycleAt) return;
+    // 너비를 줄였는데도 겹치면(요소가 오른쪽에 붙어 있어 오른쪽으로 밀린 경우) 같은 요소를 왼쪽에 붙여 본다
+    if (fit.el && fit.el.isConnected && fit.phase === 1) {
+      fit.phase = 2; fit.appliedAt = now();
+      for (const [prop, value] of FIT_ANCHOR_PROPS) fitSet(fit.el, prop, value);
+      return;
+    }
     const cands = fitCandidates(v);
     if (!cands.length) return;
     let idx = fit.el ? cands.indexOf(fit.el) + 1 : 0;
     restoreFit();
     if (idx >= cands.length) { fit.cycleAt = now() + 4000; return; } // 모두 실패: 잠시 뒤 처음부터
     const target = cands[idx];
-    fit.el = target;
-    fit.prev = { value: target.style.getPropertyValue('width'), priority: target.style.getPropertyPriority('width') };
+    fit.el = target; fit.prev = {}; fit.phase = 1;
     fit.appliedAt = now();
-    target.style.setProperty('width', 'calc(100vw - ' + panelWidth() + 'px)', 'important');
+    fitSet(target, 'width', 'calc(100vw - ' + panelWidth() + 'px)');
   }
   window.addEventListener('resize', () => { if (fit.el) { restoreFit(); fit.cycleAt = 0; } });
   // 플레이어 요소만 전체화면이 되면 문서에 붙은 패널은 보이지 않으므로, 그때는 영상을 줄이지 않는다
@@ -970,19 +993,75 @@
   }
 
   // 플레이어 컨트롤 바의 켜기/끄기 버튼 (Language Reactor 식)
-  function mountControlButton() {
-    if (!adapter.controlAnchor) return;
+  // 플랫폼 아이콘과 비슷한 흰색 선 아이콘. 꺼짐 상태는 반투명 + 사선
+  const CTL_ICON = '<svg class="st-ctl-svg" viewBox="0 0 32 32" aria-hidden="true" focusable="false">'
+    + '<rect x="2.5" y="6.5" width="27" height="19" rx="3.5" fill="none" stroke="currentColor" stroke-width="2.2"/>'
+    + '<text x="16" y="20.6" text-anchor="middle" font-size="11.5" font-weight="800" font-family="-apple-system, \'Helvetica Neue\', Arial, sans-serif" fill="currentColor" stroke="none">ST</text>'
+    + '<line class="st-ctl-slash" x1="5" y1="28" x2="27" y2="4" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>';
+  // 버튼을 감싼 단일 자식 래퍼들을 타고 올라가, 가로로 늘어선 버튼 묶음의 직접 자식(래퍼)을 찾는다
+  function controlWrapperOf(btn) {
+    const up = (x) => x.parentElement || (x.getRootNode && x.getRootNode().host) || null; // shadow host 를 넘어 올라간다
+    let e = btn;
+    for (let i = 0; i < 8; i++) {
+      const p = up(e);
+      if (!p || p === document.body || p === document.documentElement) break;
+      if (p.children.length !== 1) break;
+      e = p;
+    }
+    return e;
+  }
+  function controlInsertPoint() {
     let anchor = null;
     try { anchor = adapter.controlAnchor(); } catch (e) { anchor = null; }
-    if (!anchor || !anchor.parentElement) return;
-    if (ui.ctlBtn && ui.ctlBtn.isConnected && ui.ctlBtn.nextElementSibling === anchor) return;
-    if (!ui.ctlBtn) {
-      ui.ctlBtn = el('button', { class: 'st-ctl st-ctl-' + adapter.name, title: 'SubTutor 끄기', 'aria-label': 'SubTutor 켜기/끄기' }, el('span', { class: 'st-ctl-badge' }, 'ST'));
-      ui.ctlBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); setEnabled(!isEnabled()); });
+    if (!anchor || !anchor.parentElement) return null;
+    const wrapper = controlWrapperOf(anchor);
+    if (adapter.controlPlace === 'groupStart' && wrapper.parentElement) {
+      const first = Array.from(wrapper.parentElement.children).find((c) => c !== ui.ctlMount);
+      return { before: first || wrapper, wrapper };
     }
-    anchor.parentElement.insertBefore(ui.ctlBtn, anchor);
+    if (!wrapper.parentElement) return null;
+    return { before: wrapper, wrapper };
+  }
+  function mountControlButton() {
+    if (!adapter.controlAnchor) return;
+    const pt = controlInsertPoint();
+    if (!pt) return;
+    const parent = pt.before.parentElement || (pt.before.getRootNode && pt.before.getRootNode().host ? null : null);
+    if (!parent) return;
+    if (ui.ctlMount && ui.ctlMount.isConnected && ui.ctlMount.nextElementSibling === pt.before) return;
+    if (!ui.ctlBtn) {
+      ui.ctlBtn = el('button', { class: 'st-ctl st-ctl-' + adapter.name, title: 'SubTutor 끄기', 'aria-label': 'SubTutor 켜기/끄기', type: 'button' });
+      ui.ctlBtn.innerHTML = CTL_ICON;
+      ui.ctlWrap = el('div', { class: 'st-ctl-wrap' });
+    }
+    // 이웃 버튼이 래퍼(div)로 감싸져 있으면 같은 래퍼 클래스를 따라 해 간격·크기를 맞추고, 버튼이 바로 늘어선 묶음이면 버튼만 끼워 넣는다
+    const useWrap = pt.wrapper.tagName !== 'BUTTON';
+    if (useWrap) {
+      const cls = typeof pt.wrapper.className === 'string' ? pt.wrapper.className.trim() : '';
+      ui.ctlWrap.className = 'st-ctl-wrap' + (cls ? ' ' + cls : '');
+      if (ui.ctlBtn.parentElement !== ui.ctlWrap) ui.ctlWrap.append(ui.ctlBtn);
+      ui.ctlMount = ui.ctlWrap;
+    } else {
+      if (ui.ctlBtn.parentElement === ui.ctlWrap) ui.ctlWrap.removeChild(ui.ctlBtn);
+      ui.ctlMount = ui.ctlBtn;
+    }
+    parent.insertBefore(ui.ctlMount, pt.before);
     updateModeUI();
   }
+  // 프라임처럼 컨트롤을 자주 다시 그리거나 포인터 이벤트를 가로채는 플레이어에서도 토글이 되도록, 창 수준 캡처 단계에서 우리 버튼을 향한 첫 이벤트에 바로 반응한다
+  let ctlToggleAt = 0;
+  function onCtlPointer(e) {
+    if (!ui.ctlBtn) return;
+    const path = e.composedPath ? e.composedPath() : [];
+    if (!path.includes(ui.ctlBtn)) return;
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    if (e.type === 'pointerdown' || e.type === 'mousedown' || e.type === 'click') {
+      if (now() - ctlToggleAt < 250) return; // 같은 클릭에서 오는 나머지 이벤트(pointerdown 뒤의 mousedown/click)
+      ctlToggleAt = now();
+      setEnabled(!isEnabled());
+    }
+  }
+  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((t) => window.addEventListener(t, onCtlPointer, true));
 
   function buildSettings() {
     const box = el('div', { class: 'st-settings st-hidden' });
@@ -1437,12 +1516,19 @@
   setInterval(() => tick(false), 40);
 
   // ───────────── 단축키 ─────────────
-  const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: () => { const i = anchorIndex(); if (i >= 0) toggleSave(i); }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
+  // 화면에 보이는 자막(없으면 방금 지나간 자막)을 별표 저장
+  function saveShownCue() {
+    const shown = displayIndex();
+    const i = shown >= 0 ? shown : anchorIndex();
+    if (i >= 0) toggleSave(i); else toast('저장할 자막이 없습니다');
+  }
+  const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: saveShownCue, Enter: saveShownCue, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
   function shouldHandleKey(e) {
     if (!state.active || !isEnabled()) return false;
     if (!state.cues.length && !/^(Backquote|BracketLeft|BracketRight|Backslash)$/.test(e.code)) return false;
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
     if (isEditable(e.target) || (e.target && e.target.closest && e.target.closest('#st-panel input, #st-panel select, #st-panel textarea'))) return false;
+    if (e.code === 'Enter') return e.target === document.body || e.target === document.documentElement || (e.target && e.target.tagName === 'VIDEO') ? displayIndex() >= 0 : false; // Enter 는 자막이 보일 때, 버튼 등에 포커스가 없을 때만
     return !!KEY_ACTIONS[e.code];
   }
   window.addEventListener('keydown', (e) => {

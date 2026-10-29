@@ -74,7 +74,9 @@ globalThis.SubTutorAdapters = (() => {
     if (vids.length === 1) return vids[0];
     return vids.map((v) => ({ v, score: scoreVideo(v) })).sort((a, b) => b.score - a.score)[0].v;
   }
-  const findButton = (root, re) => qsaDeep('button, [role="button"]', root || document).find((b) => re.test((b.getAttribute('aria-label') || b.getAttribute('title') || '').trim()));
+  // 우리 패널/오버레이 안의 버튼(예: 'AP: 자막이 끝나면…')은 플랫폼 버튼으로 오인하지 않는다
+  const isOurs = (e) => !!(e.closest && e.closest('#st-panel, #st-overlay, #st-toggle, .st-ctl-wrap, .st-ctl'));
+  const findButton = (root, re) => qsaDeep('button, [role="button"]', root || document).find((b) => !isOurs(b) && re.test((b.getAttribute('aria-label') || b.getAttribute('title') || '').trim()));
 
   const videoTime = function () { const v = this.video(); return v ? v.currentTime * 1000 : NaN; };
   const videoPaused = function () { const v = this.video(); return v ? v.paused : true; };
@@ -101,7 +103,9 @@ globalThis.SubTutorAdapters = (() => {
     layoutCss: 'html.st-panel-open:not(.st-fs-hidden) .watch-video { width: calc(100vw - var(--st-panel-w, 400px)) !important; }',
     fitVideo: true, // 패널이 열리면 영상(플레이어 영역)을 패널 왼쪽까지로 줄인다
     nativeCueSelector: '.player-timedtext-text-container',
-    controlAnchor() { return document.querySelector('[data-uia="control-audio-subtitle"]'); },
+    // ST 버튼은 오른쪽 묶음의 맨 왼쪽(다음 회차 버튼 왼쪽)에 둔다. 영화처럼 다음 회차가 없으면 그다음 버튼 앞
+    controlAnchor() { return ['control-next', 'control-episodes', 'control-audio-subtitle', 'control-speed', 'control-fullscreen-enter'].map((k) => document.querySelector('[data-uia="' + k + '"]')).find(Boolean) || null; },
+    controlPlace: 'before',
     domTitle() {
       const el = document.querySelector('[data-uia="video-title"]');
       if (!el) return null;
@@ -174,6 +178,7 @@ globalThis.SubTutorAdapters = (() => {
       const root = this.playerRoot();
       return findButton(root, /자막|subtitle|audio|오디오|字幕|音声/i) || findButton(root, /전체 ?화면|full ?screen|全画面/i);
     },
+    controlPlace: 'groupStart',
     domTitle() {
       const t = document.querySelector('.atvwebplayersdk-title-text');
       const s = document.querySelector('.atvwebplayersdk-subtitle-text');
@@ -203,10 +208,12 @@ globalThis.SubTutorAdapters = (() => {
     deep: true, // 자막·컨트롤이 disney-web-player 요소의 열린 shadow DOM 안에 있다
     nativeHideCss: '.dss-subtitle-renderer-wrapper, .dss-subtitle-renderer-cue-window, .hive-subtitle-renderer-wrapper, .hive-subtitle-renderer-cue-positioning-box, .hive-subtitle-renderer-cue-window, timed-text-override-region, .timed-text-override-region, #timed-text-override-region, .TimedTextOverlay { visibility: hidden !important; opacity: 0 !important; }',
     controlBars: ['.controls__footer', '[data-testid="player-controls"]', '.btm-media-overlays-container .controls', '[class*="controls-footer"]', '[class*="progress-bar"]', '[class*="scrubber"]'],
-    layoutCss: 'html.st-panel-open:not(.st-fs-hidden) disney-web-player, html.st-panel-open:not(.st-fs-hidden) disney-web-player-ui, html.st-panel-open:not(.st-fs-hidden) main-app-player { width: calc(100vw - var(--st-panel-w, 400px)) !important; }',
+    layoutCss: 'html.st-panel-open:not(.st-fs-hidden) .video_view--theater { width: calc(100vw - var(--st-panel-w, 400px)) !important; left: 0 !important; right: auto !important; }',
     fitVideo: true,
     nativeCueSelector: '.hive-subtitle-renderer-cue-window, .dss-subtitle-renderer-cue, .TimedTextOverlay',
-    controlAnchor() { return findButton(document, /subtitle|자막|audio|오디오|字幕/i) || null; },
+    // 오른쪽 묶음(experience-controls: 라이브 가이드·음소거·설정·전체 화면)의 맨 왼쪽. 설정 메뉴 안의 '자막' 버튼은 앵커로 쓰지 않는다
+    controlAnchor() { return findButton(document, /full ?screen|전체 ?화면/i) || findButton(document, /^(settings|설정)$/i) || findButton(document, /mute|음소거/i) || null; },
+    controlPlace: 'groupStart',
     domTitle() {
       const t = document.querySelector('.title-field, [data-testid="title"]');
       const s = document.querySelector('.subtitle-field, [data-testid="subtitle"]');
@@ -245,10 +252,19 @@ globalThis.SubTutorAdapters = (() => {
       return r.height > 0 && r.top > rect.top ? Math.max(0, Math.round(rect.bottom - r.top)) + 8 : 0;
     },
     // 패널은 페이지를 밀지 않고 오른쪽 추천 영상 영역 위에 겹친다. 마스트헤드(검색창)는 가리지 않고, 전체화면에서는 맨 위부터
-    layoutCss: 'html.st-panel-open:not(:fullscreen) #st-panel { top: 56px; }',
+    layoutCss: 'html:not(:fullscreen) #st-panel.st-pf-youtube { top: 56px; }',
     fitVideo: false,
+    // 오른쪽 추천 영상 칸(#secondary)을 통째로 덮는 너비. 극장 모드처럼 칸이 아래로 내려가면 기본 400
+    panelWidth() {
+      const sec = document.querySelector('ytd-watch-flexy #secondary, #secondary');
+      if (!sec) return 400;
+      const r = sec.getBoundingClientRect();
+      if (r.width < 100 || r.left < window.innerWidth * 0.5) return 400;
+      return Math.ceil(window.innerWidth - r.left) + 2;
+    },
     nativeCueSelector: '.ytp-caption-segment',
-    controlAnchor() { return document.querySelector('#movie_player .ytp-subtitles-button') || document.querySelector('#movie_player .ytp-settings-button'); },
+    controlAnchor() { const rc = document.querySelector('#movie_player .ytp-right-controls'); return (rc && rc.firstElementChild) || document.querySelector('#movie_player .ytp-subtitles-button'); },
+    controlPlace: 'before',
     domTitle() {
       const h = document.querySelector('h1.ytd-watch-metadata yt-formatted-string, #title h1 yt-formatted-string, h1.title yt-formatted-string');
       const ch = document.querySelector('#owner ytd-channel-name a, ytd-video-owner-renderer ytd-channel-name a');

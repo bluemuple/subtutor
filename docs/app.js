@@ -10,12 +10,14 @@
 
   const state = {
     items: [], extOk: false, view: 'list',
-    filterTitle: '', search: '', sort: 'recent',
+    filterTitle: '', search: '', sort: loadPref('subtutor.sort', 'group-time'), filterTag: '',
+    tagNames: [],                         // 저장된 태그 이름 (확장 프로그램 설정 tagNames ∪ 항목들의 태그)
+    trimOpen: null,                       // 구간 조정 슬라이더가 열린 항목
     clip: { itemId: null, state: null, message: '', loop: false }, clipLocal: false,
     repeat: false,                        // 🔁 반복: ▶ 로 재생한 대사를 계속 반복
     hide: loadHide(), reveal: new Map(),  // 자막/뜻 감추기: 전체 기본값 + 항목별 예외
     recordings: new Map(), recording: null, playingRec: null,
-    quiz: null, quizPrefs: { title: '', order: 'oldest', autoplay: true },
+    quiz: null, quizPrefs: { title: '', tag: '', order: 'oldest', autoplay: true },
   };
   const clipWaiters = [];
   let renderPending = false;
@@ -53,12 +55,14 @@
   const learning = () => state.items.filter((i) => (i.box || 'learning') === 'learning');
   const known = () => state.items.filter((i) => i.box === 'known');
   const fmtDate = (ms) => { const d = new Date(ms); return d.getFullYear() + '.' + String(d.getMonth() + 1).padStart(2, '0') + '.' + String(d.getDate()).padStart(2, '0'); };
+  function loadPref(key, def) { try { const v = localStorage.getItem(key); return v === null ? def : v; } catch (e) { return def; } }
+  function savePref(key, v) { try { localStorage.setItem(key, v); } catch (e) { /* ignore */ } }
   function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
   function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
 
   // ───────── 데이터 ─────────
   // 화면에 영향을 주는 필드만으로 서명을 만들어, 실제로 바뀐 경우에만 다시 그린다 (입력 중인 내용 보호)
-  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.comment, i.translation, i.reviews, i.forgot, i.savedAt, i.audio ? 1 : 0].join('\u0001')).sort().join('\u0002');
+  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.comment, i.translation, i.reviews, i.forgot, i.savedAt, i.audio ? 1 : 0, (i.tags || []).join(','), i.trim ? i.trim.startMs + '-' + i.trim.endMs : ''].join('\u0001')).sort().join('\u0002');
   async function loadItems(force) {
     if (!state.extOk) { render(); return; }
     let changed = !!force;
@@ -67,6 +71,7 @@
       const items = (r && r.items) || [];
       if (itemsSignature(items) !== itemsSignature(state.items)) changed = true;
       state.items = items;
+      mergeTagNames(items.flatMap((i) => i.tags || []));
     } catch (e) { toast(e.message); }
     updateCounts();
     if (changed) render();
@@ -87,6 +92,7 @@
     render();
     try { await B.request('items.remove', { id }); } catch (e) { toast(e.message); }
     try { await R.clearItem(id); state.recordings.delete(id); } catch (e) { /* ignore */ }
+    audioCache.delete(id); bufferCache.delete(id);
   }
 
   // ───────── 플레이어 원격 재생 ─────────
@@ -139,7 +145,72 @@
     return null;
   }
   let localAudio = null;
-  function stopLocalAudio() { if (localAudio) { const a = localAudio; localAudio = null; try { a.pause(); } catch (e) { /* ignore */ } } }
+  function stopLocalAudio() { if (localAudio) { const a = localAudio; localAudio = null; try { a.stop(); } catch (e) { /* ignore */ } } }
+  // ───────── 재생 구간(조정) ─────────
+  const TRIM_WIN_MS = 2000; // 조정 슬라이더가 원래 구간 앞뒤로 더 보여 주는 폭 (플레이어 재생일 때)
+  function effRange(it) {
+    const t = it.trim;
+    if (t && Number.isFinite(t.startMs) && Number.isFinite(t.endMs) && t.endMs > t.startMs) return { startMs: t.startMs, endMs: t.endMs, trimmed: true };
+    return { startMs: it.startMs, endMs: it.endMs, trimmed: false };
+  }
+  const clipLeadMs = (it) => (it.audio && Number.isFinite(it.audio.leadMs)) ? it.audio.leadMs : 250; // 보관 클립은 자막 시작보다 이만큼 앞에서 시작
+  const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));
+  function fmtMs(ms) {
+    ms = Math.max(0, Math.round(ms));
+    const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000), sec = Math.floor((ms % 60000) / 1000), frac = String(ms % 1000).padStart(3, '0');
+    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(sec).padStart(2, '0') + '.' + frac;
+  }
+  const timeText = (it) => { const r = effRange(it); return S.formatTime(r.startMs) + ' – ' + S.formatTime(r.endMs) + (r.trimmed ? ' (조정됨)' : ''); };
+  // WebAudio 로 보관 클립의 [startMs, endMs](영상 시간)를 샘플 단위로 정확히 재생. 반복은 재생 중에도 켜고 끌 수 있다
+  let audioCtx = null;
+  const bufferCache = new Map(); // itemId -> AudioBuffer | null
+  function getCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    return audioCtx;
+  }
+  async function localAudioBuffer(itemId) {
+    if (bufferCache.has(itemId)) return bufferCache.get(itemId);
+    const blob = await localAudioBlob(itemId);
+    let buf = null;
+    if (blob) { try { buf = await getCtx().decodeAudioData(await blob.arrayBuffer()); } catch (e) { buf = null; } }
+    bufferCache.set(itemId, buf);
+    return buf;
+  }
+  function playLocal(it, buf, range, loop) {
+    return new Promise((resolve) => {
+      const ctx = getCtx();
+      const clipStart = it.startMs - clipLeadMs(it);
+      const from = clampNum((range.startMs - clipStart) / 1000, 0, Math.max(0, buf.duration - 0.05));
+      const to = clampNum((range.endMs - clipStart) / 1000, from + 0.05, buf.duration);
+      const len = to - from;
+      let src = null, startedAt = 0, startPos = from, timer = null, finished = false, looping = !!loop;
+      const finish = () => { if (finished) return; finished = true; clearTimeout(timer); if (localAudio === handle) localAudio = null; resolve(); };
+      const position = () => from + ((startPos - from) + (ctx.currentTime - startedAt)) % len;
+      const begin = (pos) => {
+        src = ctx.createBufferSource();
+        src.buffer = buf; src.loop = true; src.loopStart = from; src.loopEnd = to;
+        src.connect(ctx.destination);
+        src.onended = finish;
+        startPos = pos; startedAt = ctx.currentTime;
+        src.start(0, pos);
+        clearTimeout(timer);
+        if (!looping) timer = setTimeout(() => { try { src.stop(); } catch (e) { /* ignore */ } finish(); }, Math.max(0, (to - pos) * 1000));
+      };
+      const handle = {
+        stop() { if (finished) return; try { if (src) { src.onended = null; src.stop(); } } catch (e) { /* ignore */ } finish(); },
+        set loop(v) {
+          v = !!v;
+          if (v === looping || finished) return;
+          looping = v;
+          clearTimeout(timer);
+          if (!v) timer = setTimeout(() => { try { src.stop(); } catch (e) { /* ignore */ } finish(); }, Math.max(0, (to - position()) * 1000));
+        },
+      };
+      localAudio = handle;
+      begin(from);
+    });
+  }
   // ▶/◼: 같은 대사를 다시 누르면 정지, 다른 대사를 누르면 이전 것을 멈추고 재생. opts.loop 가 없으면 🔁 반복 토글을 따른다.
   async function playItem(itemId, opts) {
     opts = opts || {};
@@ -157,20 +228,11 @@
     const loop = opts.loop === undefined ? state.repeat : !!opts.loop;
     const it = state.items.find((i) => i.id === itemId);
     if (it && it.audio) {
-      const blob = await localAudioBlob(itemId);
-      if (blob) {
+      const buf = await localAudioBuffer(itemId);
+      if (buf) {
         state.clipLocal = true;
         setClip(itemId, 'playing', '', loop);
-        await new Promise((resolve) => {
-          const url = URL.createObjectURL(blob);
-          const a = new Audio(url);
-          a.loop = loop;
-          localAudio = a;
-          const done = () => { URL.revokeObjectURL(url); if (localAudio === a) localAudio = null; resolve(); };
-          a.onended = done; a.onerror = done;
-          a.onpause = () => { if (!a.ended && localAudio !== a) done(); };
-          a.play().catch(done);
-        });
+        await playLocal(it, buf, effRange(it), loop);
         if (state.clip.itemId === itemId && state.clip.state === 'playing') setClip(itemId, 'ended');
         return;
       }
@@ -209,6 +271,211 @@
     setClip(p.itemId, p.state, p.message);
     if (p.state === 'error') toast('재생 실패: ' + (p.message || ''));
   });
+
+  // ───────── 태그 ─────────
+  // 태그 이름은 확장 프로그램 설정(tagNames)에 저장되어 다른 자막에서도 고를 수 있고, 각 자막의 tags 에 지정된다
+  const normTag = (t) => String(t || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+  function mergeTagNames(names) {
+    let changed = false;
+    for (const raw of names) { const t = normTag(raw); if (t && !state.tagNames.includes(t)) { state.tagNames.push(t); changed = true; } }
+    if (changed) state.tagNames.sort((a, b) => a.localeCompare(b, 'ko'));
+    return changed;
+  }
+  async function loadTagNames() {
+    try { const r = await B.request('settings.get'); mergeTagNames((r && r.settings && r.settings.tagNames) || []); } catch (e) { /* ignore */ }
+  }
+  function saveTagNames() { B.request('settings.set', { patch: { tagNames: state.tagNames.slice() } }).catch(() => {}); }
+  const tagCount = (name) => state.items.filter((i) => (i.tags || []).includes(name)).length;
+  async function addTag(it, raw) {
+    const t = normTag(raw);
+    if (!t) return;
+    const tags = (it.tags || []).slice();
+    if (!tags.includes(t)) { tags.push(t); await updateItem(it.id, { tags }); }
+    if (mergeTagNames([t])) { saveTagNames(); refreshTagList(); }
+    renderTagBars(); renderTagRows();
+  }
+  async function removeTag(it, t) {
+    const tags = (it.tags || []).filter((x) => x !== t);
+    await updateItem(it.id, { tags });
+    renderTagBars(); renderTagRows();
+  }
+  async function deleteTagName(t) {
+    if (!confirm('태그 "' + t + '" 을(를) 지울까요? 이 태그가 붙은 자막 ' + tagCount(t) + '개에서도 빠집니다.')) return;
+    for (const it of state.items) if ((it.tags || []).includes(t)) await updateItem(it.id, { tags: it.tags.filter((x) => x !== t) });
+    state.tagNames = state.tagNames.filter((x) => x !== t);
+    saveTagNames();
+    if (state.filterTag === t) state.filterTag = '';
+    render();
+  }
+  function refreshTagList() {
+    let dl = $('#st-taglist');
+    if (!dl) { dl = el('datalist', { id: 'st-taglist' }); document.body.append(dl); }
+    dl.textContent = '';
+    state.tagNames.forEach((t) => dl.append(el('option', { value: t })));
+  }
+  function buildTagBar(onFilter) {
+    const bar = el('div', { class: 'tagbar', 'data-tagbar': '1' });
+    bar.__onFilter = onFilter;
+    fillTagBar(bar);
+    return bar;
+  }
+  function fillTagBar(bar) {
+    bar.textContent = '';
+    if (!state.tagNames.length) { bar.classList.add('hidden'); return; }
+    bar.classList.remove('hidden');
+    bar.append(el('span', { class: 'tagbar-label' }, '태그'));
+    bar.append(el('button', { class: 'tag' + (state.filterTag ? '' : ' on'), onclick: () => { state.filterTag = ''; renderTagBars(); bar.__onFilter && bar.__onFilter(); } }, '전체'));
+    for (const t of state.tagNames) {
+      const chip = el('button', { class: 'tag' + (state.filterTag === t ? ' on' : ''), title: '이 태그가 붙은 자막만 보기', onclick: () => { state.filterTag = state.filterTag === t ? '' : t; renderTagBars(); bar.__onFilter && bar.__onFilter(); } }, [t, el('span', { class: 'n' }, String(tagCount(t)))]);
+      chip.append(el('span', { class: 'x', title: '태그 삭제', onclick: (e) => { e.stopPropagation(); deleteTagName(t); } }, '×'));
+      bar.append(chip);
+    }
+  }
+  function renderTagBars() { document.querySelectorAll('[data-tagbar]').forEach(fillTagBar); }
+  function buildTagRow(it) {
+    const row = el('div', { class: 'tags-row', 'data-tag-item': it.id });
+    fillTagRow(row);
+    return row;
+  }
+  function fillTagRow(row) {
+    const it = state.items.find((i) => i.id === row.dataset.tagItem);
+    if (!it) return;
+    row.textContent = '';
+    (it.tags || []).forEach((t) => {
+      const chip = el('button', { class: 'tag small', title: '이 태그가 붙은 자막만 보기', onclick: () => { state.filterTag = t; renderTagBars(); const bar = document.querySelector('[data-tagbar]'); if (bar && bar.__onFilter) bar.__onFilter(); } }, t);
+      chip.append(el('span', { class: 'x', title: '이 자막에서 태그 빼기', onclick: (e) => { e.stopPropagation(); removeTag(it, t); } }, '×'));
+      row.append(chip);
+    });
+    const add = el('button', { class: 'tag add tag-add', title: '태그 붙이기 (저장된 태그를 고르거나 새로 입력)' }, '+ 태그');
+    add.addEventListener('click', () => {
+      refreshTagList();
+      const input = el('input', { class: 'tag-input', list: 'st-taglist', placeholder: '태그 이름', maxlength: 24 });
+      const finish = async (commit) => { if (input.__done) return; input.__done = true; const v = input.value; input.replaceWith(add); if (commit) await addTag(it, v); };
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); finish(true); } else if (e.key === 'Escape') finish(false); });
+      input.addEventListener('blur', () => setTimeout(() => finish(!!input.value.trim()), 120));
+      add.replaceWith(input);
+      input.focus();
+    });
+    row.append(add);
+  }
+  function renderTagRows() { document.querySelectorAll('[data-tag-item]').forEach(fillTagRow); }
+
+  // ───────── 오디오 구간 조정 슬라이더 ─────────
+  function toggleTrim(it) { state.trimOpen = state.trimOpen === it.id ? null : it.id; renderTrimBoxes(); }
+  function refreshMeta(it) {
+    document.querySelectorAll('[data-id="' + it.id + '"] .meta .span').forEach((e) => { e.textContent = timeText(it); });
+    document.querySelectorAll('.trim-toggle[data-id="' + it.id + '"]').forEach((b) => b.classList.toggle('trimmed', effRange(it).trimmed));
+  }
+  function buildTrimBox(it) { return el('div', { class: 'trim-box hidden', 'data-trim-item': it.id }); }
+  function renderTrimBoxes() {
+    document.querySelectorAll('[data-trim-item]').forEach((box) => {
+      const it = state.items.find((i) => i.id === box.dataset.trimItem);
+      if (!it) return;
+      const open = state.trimOpen === it.id;
+      box.classList.toggle('hidden', !open);
+      if (open && !box.__built) { box.__built = true; fillTrimBox(box, it); } else if (open && box.__update) box.__update();
+    });
+    document.querySelectorAll('.trim-toggle').forEach((b) => b.classList.toggle('on', b.dataset.id === state.trimOpen));
+  }
+  function fillTrimBox(box, it) {
+    const hasLocal = !!it.audio;
+    const lead = clipLeadMs(it);
+    let win = { s: Math.max(0, it.startMs - TRIM_WIN_MS), e: it.endMs + TRIM_WIN_MS };
+    let buf = null;
+    const cur = () => effRange(it);
+    const label = el('span', { class: 'trim-label' });
+    const track = el('div', { class: 'trim-track' });
+    const canvas = el('canvas', { class: 'trim-wave' });
+    const orig = el('div', { class: 'trim-orig', title: '원래 자막 구간' });
+    const band = el('div', { class: 'trim-band' });
+    const hs = el('div', { class: 'trim-handle start', tabindex: 0, title: '시작 — 드래그, ←→ 10ms, Shift+←→ 100ms' }, el('span', { class: 'trim-tip' }));
+    const he = el('div', { class: 'trim-handle end', tabindex: 0, title: '끝 — 드래그, ←→ 10ms, Shift+←→ 100ms' }, el('span', { class: 'trim-tip' }));
+    track.append(canvas, orig, band, hs, he);
+    const width = () => Math.max(1, track.clientWidth);
+    const xOf = (ms) => ((ms - win.s) / (win.e - win.s)) * width();
+    const msOf = (x) => win.s + (x / width()) * (win.e - win.s);
+    const layout = () => {
+      const r = cur();
+      const xs = clampNum(xOf(r.startMs), 0, width()), xe = clampNum(xOf(r.endMs), 0, width());
+      band.style.left = xs + 'px'; band.style.width = Math.max(0, xe - xs) + 'px';
+      hs.style.left = xs + 'px'; he.style.left = xe + 'px';
+      hs.firstChild.textContent = fmtMs(r.startMs); he.firstChild.textContent = fmtMs(r.endMs);
+      const os = clampNum(xOf(it.startMs), 0, width()), oe = clampNum(xOf(it.endMs), 0, width());
+      orig.style.left = os + 'px'; orig.style.width = Math.max(0, oe - os) + 'px';
+      label.textContent = fmtMs(r.startMs) + ' – ' + fmtMs(r.endMs) + ' · ' + ((r.endMs - r.startMs) / 1000).toFixed(2) + '초' + (r.trimmed ? ' · 조정됨' : '');
+    };
+    let saveTimer = null;
+    const setRange = (sMs, eMs) => {
+      sMs = Math.round(clampNum(sMs, win.s, win.e)); eMs = Math.round(clampNum(eMs, win.s, win.e));
+      if (eMs - sMs < 100) { if (sMs !== cur().startMs) sMs = eMs - 100; else eMs = sMs + 100; }
+      it.trim = (sMs === it.startMs && eMs === it.endMs) ? null : { startMs: sMs, endMs: eMs };
+      layout(); refreshMeta(it);
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => updateItem(it.id, { trim: it.trim }), 400);
+    };
+    const drag = (handle, which) => {
+      handle.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        try { handle.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        handle.classList.add('dragging');
+        const move = (ev) => { const x = ev.clientX - track.getBoundingClientRect().left; const r = cur(); if (which === 'start') setRange(msOf(x), r.endMs); else setRange(r.startMs, msOf(x)); };
+        const up = () => { handle.classList.remove('dragging'); handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up); };
+        handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+      });
+      handle.addEventListener('keydown', (e) => {
+        const dir = e.key === 'ArrowLeft' ? -1 : (e.key === 'ArrowRight' ? 1 : 0);
+        if (!dir) return;
+        e.preventDefault();
+        const step = dir * (e.shiftKey ? 100 : 10);
+        const r = cur();
+        if (which === 'start') setRange(r.startMs + step, r.endMs); else setRange(r.startMs, r.endMs + step);
+      });
+    };
+    drag(hs, 'start'); drag(he, 'end');
+    const nudge = (which, d) => el('button', { class: 'btn mini nudge', 'data-which': which, 'data-d': d, title: (which === 'start' ? '시작' : '끝') + ' ' + (d > 0 ? '+' : '') + d + 'ms', onclick: () => { const r = cur(); if (which === 'start') setRange(r.startMs + d, r.endMs); else setRange(r.startMs, r.endMs + d); } }, (d > 0 ? '+' : '') + d);
+    const ctl = el('div', { class: 'trim-ctl' }, [
+      el('span', { class: 'trim-k' }, '시작'), nudge('start', -100), nudge('start', -10), nudge('start', 10), nudge('start', 100),
+      el('span', { class: 'trim-k' }, '끝'), nudge('end', -100), nudge('end', -10), nudge('end', 10), nudge('end', 100),
+      el('button', { class: 'btn trim-preview', onclick: () => playItem(it.id, { loop: false }) }, '▶ 들어보기'),
+      el('button', { class: 'btn trim-reset', onclick: () => setRange(it.startMs, it.endMs) }, '원래대로'),
+      el('button', { class: 'btn', onclick: () => toggleTrim(it) }, '닫기'),
+    ]);
+    box.append(
+      el('div', { class: 'trim-head' }, [el('b', null, '오디오 구간 조정'), label]),
+      track, ctl,
+      el('div', { class: 'trim-hint' }, hasLocal ? '보관된 오디오 안에서 자릅니다(파형 참고). 손잡이를 끌거나 손잡이를 고른 뒤 ←→(10ms)·Shift+←→(100ms), 또는 ±ms 버튼으로 맞추세요. 바뀐 구간은 바로 저장됩니다.' : '플레이어에서 재생할 구간을 조정합니다(원래 구간 앞뒤 2초까지). 손잡이를 끌거나 ←→(10ms)·Shift+←→(100ms), ±ms 버튼으로 맞추세요. 바뀐 구간은 바로 저장됩니다.'),
+    );
+    const draw = () => {
+      const w = width(), h = track.clientHeight;
+      if (!buf || !w || !h) return;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+      const g = canvas.getContext('2d');
+      g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+      const data = buf.getChannelData(0), clipStart = it.startMs - lead, sr = buf.sampleRate;
+      g.fillStyle = 'rgba(167,139,250,.6)';
+      for (let x = 0; x < w; x++) {
+        const i0 = Math.max(0, Math.floor(((msOf(x) - clipStart) / 1000) * sr)), i1 = Math.min(data.length, Math.ceil(((msOf(x + 1) - clipStart) / 1000) * sr));
+        if (i1 <= i0) continue;
+        let peak = 0;
+        for (let i = i0; i < i1; i++) { const v = Math.abs(data[i]); if (v > peak) peak = v; }
+        const bh = Math.max(1, peak * (h - 6));
+        g.fillRect(x, (h - bh) / 2, 1, bh);
+      }
+    };
+    box.__update = () => { layout(); draw(); };
+    if (hasLocal) {
+      localAudioBuffer(it.id).then((b) => {
+        buf = b;
+        if (!b) return;
+        const clipStart = it.startMs - lead;
+        win = { s: clipStart, e: clipStart + b.duration * 1000 }; // 보관 클립 범위 안에서만
+        layout(); draw();
+      });
+    }
+    requestAnimationFrame(() => { layout(); draw(); });
+    if (typeof ResizeObserver === 'function') new ResizeObserver(() => { layout(); draw(); }).observe(track);
+  }
 
   // ───────── 녹음 ─────────
   async function getRecs(itemId) {
@@ -349,6 +616,7 @@
     }
     renderClipStates();
     syncVeils(); // 목록이 문서에 붙은 뒤에 감추기 상태를 입힌다
+    renderTrimBoxes();
   }
   function renderExtStatus() {
     const pill = $('#ext-status');
@@ -376,27 +644,42 @@
     const renderBody = () => {
       body.textContent = '';
       const q = S.normalizeForCompare(state.search);
-      const filtered = items.filter((i) => (!state.filterTitle || i.title === state.filterTitle) && (!q || S.normalizeForCompare(i.text + ' ' + (i.comment || '')).includes(q) || (i.translation || '').includes(state.search.trim())));
-      countEl.textContent = filtered.length + '개';
+      const filtered = items.filter((i) => (!state.filterTitle || i.title === state.filterTitle) && (!state.filterTag || (i.tags || []).includes(state.filterTag)) && (!q || S.normalizeForCompare(i.text + ' ' + (i.comment || '')).includes(q) || (i.translation || '').includes(state.search.trim())));
+      countEl.textContent = filtered.length + '개' + (state.filterTag ? ' · 태그 "' + state.filterTag + '"' : '');
       if (!filtered.length) {
-        body.append(el('div', { class: 'empty' }, items.length ? '검색 결과가 없습니다.' : (kind === 'learning'
+        body.append(el('div', { class: 'empty' }, items.length ? (state.filterTag ? '이 태그가 붙은 자막이 없습니다.' : '검색 결과가 없습니다.') : (kind === 'learning'
           ? [el('b', null, '아직 저장한 자막이 없습니다.'), el('br'), '넷플릭스에서 영상을 재생하고 자막 옆의 ', el('b', null, '☆'), ' 를 누르거나 ', el('kbd', null, 'E'), ' 키를 누르면 여기에 모입니다.']
           : [el('b', null, '아직 "알고 있어"로 옮긴 표현이 없습니다.'), el('br'), '퀴즈에서 ', el('kbd', null, 'C'), ' 를 누르면 이 상자로 이동합니다.'])));
+        return;
+      }
+      const sort = state.sort;
+      const bySaved = (dir) => (a, b) => dir * ((a.savedAt || 0) - (b.savedAt || 0)) || (a.startMs - b.startMs);
+      if (sort === 'flat-new-top' || sort === 'flat-new-bottom') {
+        // 작품 구분 없이 저장 시각순 (각 항목에 작품 이름을 표시)
+        const flat = filtered.slice().sort(bySaved(sort === 'flat-new-top' ? -1 : 1));
+        const gEl = el('div', { class: 'group' });
+        flat.forEach((it) => gEl.append(itemEl(it, kind, { showWork: true })));
+        body.append(gEl);
+        syncVeils();
         return;
       }
       const groups = new Map();
       for (const it of filtered) {
         const key = it.title + '\u0000' + (it.episode || '');
-        if (!groups.has(key)) groups.set(key, { title: it.title, episode: it.episode || '', items: [], latest: 0 });
+        if (!groups.has(key)) groups.set(key, { title: it.title, episode: it.episode || '', items: [], latest: 0, earliest: Infinity });
         const g = groups.get(key);
         g.items.push(it);
         g.latest = Math.max(g.latest, it.savedAt || 0);
+        g.earliest = Math.min(g.earliest, it.savedAt || 0);
       }
       const list = Array.from(groups.values());
-      if (state.sort === 'recent') list.sort((a, b) => b.latest - a.latest);
-      else list.sort((a, b) => a.title.localeCompare(b.title, 'ko') || a.episode.localeCompare(b.episode, 'ko', { numeric: true }));
+      if (sort === 'title') list.sort((a, b) => a.title.localeCompare(b.title, 'ko') || a.episode.localeCompare(b.episode, 'ko', { numeric: true }));
+      else if (sort === 'group-new-bottom') list.sort((a, b) => a.latest - b.latest); // 최신 작품이 아래
+      else list.sort((a, b) => b.latest - a.latest); // 최신 작품이 위
       for (const g of list) {
-        g.items.sort((a, b) => a.startMs - b.startMs);
+        if (sort === 'group-new-top') g.items.sort(bySaved(-1));
+        else if (sort === 'group-new-bottom') g.items.sort(bySaved(1));
+        else g.items.sort((a, b) => a.startMs - b.startMs);
         const gEl = el('div', { class: 'group' }, [
           el('h3', { class: 'group-title' }, [g.title, g.episode ? el('small', null, g.episode) : null, el('small', null, g.items.length + '개')]),
         ]);
@@ -407,14 +690,17 @@
     };
     const sel = el('select', { onchange: (e) => { state.filterTitle = e.target.value; renderBody(); } }, [el('option', { value: '' }, '모든 작품')].concat(titles.map((t) => el('option', { value: t, selected: t === state.filterTitle }, t))));
     const search = el('input', { type: 'search', placeholder: '자막 · 번역 · 코멘트 검색', value: state.search, oninput: debounce((e) => { state.search = e.target.value; renderBody(); }, 150) });
-    const sort = el('select', { onchange: (e) => { state.sort = e.target.value; renderBody(); } }, [el('option', { value: 'recent', selected: state.sort === 'recent' }, '최근 저장한 작품부터'), el('option', { value: 'title', selected: state.sort === 'title' }, '작품 이름순')]);
+    const SORTS = [['group-time', '작품별 · 영상 시간순'], ['group-new-top', '작품별 · 최신 저장이 위'], ['group-new-bottom', '작품별 · 최신 저장이 아래'], ['flat-new-top', '전체 · 최신 저장이 위'], ['flat-new-bottom', '전체 · 최신 저장이 아래'], ['title', '작품 이름순 · 영상 시간순']];
+    if (!SORTS.some(([v]) => v === state.sort)) state.sort = 'group-time';
+    const sort = el('select', { class: 'sort', title: '정렬', onchange: (e) => { state.sort = e.target.value; savePref('subtutor.sort', state.sort); renderBody(); } }, SORTS.map(([v, t]) => el('option', { value: v, selected: state.sort === v }, t)));
     const hideBtn = (f) => el('button', { class: 'btn hide-toggle', 'data-field': f, onclick: () => setGlobalHide(f, !state.hide[f]) }, '');
-    wrap.append(el('div', { class: 'toolbar' }, [sel, search, sort, hideBtn('text'), hideBtn('ko'), repeatButton(), countEl]), body);
+    wrap.append(buildTagBar(renderBody), el('div', { class: 'toolbar' }, [sel, search, sort, hideBtn('text'), hideBtn('ko'), repeatButton(), countEl]), body);
     renderBody();
     syncVeils();
     return wrap;
   }
-  function itemEl(it, kind) {
+  function itemEl(it, kind, opts) {
+    opts = opts || {};
     const node = el('div', { class: 'item' + (kind === 'known' ? ' known' : '') + (it.translation ? '' : ' no-ko'), 'data-clip-item': it.id, 'data-id': it.id });
     const play = el('button', { class: 'play', title: '플레이어에서 이 대사 재생', onclick: () => playItem(it.id) }, '▶');
     const body = el('div', { class: 'body' }, [
@@ -427,7 +713,8 @@
       el('div', { class: 'ko', text: it.translation || '' }),
       el('button', { class: 'veil veil-ko-btn', title: '뜻 보기', onclick: () => setItemVeil(it.id, 'ko', false) }, '뜻 감춤 · 눌러서 보기'),
       el('div', { class: 'meta' }, [
-        el('span', null, S.formatTime(it.startMs) + ' – ' + S.formatTime(it.endMs)),
+        opts.showWork ? el('span', { class: 'work' }, it.title + (it.episode ? ' · ' + it.episode : '')) : null,
+        el('span', { class: 'span' }, timeText(it)),
         el('span', null, PLATFORM_NAMES[it.platform] || it.platform),
         it.audio ? el('span', { class: 'has-audio', title: '확장 프로그램에 보관된 오디오로 바로 재생합니다' }, '🔊 오디오 보관') : null,
         el('span', null, '저장 ' + fmtDate(it.savedAt || Date.now())),
@@ -435,7 +722,9 @@
         el('button', { class: 'link', onclick: () => B.request('item.open', { itemId: it.id }, 60000).catch((e) => toast(e.message)) }, '플레이어에서 열기 ↗'),
         el('span', { class: 'state' }),
       ]),
+      buildTagRow(it),
       buildRecRow(it.id),
+      buildTrimBox(it),
     ]);
     const comment = el('textarea', { class: 'comment', placeholder: '코멘트 (뜻, 메모, 예문…)' });
     comment.value = it.comment || '';
@@ -447,6 +736,7 @@
       kind === 'learning'
         ? el('button', { class: 'btn good', onclick: () => { updateItem(it.id, { box: 'known', knownAt: Date.now() }); render(); toast('알고 있는 표현으로 이동했습니다'); } }, '✓ 알고 있어')
         : el('button', { class: 'btn', onclick: () => { updateItem(it.id, { box: 'learning' }); render(); toast('다시 학습 목록으로'); } }, '↩ 다시 학습'),
+      el('button', { class: 'btn trim-toggle' + (state.trimOpen === it.id ? ' on' : '') + (effRange(it).trimmed ? ' trimmed' : ''), 'data-id': it.id, title: '오디오 재생 구간을 ms 단위로 조정', onclick: () => toggleTrim(it) }, '⏱ 구간 조정'),
       el('button', { class: 'btn danger', onclick: () => { if (confirm('이 자막과 녹음을 삭제할까요?')) removeItem(it.id); } }, '삭제'),
     ]);
     node.append(play, body, el('div', { class: 'side' }, [comment, actions]));
@@ -472,6 +762,8 @@
       el('div', { class: 'row' }, [
         el('label', null, '작품 '),
         el('select', { onchange: (e) => { state.quizPrefs.title = e.target.value; } }, [el('option', { value: '' }, '모든 작품 (' + pool.length + ')')].concat(titles.map((t) => el('option', { value: t, selected: t === state.quizPrefs.title }, t + ' (' + pool.filter((i) => i.title === t).length + ')')))),
+        state.tagNames.length ? el('label', null, '태그 ') : null,
+        state.tagNames.length ? el('select', { onchange: (e) => { state.quizPrefs.tag = e.target.value; } }, [el('option', { value: '' }, '모든 태그')].concat(state.tagNames.map((t) => el('option', { value: t, selected: t === state.quizPrefs.tag }, t + ' (' + pool.filter((i) => (i.tags || []).includes(t)).length + ')')))) : null,
         el('label', null, '순서 '),
         el('select', { onchange: (e) => { state.quizPrefs.order = e.target.value; } }, [el('option', { value: 'oldest', selected: state.quizPrefs.order === 'oldest' }, '오래 안 본 것부터'), el('option', { value: 'random', selected: state.quizPrefs.order === 'random' }, '무작위'), el('option', { value: 'saved', selected: state.quizPrefs.order === 'saved' }, '저장한 순서')]),
         el('label', null, [el('input', { type: 'checkbox', checked: state.quizPrefs.autoplay, onchange: (e) => { state.quizPrefs.autoplay = e.target.checked; } }), ' 카드가 나오면 자동 재생']),
@@ -485,7 +777,7 @@
     return box;
   }
   function startQuiz() {
-    let pool = learning().filter((i) => !state.quizPrefs.title || i.title === state.quizPrefs.title);
+    let pool = learning().filter((i) => (!state.quizPrefs.title || i.title === state.quizPrefs.title) && (!state.quizPrefs.tag || (i.tags || []).includes(state.quizPrefs.tag)));
     if (state.quizPrefs.order === 'random') pool = shuffle(pool.slice());
     else if (state.quizPrefs.order === 'saved') pool = pool.slice().sort((a, b) => (a.savedAt || 0) - (b.savedAt || 0));
     else pool = pool.slice().sort((a, b) => (a.lastReviewedAt || 0) - (b.lastReviewedAt || 0) || (a.savedAt || 0) - (b.savedAt || 0));
@@ -680,7 +972,7 @@
     renderExtStatus();
     B.on('ready', () => { if (!state.extOk) { state.extOk = true; renderExtStatus(); loadItems(); } });
     B.on('items.changed', () => loadItems());
-    if (state.extOk) await loadItems(true); else render();
+    if (state.extOk) { await loadTagNames(); await loadItems(true); } else render();
   }
   init();
 })();

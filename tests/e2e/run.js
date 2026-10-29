@@ -245,8 +245,8 @@ function ensureFixtures() {
     });
     await step('컨트롤 바의 ST 버튼으로 켜고 끌 수 있다', async () => {
       await waitFor(() => page.$('.st-ctl'), 5000, 'control button');
-      const placed = await page.evaluate(() => document.querySelector('.st-ctl').nextElementSibling.getAttribute('data-uia'));
-      assert(placed === 'control-audio-subtitle', 'button placed before subtitle control: ' + placed);
+      const placed = await page.evaluate(() => { const w = document.querySelector('.st-ctl-wrap'); const nxt = w && w.nextElementSibling && w.nextElementSibling.querySelector('[data-uia]'); return { next: nxt && nxt.getAttribute('data-uia'), wrapClass: w && w.className, icon: !!document.querySelector('.st-ctl .st-ctl-svg text') }; });
+      assert(placed.next === 'control-next' && /\bmedium\b/.test(placed.wrapClass) && placed.icon, 'ST placed left of next-episode with the neighbour wrapper class: ' + JSON.stringify(placed));
       await page.click('.st-ctl');
       await waitFor(() => page.evaluate(() => document.getElementById('st-panel').classList.contains('st-closed') && document.getElementById('st-overlay').classList.contains('st-hidden') && getComputedStyle(document.querySelector('.player-timedtext')).visibility === 'visible' && document.querySelector('.st-ctl').classList.contains('off')), 4000, 'disabled state');
       const tBefore = await videoTime(page);
@@ -340,6 +340,39 @@ function ensureFixtures() {
       const st = await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'audioDir.status' }, {}));
       assert(st.state === 'granted' && st.name === 'e2e-docs', 'sw status ' + JSON.stringify(st));
       await opt.screenshot({ path: path.join(TMP, 'shots', 'options-folder.png') });
+    });
+
+    await step('넷플릭스(탭 캡처 경로): 합성 신호로 녹음 파이프라인이 끊김·되풀이 없이 이어진다', async () => {
+      // 실제 탭 캡처는 사용자 클릭(activeTab)이 필요하므로, 같은 파이프라인(MediaStreamTrackProcessor → 조각 배치 → 자르기 → MP3)에 300→900Hz 로 올라가는 합성 신호를 넣는다
+      await sw.evaluate(async () => { const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: Object.assign({}, settings, { audioMode: 'store', captureTest: 'sweep' }) }); });
+      await sleep(400);
+      await setTime(page, 14.3, true);
+      await sleep(300);
+      await page.keyboard.press('KeyE');
+      const b64 = await waitFor(() => sw.evaluate(async () => { const all = await chrome.storage.local.get(null); const k = Object.keys(all).find((x) => x.startsWith('audio:netflix:12345:14000')); return k ? all[k] : null; }), 30000, 'netflix stored audio').catch(async (e) => {
+        const toastText = await page.$eval('.st-toast', (t) => t.textContent).catch(() => '');
+        throw new Error(e.message + ' toast=' + toastText);
+      });
+      const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
+      const it = items.find((i) => i.id === 'netflix:12345:14000');
+      assert(it && it.audio && it.audio.stats, 'audio stats: ' + JSON.stringify(it && it.audio));
+      const st = it.audio.stats;
+      assert(st.source === 'sweep' && st.chunks > 150 && st.errors === 0 && st.gaps === 0 && !st.readError, 'capture stats ' + JSON.stringify(st));
+      assert(it.audio.ms > 2300 && it.audio.ms < 2800, 'clip length ' + it.audio.ms);
+      // MP3 → PCM 으로 풀어 구간별 주파수(영교차)와 세기를 본다: 되풀이·끊김이 있으면 올라가는 모양이 깨진다
+      const mp3 = path.join(TMP, 'e2e-netflix-sweep.mp3');
+      fs.writeFileSync(mp3, Buffer.from(b64, 'base64'));
+      const pcm = require('child_process').execFileSync('ffmpeg', ['-v', 'error', '-i', mp3, '-f', 's16le', '-ac', '1', '-ar', '32000', '-'], { maxBuffer: 1 << 26 });
+      const n = pcm.length / 2;
+      const win = (frac) => { const a = Math.floor(n * frac), len = 32000 * 0.2; let cross = 0, prev = 0, sq = 0; for (let i = a; i < a + len; i++) { const v = pcm.readInt16LE(i * 2); sq += v * v; if ((v >= 0) !== (prev >= 0) && i > a) cross++; prev = v; } return { hz: Math.round(cross / 2 / 0.2), rms: Math.round(Math.sqrt(sq / len)) }; };
+      const w = [0.1, 0.5, 0.85].map(win);
+      assert(w.every((x) => x.rms > 1500), 'no silent gaps: ' + JSON.stringify(w));
+      assert(w[0].hz > 250 && w[0].hz < 700 && w[2].hz > w[0].hz + 120 && w[1].hz > w[0].hz && w[2].hz > w[1].hz, 'rising sweep ' + JSON.stringify(w));
+      // 정리: 별표 해제(항목·오디오 삭제), 설정 복원
+      await page.keyboard.press('KeyE');
+      await waitFor(() => sw.evaluate(async () => !((await chrome.storage.local.get('items')).items.find((i) => i.id === 'netflix:12345:14000'))), 5000, 'unstarred');
+      await sw.evaluate(async () => { const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: Object.assign({}, settings, { audioMode: 'off', captureTest: '' }) }); });
+      await sleep(300);
     });
 
     console.log('▶ 모의 유튜브 페이지');
@@ -461,6 +494,89 @@ function ensureFixtures() {
       n = await web.$$eval('.item .en', (els) => els.filter((e) => e.offsetParent !== null).length);
       assert(n === 0, 'all hidden again ' + n);
       await web.screenshot({ path: path.join(TMP, 'shots', 'web-list-veiled.png') });
+    });
+    await step('정렬 옵션(작품별/전체 · 최신 위/아래)과 태그 지정·필터', async () => {
+      const firstId = () => web.$eval('.item', (e) => e.dataset.id);
+      const lastId = () => web.$$eval('.item', (els) => els[els.length - 1].dataset.id);
+      await web.select('.toolbar select.sort', 'flat-new-top');
+      assert((await firstId()).startsWith('youtube:'), 'flat newest first: ' + await firstId());
+      assert(await web.$$eval('.group-title', (g) => g.length) === 0, 'no group titles in flat mode');
+      const work = await web.$eval('.item .meta .work', (e) => e.textContent);
+      assert(/Mock Lecture Title/.test(work), 'work label in flat mode: ' + work);
+      await web.select('.toolbar select.sort', 'flat-new-bottom');
+      assert((await lastId()).startsWith('youtube:'), 'flat newest last: ' + await lastId());
+      await web.select('.toolbar select.sort', 'group-new-top');
+      const g1 = await web.$eval('.group-title', (e) => e.textContent);
+      assert(/Mock Lecture Title/.test(g1), 'newest work group first: ' + g1);
+      await web.select('.toolbar select.sort', 'group-new-bottom');
+      const gl = await web.$$eval('.group-title', (g) => g[g.length - 1].textContent);
+      assert(/Mock Lecture Title/.test(gl), 'newest work group last: ' + gl);
+      await web.select('.toolbar select.sort', 'group-time');
+      assert(await web.evaluate(() => localStorage.getItem('subtutor.sort')) === 'group-time', 'sort persisted');
+      // 태그: 항목에 붙이면 이름이 저장되고, 맨 위 태그를 누르면 그 자막만 보인다
+      const sel = '[data-id="netflix:12345:22000"]';
+      await web.click(sel + ' .tag-add');
+      await web.waitForSelector(sel + ' .tag-input');
+      await web.type(sel + ' .tag-input', '숙어');
+      await web.keyboard.press('Enter');
+      await waitFor(() => web.$$eval(sel + ' .tags-row .tag.small', (c) => c.map((x) => x.firstChild.textContent)).then((n) => (n.length ? n : null)), 5000, 'tag chip').then((names) => assert(names.join() === '숙어', 'item tags ' + names));
+      await waitFor(() => web.$$eval('[data-tagbar] .tag', (c) => c.map((x) => x.firstChild.textContent + ':' + (x.querySelector('.n') ? x.querySelector('.n').textContent : ''))).then((c) => (c.includes('숙어:1') ? c : null)), 5000, 'tag bar');
+      await web.evaluate(() => [...document.querySelectorAll('[data-tagbar] .tag')].find((x) => x.firstChild.textContent === '숙어').click());
+      await waitFor(() => web.$$eval('.item', (r) => r.length === 1), 4000, 'filtered to tagged item');
+      assert((await firstId()) === 'netflix:12345:22000', 'filtered item');
+      await web.evaluate(() => [...document.querySelectorAll('[data-tagbar] .tag')].find((x) => x.firstChild.textContent === '전체').click());
+      await waitFor(() => web.$$eval('.item', (r) => r.length === 3), 4000, 'filter cleared');
+      const settings = await waitFor(async () => { const s = (await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings)) || {}; return (s.tagNames || []).includes('숙어') ? s : null; }, 5000, 'tagNames saved in settings');
+      void settings;
+      await web.reload({ waitUntil: 'load' });
+      await waitFor(() => web.$$eval('.item', (r) => r.length === 3), 8000, 'items after reload');
+      const after = await web.$$eval(sel + ' .tags-row .tag.small', (c) => c.map((x) => x.firstChild.textContent));
+      assert(after.join() === '숙어', 'tag persists after reload: ' + after);
+      await web.screenshot({ path: path.join(TMP, 'shots', 'web-list-tags.png') });
+    });
+    await step('오디오 구간 조정: ms 단위 버튼·드래그, 보관 오디오는 그 안에서 자르고 플레이어 재생은 조정 구간으로', async () => {
+      const items = () => sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
+      const yt = '[data-id^="youtube:"]';
+      await web.click(yt + ' .trim-toggle');
+      await web.waitForSelector(yt + ' .trim-box:not(.hidden) canvas');
+      await waitFor(() => web.$eval(yt + ' .trim-box canvas', (c) => c.width > 0), 5000, 'waveform drawn');
+      for (let i = 0; i < 5; i++) await web.click(yt + ' .nudge[data-which="start"][data-d="100"]');
+      const t1 = await waitFor(async () => { const it = (await items()).find((i) => i.id.startsWith('youtube:')); return it.trim && it.trim.startMs === it.startMs + 500 ? it : null; }, 5000, 'trim saved (+500ms start)');
+      assert(t1.trim.endMs === t1.endMs, 'end unchanged');
+      assert(/조정됨/.test(await web.$eval(yt + ' .meta .span', (e) => e.textContent)), 'meta shows 조정됨');
+      // 끝 손잡이를 왼쪽으로 끌면 끝이 앞당겨진다
+      const bb = await (await web.$(yt + ' .trim-handle.end')).boundingBox();
+      await web.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+      await web.mouse.down();
+      await web.mouse.move(bb.x + bb.width / 2 - 60, bb.y + bb.height / 2, { steps: 6 });
+      await web.mouse.up();
+      const t2 = await waitFor(async () => { const it = (await items()).find((i) => i.id.startsWith('youtube:')); return it.trim && it.trim.endMs < it.endMs - 100 ? it : null; }, 5000, 'end handle dragged');
+      const expectMs = t2.trim.endMs - t2.trim.startMs;
+      await web.click(yt + ' .play');
+      await waitFor(() => web.$eval(yt, (e) => e.classList.contains('playing')), 5000, 'local trimmed playing');
+      const t0 = Date.now();
+      await waitFor(() => web.$eval(yt, (e) => !e.classList.contains('playing')), expectMs + 3000, 'local trimmed ended');
+      const took = Date.now() - t0;
+      assert(took > expectMs * 0.6 && took < expectMs + 1200, 'trimmed playback length ' + took + 'ms vs ' + expectMs + 'ms');
+      await web.click(yt + ' .trim-reset');
+      await waitFor(async () => !((await items()).find((i) => i.id.startsWith('youtube:')).trim), 5000, 'reset saved');
+      await web.click(yt + ' .trim-ctl .btn:last-child');
+      // 플레이어 재생 항목: 시작 +300ms → 플레이어가 그 위치(여유 150ms 앞)로 탐색하고 원래 끝에서 멈춘다
+      const nf = '[data-id="netflix:12345:22000"]';
+      await web.click(nf + ' .trim-toggle');
+      await web.waitForSelector(nf + ' .trim-box:not(.hidden)');
+      for (let i = 0; i < 3; i++) await web.click(nf + ' .nudge[data-which="start"][data-d="100"]');
+      await waitFor(async () => { const it = (await items()).find((i) => i.id === 'netflix:12345:22000'); return it.trim && it.trim.startMs === 22300; }, 5000, 'remote trim saved');
+      await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 5; window.__seeks = []; window.__pauses = []; });
+      await web.click(nf + ' .play');
+      await waitFor(() => page.evaluate(() => window.__seeks.some((x) => Math.abs(x - 22150) < 60)), 10000, 'player seeks to trimmed start').catch(async (e) => { throw new Error(e.message + ' seeks=' + JSON.stringify(await page.evaluate(() => window.__seeks.slice(-4)))); });
+      await waitFor(() => web.$eval(nf, (e) => !e.classList.contains('playing')), 12000, 'remote trimmed ended');
+      const pauses = await page.evaluate(() => window.__pauses);
+      assert(pauses.length && pauses[pauses.length - 1] >= 24100 && pauses[pauses.length - 1] <= 24700, 'ended at original end: ' + JSON.stringify(pauses));
+      await web.click(nf + ' .trim-reset');
+      await waitFor(async () => !((await items()).find((i) => i.id === 'netflix:12345:22000').trim), 5000, 'remote reset');
+      await web.screenshot({ path: path.join(TMP, 'shots', 'web-trim.png') });
+      await web.click(nf + ' .trim-ctl .btn:last-child');
     });
     await step('보관된 오디오가 있는 항목은 플레이어 탭 없이 바로 재생된다', async () => {
       const row = await web.$('[data-id^="youtube:"]');

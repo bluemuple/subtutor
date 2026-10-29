@@ -218,7 +218,8 @@ async function playClip(item, websiteTabId, loop) {
       await setActiveClip(null);
       return { clipId, error: 'not-ready' };
     }
-    await chrome.tabs.sendMessage(tabId, { type: 'playRange', clipId, startMs: item.startMs, endMs: item.endMs, loop: !!loop });
+    const range = item.trim && Number.isFinite(item.trim.startMs) && Number.isFinite(item.trim.endMs) && item.trim.endMs > item.trim.startMs ? item.trim : item; // 웹에서 조정한 구간
+    await chrome.tabs.sendMessage(tabId, { type: 'playRange', clipId, startMs: range.startMs, endMs: range.endMs, loop: !!loop });
     return { clipId };
   } catch (e) {
     notifyWeb(websiteTabId, { itemId: item.id, clipId, state: 'error', message: String((e && e.message) || e) });
@@ -246,7 +247,7 @@ async function saveAudio(msg) {
   const mode = msg.mode || 'store';
   if ((mode === 'store' || mode === 'both') && msg.store) {
     await chrome.storage.local.set({ [audioKey(msg.id)]: msg.store });
-    await withItems((items) => updateItem(items, msg.id, { audio: { format: msg.storeFormat || 'wav', mime: msg.storeMime || 'audio/wav', rate: msg.storeRate || 16000, ms: msg.durationMs || 0, savedAt: Date.now() } }));
+    await withItems((items) => updateItem(items, msg.id, { audio: { format: msg.storeFormat || 'wav', mime: msg.storeMime || 'audio/wav', rate: msg.storeRate || 16000, ms: msg.durationMs || 0, leadMs: Number.isFinite(msg.leadMs) ? msg.leadMs : 250, savedAt: Date.now(), stats: msg.stats || null } }));
     out.stored = true;
   }
   if ((mode === 'download' || mode === 'both') && msg.download) {
