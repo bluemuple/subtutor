@@ -169,7 +169,7 @@ code { background: #111; padding: 1px 5px; border-radius: 4px; font-size: 13px; 
 .trim-box { margin-top: 10px; padding: 10px 12px; background: #121216; border: 1px solid var(--line); border-radius: 10px; }
 .trim-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 8px; font-size: 13px; }
 .trim-label { color: var(--muted); font-variant-numeric: tabular-nums; }
-.trim-track { position: relative; height: 96px; background: #0b0b0e; border: 1px solid #2a2a33; border-radius: 8px; overflow: visible; user-select: none; touch-action: none; }
+.trim-track { position: relative; margin-top: 26px; height: 96px; background: #0b0b0e; border: 1px solid #2a2a33; border-radius: 8px; overflow: visible; user-select: none; touch-action: none; }
 .trim-wave { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .trim-orig { position: absolute; top: 0; bottom: 0; background: rgba(255,255,255,.05); border-left: 1px dashed #3f3f4a; border-right: 1px dashed #3f3f4a; pointer-events: none; }
 .trim-band { position: absolute; top: 0; bottom: 0; background: rgba(124,58,237,.22); border-top: 2px solid var(--accent); border-bottom: 2px solid var(--accent); pointer-events: none; }
