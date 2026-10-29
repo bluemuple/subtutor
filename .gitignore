@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+tests/e2e/.tmp/
+tests/e2e/mock/media/*.webm
+tests/e2e/mock/media/*.mp4

@@ -1,0 +1,20 @@
+body { width: 330px; margin: 0; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; background: #161616; color: #e5e5e5; }
+header { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid #2a2a2a; }
+.title { font-weight: 800; color: #c4b5fd; font-size: 15px; }
+.title span { font-weight: 400; color: #777; font-size: 11px; margin-left: 4px; }
+.sub { color: #9ca3af; font-size: 12px; }
+section { padding: 8px 14px; border-bottom: 1px solid #222; }
+.row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; cursor: pointer; }
+.row span { display: flex; align-items: center; gap: 6px; }
+kbd { background: #2b2b2b; border: 1px solid #444; border-radius: 4px; padding: 0 5px; font-size: 11px; font-family: inherit; color: #ddd; }
+select { background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 1px 4px; font-size: 12px; }
+.switch { position: relative; width: 36px; height: 20px; appearance: none; background: #444; border-radius: 10px; cursor: pointer; outline: none; margin: 0; flex: none; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; background: #fff; border-radius: 50%; transition: left .15s; }
+.switch:checked { background: #7c3aed; } .switch:checked::after { left: 18px; }
+.buttons { display: flex; gap: 8px; }
+button { flex: 1; background: #2b2b2b; color: #eee; border: 1px solid #444; border-radius: 8px; padding: 8px 6px; cursor: pointer; font: inherit; font-size: 12.5px; }
+button:hover { background: #363636; }
+button.primary { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+.keys { font-size: 12px; color: #bbb; }
+.keys div { margin: 3px 0; }
+.hint { color: #777; font-size: 11px; margin-top: 6px; }

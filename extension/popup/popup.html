@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>SubTutor</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="../icons/icon48.png" alt="" width="28" height="28">
+    <div>
+      <div class="title">SubTutor <span id="version"></span></div>
+      <div class="sub" id="status">현재 탭 확인 중…</div>
+    </div>
+  </header>
+
+  <section>
+    <label class="row"><span>자막 패널 열기</span><input type="checkbox" id="panelOpen" class="switch"></label>
+    <label class="row"><span>한국어 번역 표시</span><input type="checkbox" id="showTranslation" class="switch"></label>
+    <label class="row"><span>플랫폼 기본 자막 숨기기</span><input type="checkbox" id="hideNative" class="switch"></label>
+    <label class="row"><span>자동 일시정지 <kbd>P</kbd></span><input type="checkbox" id="autoPause" class="switch"></label>
+    <label class="row"><span>쉐도잉 <kbd>W</kbd> · 쉬는 시간 <select id="shadowPauseSec"></select></span><input type="checkbox" id="shadowing" class="switch"></label>
+  </section>
+
+  <section class="buttons">
+    <button id="openSite" class="primary">웹에서 저장 목록 · 퀴즈 열기</button>
+    <button id="openNetflix">넷플릭스 열기</button>
+  </section>
+
+  <section class="keys">
+    <div><kbd>A</kbd> 이전 자막 &nbsp; <kbd>S</kbd> 현재 자막 무한 반복 &nbsp; <kbd>D</kbd> 다음 자막</div>
+    <div><kbd>F</kbd> 현재 자막 다시 듣기 &nbsp; <kbd>E</kbd> 별표 저장 &nbsp; <kbd>`</kbd> 패널 열기/닫기</div>
+    <div class="hint">단축키는 넷플릭스/프라임/디즈니+ 재생 화면에서 동작합니다. 패널의 ⚙ 에서 번역 출처·자막 크기·시간 보정을 바꿀 수 있습니다.</div>
+  </section>
+  <script src="popup.js"></script>
+</body>
+</html>

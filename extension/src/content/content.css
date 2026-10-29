@@ -1,0 +1,89 @@
+:root { --st-panel-w: 400px; --st-font-scale: 1; --st-clearance: 0px; }
+
+/* ───────── 패널 ───────── */
+#st-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; width: var(--st-panel-w);
+  z-index: 2147483000; background: #141414; color: #e5e5e5;
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Segoe UI", Roboto, sans-serif;
+  display: flex; flex-direction: column; box-shadow: -4px 0 18px rgba(0,0,0,.55);
+  transition: transform .2s ease; box-sizing: border-box;
+}
+#st-panel *, #st-overlay *, #st-toggle { box-sizing: border-box; }
+#st-panel.st-closed { transform: translateX(100%); }
+#st-panel button { font: inherit; }
+.st-head { display: flex; align-items: center; gap: 6px; padding: 9px 10px; border-bottom: 1px solid #262626; }
+.st-brand { font-weight: 800; letter-spacing: .2px; color: #c4b5fd; margin-right: auto; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-mode { background: #232323; color: #bdbdbd; border: 1px solid #3a3a3a; border-radius: 14px; padding: 3px 10px; font-size: 12px; cursor: pointer; line-height: 1.3; }
+.st-mode:hover { border-color: #666; color: #fff; }
+.st-mode.on { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+.st-mode.on.st-shadow { background: #0e9f6e; border-color: #0e9f6e; }
+.st-shadow-sec { background: #232323; color: #ddd; border: 1px solid #3a3a3a; border-radius: 8px; padding: 2px 4px; font-size: 12px; }
+.st-icon { background: none; border: none; color: #aaa; font-size: 16px; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+.st-icon:hover { background: #262626; color: #fff; }
+.st-status { padding: 6px 12px; font-size: 12px; color: #9ca3af; border-bottom: 1px solid #1f1f1f; min-height: 28px; display: flex; align-items: center; gap: 8px; }
+.st-status.st-err { color: #fca5a5; }
+.st-status button { margin-left: auto; background: #262626; border: 1px solid #3a3a3a; color: #ddd; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
+.st-list { flex: 1; overflow-y: auto; padding: 6px 0; overscroll-behavior: contain; }
+.st-list::-webkit-scrollbar { width: 8px; } .st-list::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+.st-empty { padding: 30px 16px; color: #777; text-align: center; font-size: 13px; line-height: 1.6; }
+.st-row { display: flex; align-items: flex-start; gap: 6px; padding: 8px 8px 8px 13px; cursor: pointer; border-left: 3px solid transparent; }
+.st-row:hover { background: #1e1e1e; }
+.st-row.active { background: #241e38; border-left-color: #a78bfa; }
+.st-row-main { flex: 1; min-width: 0; }
+.st-en { font-size: 15px; color: #f1f1f1; word-break: break-word; }
+.st-ko { font-size: 12.5px; color: #9ca3af; margin-top: 2px; word-break: break-word; }
+.st-ko:empty { display: none; }
+.st-time { font-size: 11px; color: #555; margin-top: 2px; }
+.st-star { opacity: 0; background: none; border: none; color: #fbbf24; font-size: 19px; cursor: pointer; padding: 0 4px; line-height: 1.2; flex: none; }
+.st-row:hover .st-star, .st-row.active .st-star, .st-row.saved .st-star { opacity: 1; }
+.st-star:hover { transform: scale(1.2); }
+.st-foot { padding: 7px 12px; font-size: 11px; color: #777; border-top: 1px solid #262626; line-height: 1.6; }
+.st-foot b { color: #c4b5fd; font-weight: 600; }
+
+/* 설정 */
+.st-settings { position: absolute; top: 46px; right: 8px; left: 8px; max-height: calc(100% - 60px); overflow-y: auto; background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 12px 14px; z-index: 2; box-shadow: 0 10px 30px rgba(0,0,0,.6); font-size: 13px; }
+.st-settings.st-hidden { display: none; }
+.st-settings h4 { margin: 10px 0 6px; font-size: 12px; color: #a78bfa; text-transform: uppercase; letter-spacing: .5px; }
+.st-settings h4:first-child { margin-top: 0; }
+.st-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 0; }
+.st-field label { color: #ddd; }
+.st-field small { color: #777; display: block; font-size: 11px; }
+.st-field input[type=range] { width: 130px; }
+.st-field input[type=number] { width: 70px; background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 3px 6px; }
+.st-field select { background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 3px 6px; }
+.st-switch { position: relative; width: 36px; height: 20px; appearance: none; background: #444; border-radius: 10px; cursor: pointer; outline: none; transition: background .15s; flex: none; }
+.st-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; background: #fff; border-radius: 50%; transition: left .15s; }
+.st-switch:checked { background: #7c3aed; } .st-switch:checked::after { left: 18px; }
+.st-btn { background: #2b2b2b; color: #eee; border: 1px solid #444; border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 12.5px; }
+.st-btn:hover { background: #363636; }
+.st-btn.st-primary { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+.st-btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.st-diag { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #9ca3af; white-space: pre-wrap; background: #111; padding: 8px; border-radius: 6px; margin-top: 6px; max-height: 140px; overflow: auto; }
+
+/* 패널 열기 버튼 (오른쪽 가장자리) */
+#st-toggle { position: fixed; right: 0; top: 50%; transform: translateY(-50%); z-index: 2147483000; width: 26px; height: 56px; border: none; border-radius: 10px 0 0 10px; background: rgba(124,58,237,.85); color: #fff; font-size: 20px; cursor: pointer; opacity: .55; transition: opacity .15s; }
+#st-toggle:hover { opacity: 1; }
+#st-toggle.st-hidden { display: none; }
+
+/* 영상이 패널만큼 줄어들도록 (플랫폼별 규칙은 어댑터가 추가) */
+html.st-panel-open { --st-panel-w: 400px; }
+
+/* ───────── 영상 위 자막 ───────── */
+#st-overlay { position: absolute; left: 0; right: 0; bottom: calc(9% + var(--st-clearance)); display: flex; flex-direction: column; align-items: center; pointer-events: none; z-index: 2147482000; transition: bottom .15s ease; font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Segoe UI", Roboto, sans-serif; }
+#st-overlay.st-hidden .st-ov-box { display: none; }
+.st-ov-box { max-width: 88%; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.st-ov-en { display: inline-flex; align-items: center; gap: 10px; background: rgba(0,0,0,.66); color: #fff; font-size: calc(clamp(20px, 2.5vw, 42px) * var(--st-font-scale)); font-weight: 600; padding: .14em .5em; border-radius: 8px; white-space: pre-line; text-shadow: 0 1px 2px rgba(0,0,0,.9); line-height: 1.3; }
+.st-ov-ko { display: inline-block; background: rgba(0,0,0,.56); color: #fde68a; font-size: calc(clamp(15px, 1.65vw, 28px) * var(--st-font-scale)); padding: .12em .55em; border-radius: 8px; line-height: 1.35; }
+.st-ov-ko:empty { display: none; }
+.st-ov-star { pointer-events: auto; background: none; border: none; color: #fbbf24; cursor: pointer; font-size: .85em; line-height: 1; padding: 0; opacity: .75; }
+.st-ov-star:hover { opacity: 1; transform: scale(1.15); }
+.st-ov-modes { position: absolute; right: 16px; bottom: -4px; display: flex; gap: 6px; }
+.st-ov-chip { background: rgba(0,0,0,.6); color: #ddd; border-radius: 12px; padding: 2px 9px; font-size: 12px; }
+.st-ov-chip.on-loop { color: #fbbf24; } .st-ov-chip.on-ap { color: #c4b5fd; } .st-ov-chip.on-shadow { color: #6ee7b7; }
+.st-ov-shadow { display: none; margin-top: 4px; width: min(380px, 60vw); background: rgba(0,0,0,.62); border-radius: 10px; padding: 8px 14px 10px; color: #fff; font-size: 15px; text-align: center; }
+.st-ov-shadow.on { display: block; }
+.st-ov-shadow-text { margin-bottom: 6px; }
+.st-ov-shadow-track { height: 5px; background: rgba(255,255,255,.2); border-radius: 3px; overflow: hidden; }
+.st-ov-shadow-bar { height: 100%; width: 100%; background: #6ee7b7; border-radius: 3px; }
+.st-toast { position: absolute; left: 50%; top: 12%; transform: translateX(-50%); background: rgba(20,20,20,.85); color: #fff; padding: 8px 16px; border-radius: 20px; font-size: 15px; z-index: 2147482500; pointer-events: none; opacity: 0; transition: opacity .15s; font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+.st-toast.show { opacity: 1; }

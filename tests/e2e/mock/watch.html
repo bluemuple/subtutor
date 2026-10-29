@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>넷플릭스</title>
+<style>
+  body { margin: 0; background: #000; color: #fff; font-family: sans-serif; }
+  .watch-video { position: fixed; inset: 0; }
+  .watch-video--player-view { position: absolute; inset: 0; }
+  video { width: 100%; height: 100%; object-fit: contain; }
+  .player-timedtext { position: absolute; bottom: 10%; width: 100%; text-align: center; font-size: 24px; }
+  [data-uia="video-title"] { position: absolute; top: 10px; left: 10px; }
+  [data-uia="controls-standard"] { position: absolute; bottom: 0; left: 0; right: 0; height: 60px; background: rgba(255,255,255,.08); }
+</style>
+</head>
+<body>
+<div class="watch-video"><div class="watch-video--player-view">
+  <video id="v" muted playsinline></video>
+  <div class="player-timedtext"><div class="player-timedtext-text-container"><span>native cue</span></div></div>
+  <div data-uia="video-title"><h4>Mock Show</h4><span>S1:E2</span><span>The Test</span></div>
+  <div data-uia="controls-standard"></div>
+</div></div>
+<script>
+  const video = document.getElementById('v');
+  window.__seeks = [];
+  window.__pauses = [];
+  const tracks = [
+    { trackId: 'T:1:en', bcp47: 'en', displayName: 'English', rawTrackType: 'SUBTITLES', isNoneTrack: false, isForcedNarrative: false },
+    { trackId: 'T:1:ko', bcp47: 'ko', displayName: '한국어', rawTrackType: 'SUBTITLES', isNoneTrack: false, isForcedNarrative: false },
+  ];
+  const player = {
+    getCurrentTime: () => Math.round(video.currentTime * 1000),
+    seek: (ms) => { window.__seeks.push(ms); video.currentTime = ms / 1000; },
+    play: () => { video.play().catch(() => {}); },
+    pause: () => { video.pause(); },
+    isPaused: () => video.paused,
+    isPlaying: () => !video.paused,
+    isReady: () => video.readyState >= 1,
+    getDuration: () => Math.round((video.duration || 0) * 1000),
+    getMovieId: () => 12345,
+    getTimedTextTrackList: () => tracks,
+    getTimedTextTrack: () => tracks[0],
+    setTimedTextTrack: async () => {},
+  };
+  const api = {
+    videoPlayer: { getAllPlayerSessionIds: () => ['watch-mock-1'], getVideoPlayerBySessionId: () => player },
+    getVideoMetadataByVideoId: () => ({ getCurrentVideo: () => ({ getTitle: () => 'Mock Show', isEpisodic: () => true, getSeason: () => ({ _season: { seq: 1 } }), getEpisodeNumber: () => 2, getEpisodeTitle: () => 'The Test' }) }),
+  };
+  window.netflix = { appContext: { state: { playerApp: { getAPI: () => api, getState: () => ({ videoPlayer: { cadmiumPlayerRepository: { playersById: { 'watch-mock-1': {} } } } }) } } } };
+
+  // 확장 프로그램의 JSON.stringify 훅이 manifest 요청을 고치는지 확인용
+  window.__patchedRequest = JSON.parse(JSON.stringify({ url: 'manifest', params: { profiles: ['heaac-2-dash'], viewableId: 12345, supportsPartialHydration: true } }));
+
+  // 플레이어가 manifest 응답을 파싱하는 상황을 흉내낸다
+  const manifest = { result: { movieId: 12345, padding: 'x'.repeat(600), textTracks: [
+    { id: 'T:1:en', language: 'en', languageDescription: 'English', rawTrackType: 'subtitles', isNoneTrack: false, isForcedNarrative: false, hydrated: true, downloadables: { 'webvtt-lssdh-ios8': { urls: [{ url: location.origin + '/tracks/en.vtt', cdnId: 1 }] } } },
+    { id: 'T:1:ko', language: 'ko', languageDescription: '한국어', rawTrackType: 'subtitles', isNoneTrack: false, isForcedNarrative: false, hydrated: true, downloadables: { 'webvtt-lssdh-ios8': { urls: [{ url: location.origin + '/tracks/ko.vtt', cdnId: 1 }] } } },
+    { id: 'T:1:none', language: 'none', isNoneTrack: true },
+  ] } };
+  setTimeout(() => { JSON.parse(JSON.stringify(manifest)); }, 300);
+
+  video.src = '/media/test.webm';
+  video.addEventListener('canplay', () => { if (!window.__started) { window.__started = true; video.play().catch(() => {}); } }, { once: true });
+  video.addEventListener('pause', () => { window.__pauses.push(Math.round(video.currentTime * 1000)); });
+</script>
+</body>
+</html>
