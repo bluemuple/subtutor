@@ -62,7 +62,7 @@
 
   // ───────── 데이터 ─────────
   // 화면에 영향을 주는 필드만으로 서명을 만들어, 실제로 바뀐 경우에만 다시 그린다 (입력 중인 내용 보호)
-  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.comment, i.translation, i.reviews, i.forgot, i.savedAt, i.audio ? 1 : 0, (i.tags || []).join(','), i.trim ? i.trim.startMs + '-' + i.trim.endMs : ''].join('\u0001')).sort().join('\u0002');
+  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.comment, i.translation, i.reviews, i.forgot, i.savedAt, i.audio ? 1 : 0, i.file ? 1 : 0, (i.tags || []).join(','), i.trim ? i.trim.startMs + '-' + i.trim.endMs : ''].join('\u0001')).sort().join('\u0002');
   async function loadItems(force) {
     if (!state.extOk) { render(); return; }
     let changed = !!force;
@@ -716,7 +716,8 @@
         opts.showWork ? el('span', { class: 'work' }, it.title + (it.episode ? ' · ' + it.episode : '')) : null,
         el('span', { class: 'span' }, timeText(it)),
         el('span', null, PLATFORM_NAMES[it.platform] || it.platform),
-        it.audio ? el('span', { class: 'has-audio', title: '확장 프로그램에 보관된 오디오로 바로 재생합니다' }, '🔊 오디오 보관') : null,
+        it.audio ? el('span', { class: 'fmt stored', title: '보관 오디오 ' + String(it.audio.format || 'wav').toUpperCase() + (it.audio.rate ? ' · ' + Math.round(it.audio.rate / 1000) + 'kHz' : '') + (it.audio.ms ? ' · ' + (it.audio.ms / 1000).toFixed(1) + '초' : '') + ' — 플레이어 탭 없이 바로 재생' }, '♪ ' + String(it.audio.format || 'wav').toUpperCase()) : null,
+        it.file ? el('span', { class: 'fmt file', title: 'PC 파일 ' + String(it.file.format || '').toUpperCase() + ': ' + (it.file.path || '') }, '⬇ ' + String(it.file.format || 'mp3').toUpperCase()) : null,
         el('span', null, '저장 ' + fmtDate(it.savedAt || Date.now())),
         it.reviews ? el('span', null, '복습 ' + it.reviews + '회' + (it.forgot ? ' · 잊음 ' + it.forgot : '')) : null,
         el('button', { class: 'link', onclick: () => B.request('item.open', { itemId: it.id }, 60000).catch((e) => toast(e.message)) }, '플레이어에서 열기 ↗'),

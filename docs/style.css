@@ -133,6 +133,8 @@ code { background: #111; padding: 1px 5px; border-radius: 4px; font-size: 13px; 
 }
 
 .has-audio { color: var(--green); }
+.meta .fmt { font-size: 10.5px; line-height: 1.4; color: var(--dim); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; letter-spacing: .3px; font-variant-numeric: tabular-nums; cursor: default; }
+.meta .fmt.stored { color: #7fb59a; border-color: rgba(52,211,153,.25); }
 
 /* 자막/뜻 감추기 · 반복 */
 .btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }

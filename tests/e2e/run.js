@@ -581,8 +581,10 @@ function ensureFixtures() {
     await step('보관된 오디오가 있는 항목은 플레이어 탭 없이 바로 재생된다', async () => {
       const row = await web.$('[data-id^="youtube:"]');
       assert(row, 'youtube item row');
-      const badge = await row.$eval('.has-audio', (e) => e.textContent).catch(() => null);
-      assert(badge && badge.includes('오디오'), 'audio badge');
+      const badge = await row.$eval('.fmt.stored', (e) => e.textContent + '|' + e.title).catch(() => null);
+      assert(badge && /MP3/.test(badge) && /32kHz/.test(badge), 'small format badge: ' + badge);
+      const fileBadge = await row.$eval('.fmt.file', (e) => e.textContent + '|' + e.title).catch(() => null);
+      assert(fileBadge && /MP3/.test(fileBadge) && /e2e-docs\/SubTutor/.test(fileBadge), 'file badge for folder save: ' + fileBadge);
       await yt.evaluate(() => { window.__pauses = []; });
       await (await row.$('.play')).click();
       await waitFor(() => web.$eval('[data-id^="youtube:"]', (e) => e.classList.contains('playing')), 5000, 'local playing');

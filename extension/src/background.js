@@ -254,12 +254,18 @@ async function saveAudio(msg) {
     const fileName = String(msg.fileName || 'SubTutor/clip.mp3').replace(/^\/+/, '');
     // 1) 사용자가 고른 폴더가 있고 권한이 살아 있으면 그 폴더 안에 바로 쓴다
     const folder = await saveToFolder(fileName, msg.download);
-    if (folder.ok) { out.fileName = folder.path; out.location = 'folder'; return out; }
+    const ext = (fileName.split('.').pop() || 'mp3').toLowerCase();
+    if (folder.ok) {
+      out.fileName = folder.path; out.location = 'folder';
+      await withItems((items) => updateItem(items, msg.id, { file: { format: ext, location: 'folder', path: folder.path, savedAt: Date.now() } }));
+      return out;
+    }
     if (folder.reason && folder.reason !== 'none') { out.folderIssue = folder.reason === 'error' ? 'error' : 'prompt'; out.folderError = folder.error || ''; out.folderName = folder.name || ''; }
     // 2) 아니면 크롬 다운로드 폴더(Downloads/SubTutor/…)
     try {
       out.downloadId = await chrome.downloads.download({ url: 'data:' + (msg.downloadMime || 'audio/wav') + ';base64,' + msg.download, filename: fileName, conflictAction: 'uniquify', saveAs: false });
       out.fileName = fileName; out.location = 'downloads';
+      await withItems((items) => updateItem(items, msg.id, { file: { format: ext, location: 'downloads', path: '다운로드/' + fileName, savedAt: Date.now() } }));
     } catch (e) {
       throw new Error('파일 다운로드 실패: ' + ((e && e.message) || e));
     }
