@@ -261,6 +261,9 @@ function ensureFixtures() {
         await web.click('[data-id="netflix:12345:22000"] .rec-btn');
         await waitFor(() => web.$$eval('[data-id="netflix:12345:22000"] .attempt', (a, n) => a.length === n, Math.min(3, i + 1)), 6000, 'attempt count ' + i);
       }
+      // 마지막 녹음 저장이 끝나 버튼이 다시 그려질 때까지 기다린다 (핸들이 떨어지는 경쟁 방지)
+      await waitFor(() => web.$eval('[data-id="netflix:12345:22000"] .rec-btn', (e) => !e.classList.contains('recording')), 5000, 'recording stopped');
+      await sleep(600);
       const n = await web.$$eval('.item .attempt', (a) => a.length);
       assert(n === 3, 'attempts ' + n);
       const latest = await web.$eval('.item .attempt.latest', (e) => e.firstChild.textContent);
@@ -270,9 +273,9 @@ function ensureFixtures() {
       assert(recs.length === 3 && recs[0] > 0, 'db recordings ' + recs.length);
     });
     await step('같이 듣기: 플레이어 오디오 뒤에 최근 녹음이 재생된다', async () => {
-      const btns = await web.$$('[data-id="netflix:12345:22000"] .rec-btn');
-      assert(btns.length === 2, 'rec buttons in first item: ' + btns.length);
-      await btns[btns.length - 1].click();
+      const labels = await web.$$eval('[data-id="netflix:12345:22000"] .rec-row > button', (b) => b.map((x) => x.textContent));
+      assert(/같이 듣기/.test(labels[labels.length - 1]), 'last button should be 같이 듣기: ' + labels.join(' | '));
+      await web.click('[data-id="netflix:12345:22000"] .rec-row > button:last-of-type');
       await waitFor(() => web.$eval('.item', (e) => e.classList.contains('playing')), 8000, 'clip playing');
       await waitFor(() => web.$$eval('.item .attempt.playing', (a) => a.length === 1), 15000, 'recording playing after clip');
     });
