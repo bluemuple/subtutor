@@ -27,6 +27,16 @@
     tailMs: 200,
     audioMode: 'off',           // off | store | download | both : 별표 저장 시 오디오 처리
     enabled: {},                // 플랫폼별 켜기/끄기 { netflix: true, ... }
+    // 듣기 훈련 (근거는 lib/explain.js)
+    koMode: 'hold',             // always | hold(T 키를 누르는 동안) | afterRepeat(같은 줄 N회 반복 뒤)
+    koRepeats: 3,
+    secondPass: false,          // 2회차: 못 알아들음(Q) 표시한 줄만 한국어 바로 보임 + 강조
+    cloze: 'off',               // off | function | random : 영상 위 자막 빈칸
+    soundsLike: false,          // 소리 나는 대로 줄
+    kiwiNotes: true,            // 키위·마오리·학교 용어 주석
+    vocabProfile: true,         // 어휘 프로파일·말 속도
+    loopLadder: false,          // S 반복 때 속도 사다리
+    missedTag: '못 알아들음',
   };
   let settings = Object.assign({}, DEFAULT_SETTINGS);
 
@@ -42,7 +52,9 @@
     userScrollAt: 0, statusText: '', statusErr: false,
     ttPoll: null, tickCount: 0,
     rate: 1, rateReapplyUntil: 0, clearanceCur: 0, clearanceLowSince: 0,
+    koHold: false, clozeRevealIdx: -1, loopCount: 0, loopBaseRate: 1, profile: null, watched: new Set(), missed: new Set(), statsSavedAt: 0, seriesSaved: false,
   };
+  const Sp = globalThis.SubTutorSpeech, Voc = globalThis.SubTutorVocab, Ex = globalThis.SubTutorExplain, Kiwi = globalThis.SubTutorKiwi || [], Freq = globalThis.SubTutorFreq || '';
   const trackCache = new Map(); // videoId -> tracks
   let pageVideoId = null;
   let pageMeta = null;
@@ -126,9 +138,11 @@
     if (changes.settings && changes.settings.newValue) {
       const s = Object.assign({}, DEFAULT_SETTINGS, changes.settings.newValue);
       const changedTranslation = s.translationSource !== settings.translationSource || s.showTranslation !== settings.showTranslation;
+      const prev = settings;
       settings = s;
       applySettings();
       if (changedTranslation) { refreshAllKo(); if (state.current >= 0) ensureTranslations(state.current); }
+      if (['koMode', 'secondPass', 'cloze', 'soundsLike', 'kiwiNotes', 'vocabProfile'].some((k) => prev[k] !== s[k])) { renderList(); renderOverlay(true); if (prev.vocabProfile !== s.vocabProfile) refreshProfileStatus(); }
     }
     if (changes.items) loadSaved();
   });
@@ -364,7 +378,10 @@
     const parts = ['영어 ' + state.cues.length + '줄' + (enTrack && enTrack.cc ? ' (CC)' : '') + (enTrack && enTrack.asr ? ' (자동 생성)' : '')];
     if (merged) parts.push('한국어 ' + merged + '줄 연결' + (koTrack && koTrack.translated ? ' (유튜브 번역)' : ''));
     else if (settings.translationSource !== 'off' && settings.translationSource !== 'track') parts.push('한국어: 기계 번역');
-    setStatus(parts.join(' · '));
+    state.baseStatus = parts.join(' · ');
+    state.watched = new Set();
+    computeProfile();
+    setStatus(statusWithProfile());
     renderList();
     refreshSavedMarks();
     const t = nowMs();
@@ -523,6 +540,7 @@
     try {
       const res = await bg({ type: 'items.list', platform: adapter.name, videoId: state.videoId });
       state.saved = new Map(((res && res.items) || []).map((it) => [it.id, it]));
+      state.missed = new Set(Array.from(state.saved.values()).filter((it) => it.missed).map((it) => it.id));
       refreshSavedMarks();
       renderOverlay(true);
     } catch (e) { /* ignore */ }
@@ -756,8 +774,11 @@
     ui.list.addEventListener('wheel', markScroll, { passive: true });
     ui.list.addEventListener('touchmove', markScroll, { passive: true });
     ui.list.addEventListener('mousedown', (e) => { if (e.offsetX > ui.list.clientWidth) markScroll(); });
-    ui.foot = el('div', { class: 'st-foot' });
-    ui.foot.innerHTML = '<b>A</b> 이전 · <b>S</b> 반복 · <b>D</b> 다음 · <b>F</b> 다시 듣기 · <b>E</b> 저장 · <b>P</b> AP · <b>W</b> 쉐도잉 · <b>[</b> <b>]</b> 속도 · <b>\\</b> 1× · <b>`</b> 패널';
+    ui.foot = el('div', { class: 'st-foot' }, [
+      el('button', { class: 'st-foot-btn', title: '단축키', onclick: () => showInfo('keys') }, '⌨ 단축키'),
+      el('button', { class: 'st-foot-btn', title: '두 번 보기 순서', onclick: () => showInfo('twoPass') }, '두 번 보기'),
+      el('button', { class: 'st-foot-btn', title: '이 에피소드의 어휘', onclick: showVocab }, '어휘'),
+    ]);
     ui.settings = buildSettings();
     ui.panel.append(head, ui.status, ui.list, ui.settings, ui.foot);
 
@@ -769,7 +790,9 @@
     ui.ovStar = el('button', { class: 'st-ov-star', title: '이 자막 저장 (E)', onclick: (e) => { e.stopPropagation(); const i = displayIndex(); if (i >= 0) toggleSave(i); } }, '☆');
     ui.ovEn = el('div', { class: 'st-ov-en' }, [ui.ovText, ui.ovStar]);
     ui.ovKo = el('div', { class: 'st-ov-ko' });
-    ui.ovBox = el('div', { class: 'st-ov-box' }, [ui.ovEn, ui.ovKo]);
+    ui.ovSound = el('div', { class: 'st-ov-sound' });
+    ui.ovKiwi = el('div', { class: 'st-ov-kiwi' });
+    ui.ovBox = el('div', { class: 'st-ov-box' }, [ui.ovEn, ui.ovSound, ui.ovKo, ui.ovKiwi]);
     ui.ovShadowText = el('div', { class: 'st-ov-shadow-text' });
     ui.ovShadowBar = el('div', { class: 'st-ov-shadow-bar' });
     ui.ovShadow = el('div', { class: 'st-ov-shadow' }, [ui.ovShadowText, el('div', { class: 'st-ov-shadow-track' }, ui.ovShadowBar)]);
@@ -958,8 +981,25 @@
     if (settings.autoPause) ui.ovModes.append(el('span', { class: 'st-ov-chip on-ap' }, '⏸ AP'));
     if (settings.shadowing) ui.ovModes.append(el('span', { class: 'st-ov-chip on-shadow' }, '🗣 쉐도잉 ' + settings.shadowPauseSec + '초'));
     if (Math.abs(state.rate - 1) > 0.01) ui.ovModes.append(el('span', { class: 'st-ov-chip on-rate' }, '⏩ ' + state.rate.toFixed(2).replace(/\.?0+$/, '') + '×'));
+    if (settings.cloze && settings.cloze !== 'off') ui.ovModes.append(el('span', { class: 'st-ov-chip on-cloze' }, '▭ 빈칸 (V 공개)'));
+    if (settings.secondPass) ui.ovModes.append(el('span', { class: 'st-ov-chip on-pass' }, '2회차'));
     if (ui.ctlBtn) { ui.ctlBtn.classList.toggle('off', !isEnabled()); ui.ctlBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기'; }
   }
+  function computeProfile() {
+    state.profile = null;
+    if (!Voc || !Freq || !state.cues.length) return;
+    try { state.profile = Voc.profile(state.cues, Freq); } catch (e) { state.profile = null; }
+    state.seriesSaved = false;
+    saveEpisodeStats(true);
+  }
+  function statusWithProfile() {
+    const base = state.baseStatus || state.statusText || '';
+    const p = state.profile;
+    if (!settings.vocabProfile || !p || !p.tokens) return base;
+    const d = Voc.difficulty(p);
+    return base + ' · ' + (p.wpm ? p.wpm + ' wpm · ' : '') + '3천 밖 ' + Math.round(d.outside) + '% (' + d.label + ')';
+  }
+  function refreshProfileStatus() { if (state.baseStatus) setStatus(statusWithProfile()); }
   function setStatus(text, isErr) {
     state.statusText = text; state.statusErr = !!isErr;
     if (!ui.status) return;
@@ -1049,15 +1089,70 @@
   }
   ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((t) => window.addEventListener(t, onCtlPointer, true));
 
+  // ⓘ: 설명과 학문적 근거를 패널 안 상자로 보여 준다 (화면에는 설명을 늘어놓지 않는다)
+  function infoBtn(key) { return el('button', { class: 'st-info', title: '설명 · 근거', 'data-key': key, onclick: (e) => { e.preventDefault(); e.stopPropagation(); showInfo(key); } }, 'i'); }
+  function showBox(title, bodyNodes) {
+    if (!ui.panel) return;
+    if (!ui.infobox) {
+      ui.infoTitle = el('b', null);
+      ui.infoBody = el('div', { class: 'st-infobox-body' });
+      ui.infobox = el('div', { class: 'st-infobox' }, [el('div', { class: 'st-infobox-head' }, [ui.infoTitle, el('button', { class: 'st-icon', title: '닫기', onclick: () => ui.infobox.classList.add('st-hidden') }, '✕')]), ui.infoBody]);
+      ui.panel.append(ui.infobox);
+    }
+    ui.infoTitle.textContent = title;
+    ui.infoBody.textContent = '';
+    for (const n of [].concat(bodyNodes)) if (n) ui.infoBody.append(n);
+    ui.infobox.classList.remove('st-hidden');
+  }
+  function showInfo(key) {
+    const x = Ex && Ex.get(key);
+    if (!x) return;
+    showBox(x.title, [
+      el('p', { class: 'st-info-what', text: x.what }),
+      x.why ? el('h5', { text: '왜 이렇게 하나 (근거)' }) : null,
+      x.why ? el('p', { class: 'st-info-why', text: x.why }) : null,
+      x.refs && x.refs.length ? el('h5', { text: '참고 문헌' }) : null,
+      x.refs && x.refs.length ? el('ul', { class: 'st-info-refs' }, x.refs.map((r) => el('li', { text: r }))) : null,
+    ]);
+  }
+  // 이 에피소드의 어휘 프로파일: 3천 밖 단어와 재출현 횟수
+  async function showVocab() {
+    const p = state.profile;
+    if (!p || !p.tokens) { showBox('어휘', el('p', { text: '자막을 불러오면 어휘 프로파일이 계산됩니다.' })); return; }
+    const d = Voc.difficulty(p);
+    const meta = state.meta || {};
+    let series = null;
+    try { const r = await bg({ type: 'stats.get' }); series = r && r.stats && r.stats.series && r.stats.series[adapter.name + ':' + (meta.title || '')]; } catch (e) { series = null; }
+    const nEp = series ? series.episodes.length : 1;
+    const words = p.beyond3k.slice(0, 80);
+    const example = (w) => { const c = state.cues.find((x) => Voc.tokenize(x.text).some((t) => Voc.norm(t) === w)); return c ? c.text.replace(/\n/g, ' ') : ''; };
+    const rows = words.map((e) => {
+      const seen = series && series.words[e.word] ? series.words[e.word] : 1;
+      return el('div', { class: 'st-vocab-row' }, [el('b', null, e.word), el('span', { class: 'st-vocab-meta' }, ' ×' + e.n + ' · ' + Voc.band(e.rank) + (nEp > 1 && seen > 1 ? ' · 이전 ' + (seen - 1) + '편에도' : '')), el('div', { class: 'st-vocab-ex', text: example(e.word) })]);
+    });
+    const copy = () => {
+      const text = words.map((e) => e.word + '\t' + e.n + '\t' + Voc.band(e.rank) + '\t' + example(e.word)).join('\n');
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast('어휘 목록을 복사했습니다 (단어·횟수·밴드·예문)'), () => toast('복사 실패'));
+    };
+    showBox('이 에피소드 어휘', [
+      el('p', { class: 'st-info-what', text: '단어 ' + p.tokens + '개(서로 다른 ' + p.types + '개) · ' + (p.wpm ? p.wpm + ' wpm · ' : '') + '3천 밖 ' + Math.round(d.outside) + '% (' + d.label + ')' + (p.need95 ? ' · 95% 이해에 약 ' + p.need95.toLocaleString() + '단어 필요' : '') + (nEp > 1 ? ' · 이 작품 ' + nEp + '편 기준 재출현 표시' : '') }),
+      el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn st-primary', onclick: copy }, '목록 복사 (사전 학습용)'), infoBtn('vocabProfile')]),
+      el('div', { class: 'st-vocab-list' }, rows.length ? rows : [el('p', { text: '3천 단어 밖의 단어가 없습니다.' })]),
+    ]);
+  }
   function buildSettings() {
     const box = el('div', { class: 'st-settings st-hidden' });
     const f = {};
-    const field = (label, input, hint) => el('div', { class: 'st-field' }, [el('label', null, [label, hint ? el('small', { text: hint }) : null]), input]);
+    const field = (label, input, key) => el('div', { class: 'st-field' }, [el('label', null, [label, key ? infoBtn(key) : null]), input]);
     const sw = (key, onChange) => { const i = el('input', { type: 'checkbox', class: 'st-switch' }); i.addEventListener('change', () => (onChange || ((v) => saveSettings({ [key]: v })))(i.checked)); f[key] = i; return i; };
     f.translationSource = el('select', { onchange: (e) => { saveSettings({ translationSource: e.target.value }); refreshAllKo(); if (state.current >= 0) ensureTranslations(state.current); } });
     [['auto', '자동 (플랫폼 한국어 자막 → 없으면 기계번역)'], ['track', '플랫폼 한국어 자막만'], ['mt', '기계 번역만'], ['off', '끄기']].forEach(([v, t]) => f.translationSource.append(el('option', { value: v }, t)));
     f.audioMode = el('select', { onchange: (e) => saveSettings({ audioMode: e.target.value }) });
     [['off', '저장 안 함'], ['store', '웹 퀴즈용으로 보관 (확장 프로그램 안)'], ['download', 'PC에 MP3 파일로 저장'], ['both', '둘 다']].forEach(([v, t]) => f.audioMode.append(el('option', { value: v }, t)));
+    f.koMode = el('select', { onchange: (e) => saveSettings({ koMode: e.target.value }) });
+    [['always', '항상 보임'], ['hold', 'T 키를 누르는 동안만'], ['afterRepeat', '같은 줄 3회 반복 뒤']].forEach(([v, t]) => f.koMode.append(el('option', { value: v }, t)));
+    f.cloze = el('select', { onchange: (e) => saveSettings({ cloze: e.target.value }) });
+    [['off', '끄기'], ['function', '기능어(약형) 가리기'], ['random', '아무 단어나 가리기']].forEach(([v, t]) => f.cloze.append(el('option', { value: v }, t)));
     f.fontScale = el('input', { type: 'range', min: 60, max: 160, step: 5 });
     f.fontScale.addEventListener('input', () => saveSettings({ fontScale: +f.fontScale.value }));
     f.shadowPauseSec = el('input', { type: 'range', min: 1, max: 7, step: 1 });
@@ -1070,21 +1165,30 @@
     f.diag = el('div', { class: 'st-diag' });
     box.append(
       el('h4', { text: '번역' }),
-      field('한국어 번역 표시', sw('showTranslation', (v) => { saveSettings({ showTranslation: v }); refreshAllKo(); if (v && state.current >= 0) ensureTranslations(state.current); })),
-      field('번역 출처', f.translationSource),
+      field('한국어 번역 표시', sw('showTranslation', (v) => { saveSettings({ showTranslation: v }); refreshAllKo(); if (v && state.current >= 0) ensureTranslations(state.current); }), 'translation'),
+      field('번역 출처', f.translationSource, 'translation'),
       el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: translateAll }, '이 영상 전체 기계 번역')]),
       el('h4', { text: '화면' }),
-      field('영상 위 자막 표시', sw('overlay')),
-      field('플랫폼 기본 자막 숨기기', sw('hideNative'), '끄면 플랫폼 자막과 겹쳐 보입니다'),
-      field('자막 크기', f.fontScale),
+      field('영상 위 자막 표시', sw('overlay'), 'overlay'),
+      field('플랫폼 기본 자막 숨기기', sw('hideNative'), 'hideNative'),
+      field('자막 크기', f.fontScale, 'fontScale'),
+      el('h4', { text: '듣기 훈련' }),
+      field('한국어 표시 방식', f.koMode, 'koMode'),
+      field('2회차 모드', sw('secondPass'), 'secondPass'),
+      field('빈칸 자막', f.cloze, 'cloze'),
+      field('소리 나는 대로', sw('soundsLike'), 'soundsLike'),
+      field('키위·마오리·학교 용어 주석', sw('kiwiNotes'), 'kiwiNotes'),
+      field('어휘 프로파일 · 말 속도', sw('vocabProfile'), 'vocabProfile'),
+      field('반복 속도 사다리', sw('loopLadder'), 'loopLadder'),
+      el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: showVocab }, '이 에피소드 어휘 목록'), el('button', { class: 'st-btn', onclick: () => showInfo('missed') }, 'Q 못 알아들음 표시란?'), el('button', { class: 'st-btn', onclick: () => showInfo('twoPass') }, '두 번 보기 순서')]),
       el('h4', { text: '재생' }),
-      field('쉐도잉 쉬는 시간', el('span', null, [f.shadowPauseSec, ' ', f.shadowPauseSecLabel]), '자막이 끝난 뒤 따라 말할 시간 (1~7초)'),
-      field('재생 시작 여유 (ms)', num('leadMs', 0, 2000), '자막 시작보다 이만큼 앞에서 재생'),
-      field('재생 끝 여유 (ms)', num('tailMs', 0, 2000)),
-      el('div', { class: 'st-field' }, [el('label', null, ['이 영상 자막 시간 보정 (ms)', f.offsetHint]), el('span', { class: 'st-offset-ctl' }, [el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs - 500, 'manual') }, '−0.5초'), f.offset, el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs + 500, 'manual') }, '+0.5초')])]),
+      field('쉐도잉 쉬는 시간', el('span', null, [f.shadowPauseSec, ' ', f.shadowPauseSecLabel]), 'shadowing'),
+      field('재생 시작 여유 (ms)', num('leadMs', 0, 2000), 'leadTail'),
+      field('재생 끝 여유 (ms)', num('tailMs', 0, 2000), 'leadTail'),
+      el('div', { class: 'st-field' }, [el('label', null, ['이 영상 자막 시간 보정 (ms)', infoBtn('offset')]), el('span', { class: 'st-offset-ctl' }, [el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs - 500, 'manual') }, '−0.5초'), f.offset, el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs + 500, 'manual') }, '+0.5초')])]),
       el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: () => { state.alignSamples = []; saveOffset(0, 'manual'); toast('보정값을 지웠습니다. 플랫폼 자막이 켜져 있으면 다시 자동 감지합니다'); } }, '보정 초기화')]),
       el('h4', { text: '저장' }),
-      field('별표 저장 시 오디오', f.audioMode, '대사를 한 번 다시 재생하며 녹음합니다. 넷플릭스·프라임은 툴바 아이콘을 눌러 탭 허용이 필요할 수 있습니다. 저장 폴더는 툴바 팝업 → "변경"에서 고릅니다'),
+      field('별표 저장 시 오디오', f.audioMode, 'audioStore'),
       el('div', { class: 'st-btn-row' }, [
         el('button', { class: 'st-btn st-primary', onclick: () => bg({ type: 'openSite' }).catch(() => {}) }, '웹에서 저장 목록 · 퀴즈 열기'),
         el('button', { class: 'st-btn', onclick: () => setEnabled(false) }, '이 사이트에서 SubTutor 끄기'),
@@ -1102,12 +1206,15 @@
     f.hideNative.checked = !!settings.hideNative;
     f.translationSource.value = settings.translationSource;
     f.audioMode.value = settings.audioMode || 'off';
+    f.koMode.value = settings.koMode || 'hold';
+    f.cloze.value = settings.cloze || 'off';
+    f.secondPass.checked = !!settings.secondPass; f.soundsLike.checked = !!settings.soundsLike; f.kiwiNotes.checked = !!settings.kiwiNotes; f.vocabProfile.checked = !!settings.vocabProfile; f.loopLadder.checked = !!settings.loopLadder;
     f.fontScale.value = settings.fontScale;
     f.shadowPauseSec.value = settings.shadowPauseSec;
     f.shadowPauseSecLabel.textContent = settings.shadowPauseSec + '초';
     f.leadMs.value = settings.leadMs; f.tailMs.value = settings.tailMs;
     f.offset.value = state.offsetMs;
-    f.offsetHint.textContent = state.offsetMs ? (state.offsetSource === 'auto' ? '플랫폼 자막과 대조해 자동 감지한 값' : '직접 입력한 값') + ' · 자막이 소리보다 빠르면 음수' : '자막이 소리보다 빠르면 음수, 늦으면 양수. 플랫폼 자막이 켜져 있으면 자동 감지';
+    f.offset.title = state.offsetMs ? (state.offsetSource === 'auto' ? '플랫폼 자막과 대조해 자동 감지한 값' : '직접 입력한 값') + ' · 자막이 소리보다 빠르면 음수' : '자막이 소리보다 빠르면 음수, 늦으면 양수. 플랫폼 자막이 켜져 있으면 자동 감지';
   }
   function diagnostics() {
     const v = adapter.video();
@@ -1148,15 +1255,15 @@
       ui.list.append(el('div', { class: 'st-empty' }, state.videoId ? '자막을 불러오면 여기에 목록이 표시됩니다.\n줄을 누르면 그 위치로 이동합니다.' : '영상을 재생하면 자막 목록이 표시됩니다.'));
       return;
     }
+    ui.list.classList.toggle('st-ko-veiled', settings.koMode !== 'always');
     const frag = document.createDocumentFragment();
     state.cues.forEach((c, i) => {
-      const row = el('div', { class: 'st-row', 'data-i': i }, [
-        el('div', { class: 'st-row-main' }, [
-          el('div', { class: 'st-en', text: c.text.replace(/\n/g, ' ') }),
-          el('div', { class: 'st-ko', text: settings.showTranslation ? koFor(c) : '' }),
-        ]),
-        el('button', { class: 'st-star', title: '저장 (E)' }, '☆'),
-      ]);
+      const en = el('div', { class: 'st-en' });
+      fillMarked(en, c.text.replace(/\n/g, ' '), settings.kiwiNotes ? kiwiHits(c) : []);
+      const main = el('div', { class: 'st-row-main' }, [en, el('div', { class: 'st-ko', text: settings.showTranslation ? koFor(c) : '' })]);
+      if (settings.soundsLike && Sp) { const sl = Sp.soundsLike(c.text.replace(/\n/g, ' ')); if (sl && sl !== c.text) main.append(el('div', { class: 'st-sound', text: sl })); }
+      if (settings.kiwiNotes) { const hits = kiwiHits(c); if (hits.length) main.append(el('div', { class: 'st-kiwi-line', text: hits.slice(0, 3).map((h) => h.term + ' = ' + h.ko).join(' · ') })); }
+      const row = el('div', { class: 'st-row' + (settings.secondPass && state.missed.has(itemIdFor(c)) ? ' st-missed' : ''), 'data-i': i }, [main, el('button', { class: 'st-star', title: '저장 (E)' }, '☆')]);
       frag.append(row);
       ui.rows.push(row);
     });
@@ -1169,7 +1276,27 @@
   }
   function updateRowKo(i) {
     const row = ui.rows && ui.rows[i];
-    if (row) row.firstElementChild.lastElementChild.textContent = settings.showTranslation ? koFor(state.cues[i]) : '';
+    const ko = row && row.querySelector('.st-ko');
+    if (ko) ko.textContent = settings.showTranslation ? koFor(state.cues[i]) : '';
+  }
+  const kiwiCache = new WeakMap();
+  function kiwiHits(c) {
+    if (!Sp || !Kiwi.length) return [];
+    let h = kiwiCache.get(c);
+    if (!h) { h = Sp.findKiwi(c.text, Kiwi); kiwiCache.set(c, h); }
+    return h;
+  }
+  // 텍스트에 키위 용어 밑줄을 넣는다 (텍스트 노드 + <u>)
+  function fillMarked(node, text, hits) {
+    node.textContent = '';
+    if (!hits || !hits.length) { node.textContent = text; return; }
+    let pos = 0;
+    for (const h of hits) {
+      if (h.start > pos) node.append(document.createTextNode(text.slice(pos, h.start)));
+      node.append(el('u', { class: 'st-kiwi', title: h.term + ' = ' + h.ko }, text.slice(h.start, h.end)));
+      pos = h.end;
+    }
+    if (pos < text.length) node.append(document.createTextNode(text.slice(pos)));
   }
   function refreshAllKo() {
     if (!ui.rows) return;
@@ -1202,10 +1329,79 @@
     state.lastDisplayIdx = i;
     if (!settings.overlay || !isEnabled() || i < 0 || !state.cues[i] || (adapter.isAdPlaying && adapter.isAdPlaying())) { ui.overlay.classList.add('st-hidden'); return; }
     const c = state.cues[i];
-    ui.ovText.textContent = c.text;
-    ui.ovKo.textContent = settings.showTranslation ? koFor(c) : '';
-    ui.ovStar.textContent = state.saved.has(itemIdFor(c)) ? '★' : '☆';
+    const id = itemIdFor(c);
+    const missed = state.missed.has(id);
+    const clozed = settings.cloze !== 'off' && Sp && state.clozeRevealIdx !== i;
+    const text = clozed ? Sp.clozeLine(c.text, settings.cloze, i).text : c.text;
+    fillMarked(ui.ovText, text, settings.kiwiNotes && !clozed ? kiwiHits(c) : []);
+    let showKo = !!settings.showTranslation;
+    if (settings.koMode === 'hold') showKo = showKo && (state.koHold || (settings.secondPass && missed));
+    else if (settings.koMode === 'afterRepeat') showKo = showKo && (state.koHold || (settings.secondPass && missed) || (state.loop && state.loopIdx === i && state.loopCount >= (settings.koRepeats || 3)));
+    ui.ovKo.textContent = showKo ? koFor(c) : '';
+    ui.ovSound.textContent = settings.soundsLike && Sp && !clozed ? Sp.soundsLike(c.text) : '';
+    const hits = settings.kiwiNotes ? kiwiHits(c) : [];
+    ui.ovKiwi.textContent = hits.length ? hits.slice(0, 3).map((h) => h.term + ' = ' + h.ko).join(' · ') : '';
+    ui.ovStar.textContent = state.saved.has(id) ? '★' : '☆';
+    ui.ovStar.classList.toggle('missed', missed);
+    if (!showKo && settings.koMode === 'hold' && settings.showTranslation && !settings.koHintShown && !state.koHintDone) { state.koHintDone = true; toast('한국어 뜻은 T 키를 누르는 동안만 보입니다 (⚙ → 한국어 표시 방식에서 바꿀 수 있어요)', 6000); saveSettings({ koHintShown: true }); }
+    ui.ovStar.title = missed ? '못 알아들음으로 표시됨 (Q 로 해제)' : '이 자막 저장 (E) · 못 알아들음 표시 (Q)';
     ui.overlay.classList.remove('st-hidden');
+  }
+  // Q: 지금 보이는 자막을 "못 알아들음"으로 표시 (별표 저장 + 태그). 다시 누르면 해제
+  async function toggleMissed() {
+    const shown = displayIndex();
+    const i = shown >= 0 ? shown : anchorIndex();
+    if (i < 0) { toast('표시할 자막이 없습니다'); return; }
+    const c = state.cues[i];
+    const id = itemIdFor(c);
+    const tag = settings.missedTag || '못 알아들음';
+    try {
+      if (state.missed.has(id)) {
+        state.missed.delete(id);
+        const it = state.saved.get(id);
+        const tags = ((it && it.tags) || []).filter((t) => t !== tag);
+        if (it) { it.missed = false; it.tags = tags; }
+        await bg({ type: 'items.update', id, patch: { missed: false, tags } });
+        toast('못 알아들음 표시 해제');
+      } else {
+        if (!state.saved.has(id)) {
+          const item = buildItem(c, i);
+          item.missed = true; item.tags = [tag];
+          state.saved.set(id, item);
+          await bg({ type: 'items.save', item });
+          if (!item.translation) bg({ type: 'translate', texts: [c.text.replace(/\n/g, ' ')], from: 'en', to: 'ko' }).then((res) => { const t = res && res.translations && res.translations[0]; if (t) { c.koMt = t; updateRowKo(i); bg({ type: 'items.update', id, patch: { translation: t, translationSource: 'mt' } }).catch(() => {}); } }).catch(() => {});
+          if (settings.audioMode && settings.audioMode !== 'off') queueCapture(i, item);
+        } else {
+          const it = state.saved.get(id);
+          const tags = ((it && it.tags) || []).concat(tag).filter((t, k, a) => a.indexOf(t) === k);
+          if (it) { it.missed = true; it.tags = tags; }
+          await bg({ type: 'items.update', id, patch: { missed: true, tags } });
+        }
+        state.missed.add(id);
+        const names = Array.isArray(settings.tagNames) ? settings.tagNames : [];
+        if (!names.includes(tag)) bg({ type: 'settings.set', patch: { tagNames: names.concat(tag) } }).catch(() => {});
+        toast('❓ 못 알아들음 · 저장했습니다 (태그 "' + tag + '")');
+      }
+      refreshSavedMarks();
+      if (ui.rows && ui.rows[i]) ui.rows[i].classList.toggle('st-missed', settings.secondPass && state.missed.has(id));
+      renderOverlay(true);
+      saveEpisodeStats(false);
+    } catch (e) { toast('표시 실패: ' + (e && e.message)); }
+  }
+  // 에피소드별 통계 (웹의 진행 대시보드): 본 줄 수·못 알아들음·말 속도·어휘 난도. 시리즈별 3천 밖 단어 재출현도 기록
+  function saveEpisodeStats(withSeries) {
+    if (!state.videoId || !state.cues.length) return;
+    const p = state.profile;
+    const d = p ? Voc.difficulty(p) : null;
+    const meta = state.meta || adapter.domTitle() || {};
+    const data = { platform: adapter.name, videoId: state.videoId, title: meta.title || '', episode: meta.episode || '', lines: state.cues.length, watched: state.watched.size, missed: state.missed.size, wpm: p ? p.wpm : 0, outside3k: d ? Math.round(d.outside * 10) / 10 : null, need95: p ? p.need95 : null, difficulty: d ? d.label : '', updatedAt: Date.now() };
+    const msg = { type: 'stats.episode', key: adapter.name + ':' + state.videoId, data };
+    if (withSeries && p && meta.title && !state.seriesSaved) {
+      state.seriesSaved = true;
+      msg.series = { key: adapter.name + ':' + meta.title, videoId: state.videoId, words: p.beyond3k.slice(0, 400).map((e) => e.word) };
+    }
+    state.statsSavedAt = now();
+    bg(msg).catch(() => {});
   }
   // 플랫폼이 그리는 자막 문장과 우리 큐를 대조해 자막 시간 보정값을 자동으로 찾는다 (프라임/디즈니/유튜브)
   function startNativeAlignWatch() {
@@ -1305,7 +1501,8 @@
     if (state.clip) stopClip('user');
     cancelModesPending();
     state.lastShown = i; state.prevIdx = -1;
-    if (state.loop) state.loopIdx = i;
+    if (state.loop) { if (state.loopIdx !== i) { state.loopCount = 0; if (settings.loopLadder) { state.rate = LADDER[0]; applyRate(true); } } state.loopIdx = i; }
+    state.clozeRevealIdx = -1;
     playFrom(cueVideoMs(c) - settings.leadMs, !!(opts && opts.play === false));
     highlightRow(i, true);
   }
@@ -1331,16 +1528,20 @@
     const i = anchorIndex();
     if (i >= 0) goToCue(i);
   }
+  const LADDER = [0.8, 0.9, 1, 1.15];
   function toggleLoop() {
-    if (state.loop) { state.loop = false; state.loopIdx = -1; toast('반복 끔'); }
-    else {
+    if (state.loop) {
+      state.loop = false; state.loopIdx = -1; toast('반복 끔');
+      if (settings.loopLadder && Math.abs(state.rate - state.loopBaseRate) > 0.01) { state.rate = state.loopBaseRate; applyRate(true); }
+    } else {
       const i = anchorIndex();
       if (i < 0) return;
-      state.loop = true; state.loopIdx = i;
-      toast('🔁 이 자막 반복');
+      state.loop = true; state.loopIdx = i; state.loopCount = 0; state.loopBaseRate = state.rate;
+      if (settings.loopLadder) { state.rate = LADDER[0]; applyRate(true); toast('🔁 반복 · 속도 사다리 0.8→1.15×'); } else toast('🔁 이 자막 반복');
       goToCue(i);
     }
     updateModeUI();
+    renderOverlay(true);
   }
   function setMode(mode, on) {
     const patch = {};
@@ -1394,7 +1595,8 @@
   function startClip(msg) {
     cancelModesPending();
     state.loop = false; state.loopIdx = -1; updateModeUI();
-    state.clip = { clipId: msg.clipId, startMs: msg.startMs, endMs: msg.endMs, loop: !!msg.loop, loops: 0, lastLoopAt: 0, phase: 'seeking', startedAt: now(), playTries: 0, lastPlayAt: now() };
+    state.clip = { clipId: msg.clipId, startMs: msg.startMs, endMs: msg.endMs, loop: !!msg.loop, loops: 0, lastLoopAt: 0, phase: 'seeking', startedAt: now(), playTries: 0, lastPlayAt: now(), prevRate: state.rate, rate: msg.rate > 0 ? msg.rate : 0 };
+    if (state.clip.rate && Math.abs(state.clip.rate - state.rate) > 0.01) { state.rate = state.clip.rate; applyRate(true); }
     playFrom(msg.startMs - settings.leadMs);
     highlightRow(S.findCueIndex(state.cues, msg.startMs + effectiveOffset() + 10), true);
   }
@@ -1402,10 +1604,12 @@
     if (!state.clip) return;
     bg(Object.assign({ type: 'player.event', clipId: state.clip.clipId, event }, extra || {})).catch(() => {});
   }
+  function restoreClipRate(c) { if (c && c.rate && Math.abs(state.rate - c.prevRate) > 0.01) { state.rate = c.prevRate; applyRate(true); } }
   function stopClip(reason) {
     if (!state.clip) return;
     const c = state.clip;
     state.clip = null;
+    restoreClipRate(c);
     clearTimeout(state.ensureTimer);
     // 웹사이트의 정지(또는 다른 대사 재생)로 멈출 때는 플레이어도 멈춘다. 플레이어에서 직접 이동한 경우('user')는 그대로 둔다
     if (reason === 'stopped') { state.pauseByUsUntil = now() + 1500; adapter.pause(); }
@@ -1432,6 +1636,7 @@
       state.pauseByUsUntil = now() + 1500;
       adapter.pause();
       state.clip = null;
+      restoreClipRate(c);
       bg({ type: 'player.event', clipId: c.clipId, event: 'ended' }).catch(() => {});
       return;
     }
@@ -1471,6 +1676,7 @@
       state.current = idx;
       if (idx >= 0) {
         state.lastShown = idx;
+        if (!paused) state.watched.add(idx);
         highlightRow(idx, false);
         ensureTranslations(idx);
         if (!state.clip && !capturing && !paused && (settings.autoPause || settings.shadowing) && !state.loop) scheduleEndCheck(idx, t);
@@ -1485,7 +1691,10 @@
         const c = cues[state.loopIdx];
         if ((t >= c.end + settings.tailMs - 20 || t < c.start - settings.leadMs - 2500) && now() - state.lastLoopSeekAt > 500) {
           state.lastLoopSeekAt = now();
+          state.loopCount++;
+          if (settings.loopLadder) { const r = LADDER[Math.min(LADDER.length - 1, state.loopCount)]; if (Math.abs(r - state.rate) > 0.01) { state.rate = r; applyRate(true); } }
           seekTo(cueVideoMs(c) - settings.leadMs);
+          if (settings.koMode === 'afterRepeat') renderOverlay(true);
         }
       } else if ((settings.autoPause || settings.shadowing) && prevIdx >= 0 && prevIdx !== idx && cues[prevIdx]) {
         const ended = cues[prevIdx];
@@ -1496,6 +1705,7 @@
     }
     if (paused !== state.lastPaused) { state.lastPaused = paused; renderOverlay(true); }
     else renderOverlay(false);
+    if (state.watched.size && now() - state.statsSavedAt > 20000) saveEpisodeStats(false);
     state.prevIdx = idx;
     state.lastT = t;
   }
@@ -1508,7 +1718,7 @@
     const i = shown >= 0 ? shown : anchorIndex();
     if (i >= 0) toggleSave(i); else toast('저장할 자막이 없습니다');
   }
-  const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: saveShownCue, Enter: saveShownCue, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
+  const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: saveShownCue, Enter: saveShownCue, KeyQ: toggleMissed, KeyV: () => { state.clozeRevealIdx = displayIndex(); renderOverlay(true); }, KeyT: () => { if (!state.koHold) { state.koHold = true; renderOverlay(true); } }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
   function shouldHandleKey(e) {
     if (!state.active || !isEnabled()) return false;
     if (!state.cues.length && !/^(Backquote|BracketLeft|BracketRight|Backslash)$/.test(e.code)) return false;
@@ -1523,7 +1733,11 @@
     if (e.repeat) return;
     KEY_ACTIONS[e.code]();
   }, true);
-  window.addEventListener('keyup', (e) => { if (shouldHandleKey(e)) e.stopImmediatePropagation(); }, true);
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'KeyT' && state.koHold) { state.koHold = false; renderOverlay(true); }
+    if (shouldHandleKey(e)) e.stopImmediatePropagation();
+  }, true);
+  window.addEventListener('blur', () => { if (state.koHold) { state.koHold = false; renderOverlay(true); } });
   window.addEventListener('keypress', (e) => { if (shouldHandleKey(e)) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
 
   // ───────────── 시작 ─────────────

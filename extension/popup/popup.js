@@ -1,4 +1,15 @@
-const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '' };
+const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '', koMode: 'hold', secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false };
+const Ex = globalThis.SubTutorExplain;
+function showInfo(key) {
+  const x = Ex && Ex.get(key);
+  if (!x) return;
+  $('infoTitle').textContent = x.title;
+  const body = $('infoBody'); body.textContent = '';
+  const p = document.createElement('p'); p.textContent = x.what; body.append(p);
+  if (x.why) { const h = document.createElement('h5'); h.textContent = '왜 이렇게 하나 (근거)'; const w = document.createElement('p'); w.textContent = x.why; body.append(h, w); }
+  if (x.refs && x.refs.length) { const h = document.createElement('h5'); h.textContent = '참고 문헌'; const ul = document.createElement('ul'); x.refs.forEach((r) => { const li = document.createElement('li'); li.textContent = r; ul.append(li); }); body.append(h, ul); }
+  $('infobox').classList.remove('hidden');
+}
 const FS = globalThis.SubTutorFS;
 let currentPlatform = null;
 const $ = (id) => document.getElementById(id);
@@ -25,6 +36,9 @@ function render() {
   $('shadowing').checked = !!settings.shadowing;
   $('shadowPauseSec').value = String(settings.shadowPauseSec);
   $('audioMode').value = settings.audioMode || 'off';
+  $('koMode').value = settings.koMode || 'hold';
+  $('cloze').value = settings.cloze || 'off';
+  ['secondPass', 'soundsLike', 'kiwiNotes', 'vocabProfile', 'loopLadder'].forEach((k) => { $(k).checked = !!settings[k]; });
   $('enabled').checked = !currentPlatform || !settings.enabled || settings.enabled[currentPlatform] !== false;
   $('enabledRow').style.display = currentPlatform ? '' : 'none';
 }
@@ -40,6 +54,12 @@ async function init() {
   $('shadowing').addEventListener('change', (e) => save({ shadowing: e.target.checked, autoPause: e.target.checked ? false : settings.autoPause }));
   sel.addEventListener('change', (e) => save({ shadowPauseSec: +e.target.value }));
   $('audioMode').addEventListener('change', (e) => save({ audioMode: e.target.value }));
+  $('koMode').addEventListener('change', (e) => save({ koMode: e.target.value }));
+  $('cloze').addEventListener('change', (e) => save({ cloze: e.target.value }));
+  ['secondPass', 'soundsLike', 'kiwiNotes', 'vocabProfile', 'loopLadder'].forEach((k) => $(k).addEventListener('change', (e) => save({ [k]: e.target.checked })));
+  document.querySelectorAll('.info').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); showInfo(b.dataset.key); }));
+  $('infoClose').addEventListener('click', () => $('infobox').classList.add('hidden'));
+  $('keysBtn').addEventListener('click', () => showInfo('keys'));
   $('enabled').addEventListener('change', (e) => { if (!currentPlatform) return; save({ enabled: Object.assign({}, settings.enabled || {}, { [currentPlatform]: e.target.checked }) }); });
   $('openSite').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'openSite' }, () => window.close()));
   $('changeDir').addEventListener('click', () => { chrome.runtime.openOptionsPage(); window.close(); });
@@ -60,7 +80,7 @@ async function init() {
       render();
       const names = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+', youtube: '유튜브' };
       $('status').textContent = (names[res.platform] || res.platform) + (res.videoId ? ' · ' + (res.title || res.videoId) + ' · 자막 ' + res.cues + '줄' : ' · 재생 화면이 아닙니다');
-      if (res.videoId && res.platform !== 'youtube') $('audioHint').textContent = '✓ 이 탭의 오디오 녹음이 허용되었습니다 (팝업을 연 뒤에는 별표 저장 시 바로 녹음합니다). 녹음하는 동안 대사를 한 번 다시 재생합니다.';
+      if (res.videoId && res.platform !== 'youtube') { $('audioHint').textContent = '✓ 이 탭의 오디오 녹음 허용됨'; $('audioHint').classList.remove('hidden'); }
       chrome.tabs.sendMessage(tab.id, { type: 'popupOpened' }).catch(() => {});
     } else {
       $('status').textContent = '이 탭에서는 실행 중이 아닙니다 (넷플릭스 재생 화면에서 열어 보세요)';

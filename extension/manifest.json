@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SubTutor - 자막 튜터",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "넷플릭스·유튜브·프라임 비디오·디즈니+ 자막으로 영어 공부: 자막 목록, 한국어 번역, A/S/D 반복 단축키, 자동 일시정지, 쉐도잉, 자막·오디오 저장, 받아쓰기 퀴즈",
   "icons": {
     "16": "icons/icon16.png",
@@ -112,6 +112,11 @@
         "src/lib/subtitles.js",
         "vendor/lamejs/lame.min.js",
         "src/lib/audio.js",
+        "src/data/freq-en.js",
+        "src/data/kiwi.js",
+        "src/lib/speech.js",
+        "src/lib/vocab.js",
+        "src/lib/explain.js",
         "src/content/adapters.js",
         "src/content/content.js"
       ],

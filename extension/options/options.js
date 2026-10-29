@@ -3,6 +3,20 @@
   'use strict';
   const $ = (id) => document.getElementById(id);
   const FS = globalThis.SubTutorFS;
+  const Ex = globalThis.SubTutorExplain;
+  function showInfo(key) {
+    const x = Ex && Ex.get(key);
+    if (!x) return;
+    $('infoTitle').textContent = x.title;
+    const body = $('infoBody'); body.textContent = '';
+    const p = document.createElement('p'); p.textContent = x.what; body.append(p);
+    if (key === 'folder') { const h = document.createElement('h5'); h.textContent = '크롬의 폴더 권한'; const ul = document.createElement('ul'); ['크롬은 확장 프로그램이 받은 폴더 권한을 브라우저를 다시 시작하면(그리고 이 설정 탭을 모두 닫으면) 잠시 거둬 갑니다. 그동안은 다운로드 폴더/SubTutor 에 저장되고 플레이어에 안내가 뜹니다.', '툴바의 SubTutor 아이콘 → "폴더 권한 허용"을 누르면 다시 지정한 폴더에 저장됩니다.', '"다시 묻지 않게 고정" → 이 탭이 닫혔다 다시 열리면 "폴더 권한 허용"을 누르고 크롬 창에서 "매번 허용"(Allow on every visit)을 고르세요. 그 뒤로는 묻지 않습니다.', '다른 방법: 크롬 설정 › 다운로드 › 위치를 바꾸면 권한 없이도 그 폴더의 SubTutor 안에 저장됩니다.'].forEach((t) => { const li = document.createElement('li'); li.textContent = t; ul.append(li); }); body.append(h, ul); }
+    if (x.why) { const h = document.createElement('h5'); h.textContent = '왜 이렇게 하나 (근거)'; const w = document.createElement('p'); w.textContent = x.why; body.append(h, w); }
+    if (x.refs && x.refs.length) { const h = document.createElement('h5'); h.textContent = '참고 문헌'; const ul = document.createElement('ul'); x.refs.forEach((r) => { const li = document.createElement('li'); li.textContent = r; ul.append(li); }); body.append(h, ul); }
+    $('infobox').classList.remove('hidden');
+  }
+  document.querySelectorAll('.info').forEach((b) => b.addEventListener('click', () => showInfo(b.dataset.key)));
+  document.getElementById('infoClose').addEventListener('click', () => $('infobox').classList.add('hidden'));
   let settings = {};
   async function loadSettings() { const { settings: s } = await chrome.storage.local.get('settings'); settings = s || {}; }
   async function saveSettings(patch) { settings = Object.assign({}, settings, patch); await chrome.storage.local.set({ settings }); }

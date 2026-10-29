@@ -15,30 +15,38 @@
   </header>
 
   <section>
-    <label class="row" id="enabledRow"><span><b>이 사이트에서 SubTutor 사용</b></span><input type="checkbox" id="enabled" class="switch"></label>
-    <label class="row"><span>자막 패널 열기</span><input type="checkbox" id="panelOpen" class="switch"></label>
-    <label class="row"><span>한국어 번역 표시</span><input type="checkbox" id="showTranslation" class="switch"></label>
-    <label class="row"><span>플랫폼 기본 자막 숨기기</span><input type="checkbox" id="hideNative" class="switch"></label>
-    <label class="row"><span>자동 일시정지 <kbd>P</kbd></span><input type="checkbox" id="autoPause" class="switch"></label>
-    <label class="row"><span>쉐도잉 <kbd>W</kbd> · 쉬는 시간 <select id="shadowPauseSec"></select></span><input type="checkbox" id="shadowing" class="switch"></label>
-    <label class="row"><span>별표 저장 시 오디오</span><select id="audioMode"><option value="off">저장 안 함</option><option value="store">웹 퀴즈용 보관</option><option value="download">PC에 MP3 파일로 저장</option><option value="both">둘 다</option></select></label>
-    <div class="row folder"><span>저장 폴더: <b id="dirName">다운로드 폴더/SubTutor</b></span><button id="changeDir" class="small" title="오디오 파일을 저장할 폴더 고르기">변경…</button></div>
+    <label class="row" id="enabledRow"><span><b>이 사이트에서 SubTutor 사용</b><button class="info" data-key="enabled">i</button></span><input type="checkbox" id="enabled" class="switch"></label>
+    <label class="row"><span>자막 패널 열기<button class="info" data-key="panel">i</button></span><input type="checkbox" id="panelOpen" class="switch"></label>
+    <label class="row"><span>한국어 번역 표시<button class="info" data-key="translation">i</button></span><input type="checkbox" id="showTranslation" class="switch"></label>
+    <label class="row"><span>플랫폼 기본 자막 숨기기<button class="info" data-key="hideNative">i</button></span><input type="checkbox" id="hideNative" class="switch"></label>
+    <label class="row"><span>자동 일시정지 <kbd>P</kbd><button class="info" data-key="autoPause">i</button></span><input type="checkbox" id="autoPause" class="switch"></label>
+    <label class="row"><span>쉐도잉 <kbd>W</kbd> · <select id="shadowPauseSec"></select><button class="info" data-key="shadowing">i</button></span><input type="checkbox" id="shadowing" class="switch"></label>
+  </section>
+  <section>
+    <div class="sect">듣기 훈련</div>
+    <label class="row"><span>한국어 표시<button class="info" data-key="koMode">i</button></span><select id="koMode"><option value="always">항상</option><option value="hold">T 누르는 동안</option><option value="afterRepeat">3회 반복 뒤</option></select></label>
+    <label class="row"><span>2회차 모드<button class="info" data-key="secondPass">i</button></span><input type="checkbox" id="secondPass" class="switch"></label>
+    <label class="row"><span>빈칸 자막 <kbd>V</kbd><button class="info" data-key="cloze">i</button></span><select id="cloze"><option value="off">끄기</option><option value="function">기능어</option><option value="random">무작위</option></select></label>
+    <label class="row"><span>소리 나는 대로<button class="info" data-key="soundsLike">i</button></span><input type="checkbox" id="soundsLike" class="switch"></label>
+    <label class="row"><span>키위·학교 용어 주석<button class="info" data-key="kiwiNotes">i</button></span><input type="checkbox" id="kiwiNotes" class="switch"></label>
+    <label class="row"><span>어휘 프로파일 · 말 속도<button class="info" data-key="vocabProfile">i</button></span><input type="checkbox" id="vocabProfile" class="switch"></label>
+    <label class="row"><span>반복 속도 사다리<button class="info" data-key="loopLadder">i</button></span><input type="checkbox" id="loopLadder" class="switch"></label>
+  </section>
+  <section>
+    <label class="row"><span>별표 저장 시 오디오<button class="info" data-key="audioStore">i</button></span><select id="audioMode"><option value="off">저장 안 함</option><option value="store">웹 퀴즈용 보관</option><option value="download">PC에 MP3 파일로 저장</option><option value="both">둘 다</option></select></label>
+    <div class="row folder"><span>저장 폴더: <b id="dirName">다운로드 폴더/SubTutor</b><button class="info" data-key="folder">i</button></span><button id="changeDir" class="small" title="오디오 파일을 저장할 폴더 고르기">변경…</button></div>
     <div id="dirWarn" class="hint warn hidden">지정한 폴더의 권한이 풀려 있어 지금은 다운로드 폴더에 저장됩니다. <button id="grantDir" class="small">폴더 권한 허용</button></div>
-    <div class="hint" id="audioHint">넷플릭스·프라임·디즈니+에서 오디오 녹음은 재생 탭에서 이 팝업을 한 번 열면 허용됩니다(크롬 규칙). 그 뒤 별표 저장 시 대사를 한 번 다시 재생하며 녹음합니다.</div>
+    <div class="hint hidden" id="audioHint"></div>
   </section>
 
   <section class="buttons">
     <button id="openSite" class="primary">웹에서 저장 목록 · 퀴즈 열기</button>
     <button id="openNetflix">넷플릭스 열기</button>
+    <button id="keysBtn" class="small" title="단축키">⌨</button>
   </section>
-
-  <section class="keys">
-    <div><kbd>A</kbd> 이전 자막 &nbsp; <kbd>S</kbd> 현재 자막 무한 반복 &nbsp; <kbd>D</kbd> 다음 자막</div>
-    <div><kbd>F</kbd> 현재 자막 다시 듣기 &nbsp; <kbd>E</kbd> 별표 저장 &nbsp; <kbd>`</kbd> 패널 열기/닫기</div>
-    <div><kbd>[</kbd> 느리게 &nbsp; <kbd>]</kbd> 빠르게 &nbsp; <kbd>\</kbd> 1배속 (반복 재생에도 유지)</div>
-    <div class="hint">단축키는 넷플릭스/프라임/디즈니+ 재생 화면에서 동작합니다. 패널의 ⚙ 에서 번역 출처·자막 크기·시간 보정을 바꿀 수 있습니다.</div>
-  </section>
+  <div id="infobox" class="infobox hidden"><div class="infobox-head"><b id="infoTitle"></b><button id="infoClose" class="small">닫기</button></div><div id="infoBody" class="infobox-body"></div></div>
   <script src="../src/lib/fs.js"></script>
+  <script src="../src/lib/explain.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -12,9 +12,7 @@
 </header>
 <main>
   <section>
-    <h2>대사 오디오 저장 폴더</h2>
-    <p class="desc">별표(★)로 저장할 때 아래 "별표 저장 시 오디오"가 <b>PC에 MP3 파일로 저장</b>(또는 둘 다)이면 대사 오디오가
-      <code>저장 폴더 / SubTutor / 작품 에피소드 / 시각 대사.mp3</code> 로 저장됩니다.</p>
+    <h2>대사 오디오 저장 폴더 <button class="info" data-key="folder" title="설명 · 근거">i</button></h2>
     <div class="status-box">
       <div><span class="k">현재 저장 위치</span> <b id="dirName">크롬 다운로드 폴더</b> <span class="path">› SubTutor › 작품 › 대사.mp3</span></div>
       <div><span class="k">폴더 권한</span> <b id="permState">—</b></div>
@@ -26,18 +24,12 @@
       <button id="reset" class="hidden">기본값(다운로드 폴더)으로</button>
     </div>
     <div id="msg" class="msg"></div>
-    <details id="help">
-      <summary>크롬의 폴더 권한은 이렇게 동작합니다</summary>
-      <ul>
-        <li>크롬은 확장 프로그램이 받은 폴더 권한을 <b>브라우저를 다시 시작하면</b>(그리고 이 설정 탭을 모두 닫으면) 잠시 거둬 갑니다. 권한이 없는 동안에는 평소처럼 <b>다운로드 폴더/SubTutor</b> 에 저장되고, 플레이어 화면에 안내가 뜹니다.</li>
-        <li>툴바의 SubTutor 아이콘을 눌러 <b>폴더 권한 허용</b>을 누르면 다시 지정한 폴더에 저장됩니다 (크롬이 조용히 허용합니다).</li>
-        <li>매번 누르기 번거로우면 <b>"다시 묻지 않게 고정"</b>을 누르세요. 이 탭을 닫았다 다시 연 뒤 "폴더 권한 허용"을 누르면 크롬이 창을 띄우는데, 거기서 <b>"매번 허용" (Allow on every visit)</b> 을 고르면 그 뒤로는 묻지 않습니다.</li>
-        <li>다른 방법: 크롬 설정 › 다운로드 › 위치를 바꾸면 폴더 권한 없이도 모든 파일이 그 폴더의 SubTutor 안에 저장됩니다.</li>
-      </ul>
+    <details id="help" class="hidden">
+      <summary>크롬의 폴더 권한</summary>
     </details>
   </section>
   <section>
-    <h2>별표 저장 시 오디오</h2>
+    <h2>별표 저장 시 오디오 <button class="info" data-key="audioStore" title="설명 · 근거">i</button></h2>
     <label class="inline">처리 방식
       <select id="audioMode">
         <option value="off">저장 안 함</option>
@@ -46,10 +38,11 @@
         <option value="both">둘 다</option>
       </select>
     </label>
-    <p class="desc">대사를 한 번 다시 재생하며 녹음합니다. 넷플릭스·프라임은 툴바의 SubTutor 아이콘을 한 번 눌러 그 탭의 오디오 캡처를 허용해야 할 수 있습니다. 유튜브는 바로 됩니다.</p>
   </section>
 </main>
+<div id="infobox" class="infobox hidden"><div class="infobox-head"><b id="infoTitle"></b><button id="infoClose">닫기</button></div><div id="infoBody" class="infobox-body"></div></div>
 <script src="../src/lib/fs.js"></script>
+<script src="../src/lib/explain.js"></script>
 <script src="options.js"></script>
 </body>
 </html>

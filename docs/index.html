@@ -13,7 +13,8 @@
   <div class="brand"><img src="icon.png" alt="" width="28" height="28"><span>SubTutor</span></div>
   <nav id="nav">
     <a href="#/list" data-view="list">저장한 자막 <b id="count-list">0</b></a>
-    <a href="#/quiz" data-view="quiz">퀴즈</a>
+    <a href="#/quiz" data-view="quiz">퀴즈 <b id="count-due" class="due"></b></a>
+    <a href="#/shadow" data-view="shadow">쉐도잉</a>
     <a href="#/known" data-view="known">알고 있는 표현 <b id="count-known">0</b></a>
     <a href="#/settings" data-view="settings">설정</a>
   </nav>
@@ -22,7 +23,11 @@
 <div id="banner" class="banner hidden"></div>
 <main id="app"></main>
 <div id="toast" class="toast"></div>
+<dialog id="info-dialog" class="info-dialog"><div class="info-head"><b id="info-title"></b><button id="info-close" class="btn">닫기</button></div><div id="info-body" class="info-body"></div></dialog>
 <script src="subtitles.js"></script>
+<script src="explain.js"></script>
+<script src="speech.js"></script>
+<script src="kiwi.js"></script>
 <script src="bridge-client.js"></script>
 <script src="recorder.js"></script>
 <script src="app.js"></script>

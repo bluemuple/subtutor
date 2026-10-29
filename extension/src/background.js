@@ -9,7 +9,22 @@ const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
   fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {},
   audioDirName: '', // 사용자가 고른 오디오 저장 폴더 이름 (핸들은 IndexedDB). 비어 있으면 다운로드 폴더
+  koMode: 'hold', koRepeats: 3, secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false, missedTag: '못 알아들음',
+  web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28' },
 };
+// ───────── 학습 통계 (에피소드별 이해율·말 속도, 시리즈 어휘 재출현, 받아쓰기 약점 단어, 복습 기록) ─────────
+async function getStats() {
+  const { stats } = await chrome.storage.local.get('stats');
+  const st = stats && typeof stats === 'object' ? stats : {};
+  st.episodes = st.episodes || {}; st.series = st.series || {}; st.weak = st.weak || {}; st.reviews = Array.isArray(st.reviews) ? st.reviews : [];
+  return st;
+}
+let statsChain = Promise.resolve();
+function withStats(fn) {
+  const run = statsChain.then(async () => { const st = await getStats(); const r = await fn(st); await chrome.storage.local.set({ stats: st }); return r; });
+  statsChain = run.catch(() => {});
+  return run;
+}
 const PLATFORM_URL_PATTERNS = {
   netflix: ['https://www.netflix.com/watch/*'],
   youtube: ['https://www.youtube.com/watch*'],
@@ -192,7 +207,7 @@ function notifyWeb(tabId, payload) {
   if (!tabId) return;
   chrome.tabs.sendMessage(tabId, { type: 'web.event', event: 'clip.state', payload }).catch(() => {});
 }
-async function playClip(item, websiteTabId, loop) {
+async function playClip(item, websiteTabId, loop, rate) {
   const prev = await currentClip();
   if (prev && prev.tabId) { try { await chrome.tabs.sendMessage(prev.tabId, { type: 'stopClip' }); } catch (e) { /* ignore */ } }
   const clipId = 'clip-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
@@ -219,7 +234,7 @@ async function playClip(item, websiteTabId, loop) {
       return { clipId, error: 'not-ready' };
     }
     const range = item.trim && Number.isFinite(item.trim.startMs) && Number.isFinite(item.trim.endMs) && item.trim.endMs > item.trim.startMs ? item.trim : item; // 웹에서 조정한 구간
-    await chrome.tabs.sendMessage(tabId, { type: 'playRange', clipId, startMs: range.startMs, endMs: range.endMs, loop: !!loop });
+    await chrome.tabs.sendMessage(tabId, { type: 'playRange', clipId, startMs: range.startMs, endMs: range.endMs, loop: !!loop, rate: Number.isFinite(rate) && rate > 0 ? rate : 0 });
     return { clipId };
   } catch (e) {
     notifyWeb(websiteTabId, { itemId: item.id, clipId, state: 'error', message: String((e && e.message) || e) });
@@ -372,6 +387,24 @@ async function handleMessage(msg, sender) {
     }
     case 'audio.save': return saveAudio(msg);
     case 'capture.start': return captureStart(msg, tabId);
+    case 'stats.get': case 'web.stats.get': return { stats: await getStats() };
+    case 'stats.episode': return withStats((st) => {
+      st.episodes[msg.key] = Object.assign({}, st.episodes[msg.key] || {}, msg.data || {});
+      if (msg.series && msg.series.key) {
+        const se = st.series[msg.series.key] || { episodes: [], words: {} };
+        if (!se.episodes.includes(msg.series.videoId)) {
+          se.episodes.push(msg.series.videoId);
+          for (const w of msg.series.words || []) se.words[w] = (se.words[w] || 0) + 1;
+          const keys = Object.keys(se.words);
+          if (keys.length > 3000) keys.sort((a, b) => se.words[a] - se.words[b]).slice(0, keys.length - 3000).forEach((k) => delete se.words[k]);
+        }
+        st.series[msg.series.key] = se;
+      }
+      return { ok: true };
+    });
+    case 'web.stats.weak': return withStats((st) => { for (const w of (p.words || []).slice(0, 50)) { const k = String(w).toLowerCase().slice(0, 30); if (k) st.weak[k] = (st.weak[k] || 0) + 1; } return { ok: true }; });
+    case 'web.stats.weakReset': return withStats((st) => { st.weak = {}; return { ok: true }; });
+    case 'web.stats.review': return withStats((st) => { st.reviews.push({ t: Date.now(), kind: String(p.kind || 'review').slice(0, 20) }); if (st.reviews.length > 3000) st.reviews.splice(0, st.reviews.length - 3000); return { ok: true }; });
     case 'capture.finish': return offscreenCall({ cmd: 'finish', startMs: msg.startMs, endMs: msg.endMs, anchors: msg.anchors, downloadRate: msg.downloadRate, storeRate: msg.storeRate }, 2);
     case 'capture.stop': return offscreenCall({ cmd: 'stop' }, 2);
     case 'audio.get': return getAudio(msg.id);
@@ -460,7 +493,7 @@ async function handleMessage(msg, sender) {
     case 'web.clip.play': {
       const item = (await getItems()).find((i) => i.id === p.itemId);
       if (!item) throw new Error('항목을 찾을 수 없습니다');
-      return playClip(item, tabId, !!p.loop);
+      return playClip(item, tabId, !!p.loop, +p.rate || 0);
     }
     case 'web.clip.loop': {
       const clip = await currentClip();

@@ -15,6 +15,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 async function step(name, fn) {
   const t0 = Date.now();
+  if (process.env.E2E_VERBOSE) console.log('  … ' + name + ' @' + new Date().toISOString().slice(11, 19));
   try { await fn(); results.push({ name, ok: true }); console.log('  ✔ ' + name + ' (' + (Date.now() - t0) + 'ms)'); }
   catch (e) { results.push({ name, ok: false, error: e }); console.log('  ✖ ' + name + ' → ' + (e && e.message || e)); }
 }
@@ -63,6 +64,7 @@ function ensureFixtures() {
     ],
     acceptInsecureCerts: true,
     defaultViewport: { width: 1400, height: 900 },
+    protocolTimeout: Number(process.env.E2E_PROTOCOL_TIMEOUT) || 60000,
   });
   let failed = false;
   try {
@@ -75,9 +77,11 @@ function ensureFixtures() {
     const extId = new URL(swTarget.url()).host;
     console.log('  extension id: ' + extId);
     await sw.evaluate(() => chrome.storage.local.clear());
+    await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { koMode: 'always' } }, {}));
 
     const page = await browser.newPage();
     const logs = [];
+    page.on('dialog', (d) => { logs.push('[page dialog] ' + d.message()); d.dismiss().catch(() => {}); });
     page.on('console', (m) => logs.push('[page ' + m.type() + '] ' + m.text()));
     page.on('pageerror', (e) => logs.push('[pageerror] ' + e.message));
     console.log('▶ 모의 넷플릭스 페이지');
@@ -151,6 +155,75 @@ function ensureFixtures() {
       await sleep(250);
       await page.keyboard.press('KeyF');
       await waitFor(async () => { const t = await videoTime(page); return t >= 5.8 && t < 6.6; }, 4000, 'replay time');
+    });
+    await step('한국어 표시 방식: T 키를 누르는 동안만 보이고 패널 한국어는 흐리게', async () => {
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { koMode: 'hold' } }, {}));
+      await setTime(page, 6.3, true);
+      await waitFor(() => page.evaluate(() => { const o = document.getElementById('st-overlay'); return !o.classList.contains('st-hidden') && o.querySelector('.st-ov-text').textContent.includes('Raffie') && o.querySelector('.st-ov-ko').textContent === ''; }), 5000, 'korean hidden by default');
+      assert(await page.evaluate(() => getComputedStyle(document.querySelector('.st-row[data-i="1"] .st-ko')).filter !== 'none'), 'panel korean blurred');
+      await page.keyboard.down('KeyT');
+      await waitFor(() => page.evaluate(() => document.querySelector('.st-ov-ko').textContent.includes('래피')), 2000, 'korean while holding T');
+      await page.keyboard.up('KeyT');
+      await waitFor(() => page.evaluate(() => document.querySelector('.st-ov-ko').textContent === ''), 2000, 'korean hidden after release');
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { koMode: 'always' } }, {}));
+      await waitFor(() => page.evaluate(() => document.querySelector('.st-ov-ko').textContent.includes('래피')), 3000, 'always mode again');
+    });
+    await step('Q: 못 알아들음 표시 → 별표 저장 + 태그, 다시 누르면 해제', async () => {
+      await page.keyboard.press('KeyQ');
+      const it = await waitFor(async () => { const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); const x = (items || []).find((i) => i.id === 'netflix:12345:6000'); return x && x.missed ? x : null; }, 6000, 'missed item saved');
+      assert((it.tags || []).includes('못 알아들음'), 'missed tag: ' + JSON.stringify(it.tags));
+      await waitFor(() => page.evaluate(() => document.querySelector('.st-ov-star').classList.contains('missed')), 3000, 'overlay star marks missed');
+      const names = await sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings || {}).tagNames);
+      assert(Array.isArray(names) && names.includes('못 알아들음'), 'tag name registered: ' + JSON.stringify(names));
+      await page.keyboard.press('KeyQ');
+      await waitFor(async () => { const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); const x = (items || []).find((i) => i.id === 'netflix:12345:6000'); return x && !x.missed && !(x.tags || []).includes('못 알아들음'); }, 6000, 'missed cleared');
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'items.remove', id: 'netflix:12345:6000' }, {}));
+      await waitFor(() => page.$$eval('.st-row.saved', (r) => r.length === 0), 5000, 'item removed');
+    });
+    await step('빈칸 자막: 단어를 가리고 V 로 공개', async () => {
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { cloze: 'function' } }, {}));
+      await waitFor(() => page.evaluate(() => /_{3,}/.test(document.querySelector('.st-ov-text').textContent) && document.querySelector('.st-ov-chip.on-cloze')), 4000, 'blanks shown');
+      await page.keyboard.press('KeyV');
+      await waitFor(() => page.evaluate(() => !/_{3,}/.test(document.querySelector('.st-ov-text').textContent) && document.querySelector('.st-ov-text').textContent.includes('Raffie')), 3000, 'revealed');
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { cloze: 'off' } }, {}));
+      await sleep(300);
+    });
+    await step('키위·학교 용어 주석과 소리 나는 대로 줄', async () => {
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { soundsLike: true, kiwiNotes: true } }, {}));
+      await setTime(page, 38.3, true);
+      await waitFor(() => page.evaluate(() => document.querySelector('.st-ov-text').textContent.includes('Sweet as')), 5000, 'cue 10 shown');
+      const ov = await page.evaluate(() => ({ kiwi: document.querySelector('.st-ov-kiwi').textContent, u: document.querySelectorAll('.st-ov-text u.st-kiwi').length, sound: document.querySelector('.st-ov-sound').textContent, row: document.querySelector('.st-row[data-i="9"] .st-kiwi-line') && document.querySelector('.st-row[data-i="9"] .st-kiwi-line').textContent, rowSound: document.querySelector('.st-row[data-i="9"] .st-sound') && document.querySelector('.st-row[data-i="9"] .st-sound').textContent }));
+      assert(/sweet as = /.test(ov.kiwi) && /eh = /.test(ov.kiwi) && ov.u >= 2, 'kiwi gloss ' + JSON.stringify(ov));
+      assert(/gonna/.test(ov.sound), 'sounds-like line ' + ov.sound);
+      assert(ov.row && /sweet as/.test(ov.row) && ov.rowSound && /gonna/.test(ov.rowSound), 'panel row annotations ' + JSON.stringify(ov));
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { soundsLike: false } }, {}));
+      await page.evaluate(() => document.querySelector('video').pause());
+    });
+    await step('어휘 프로파일: 상태줄의 말 속도·3천 밖 비율, 어휘 목록 상자, 에피소드 통계', async () => {
+      const status = await page.$eval('.st-status', (e) => e.textContent);
+      assert(/wpm/.test(status) && /3천 밖 \d+%/.test(status), 'status with profile: ' + status);
+      await page.click('.st-foot-btn:nth-child(3)');
+      await waitFor(() => page.evaluate(() => { const b = document.querySelector('.st-infobox'); return b && !b.classList.contains('st-hidden') && /이 에피소드 어휘/.test(b.textContent) && document.querySelectorAll('.st-vocab-row').length >= 1; }), 4000, 'vocab box');
+      const words = await page.$$eval('.st-vocab-row b', (els) => els.map((e) => e.textContent));
+      assert(words.includes('frisbee'), 'beyond-3k words include frisbee: ' + words.join(','));
+      await page.click('.st-infobox-head .st-icon');
+      const st = await waitFor(async () => { const r = await sw.evaluate(async () => (await chrome.storage.local.get('stats')).stats); const e = r && r.episodes && r.episodes['netflix:12345']; return e && e.lines === 10 && e.watched >= 1 ? e : null; }, 8000, 'episode stats');
+      assert(st.wpm > 0 && st.title === 'Mock Show', 'episode stat ' + JSON.stringify(st));
+      const series = await sw.evaluate(async () => (await chrome.storage.local.get('stats')).stats.series['netflix:Mock Show']);
+      assert(series && series.episodes.includes('12345') && series.words.frisbee === 1, 'series words ' + JSON.stringify(series && Object.keys(series.words).slice(0, 5)));
+    });
+    await step('⚙ 설정: 설명은 ⓘ 뒤에만, 누르면 근거 상자', async () => {
+      await page.click('.st-head .st-icon');
+      await page.waitForSelector('.st-settings:not(.st-hidden)');
+      const smalls = await page.$$eval('.st-settings small', (e) => e.length);
+      assert(smalls === 0, 'no visible hint text: ' + smalls);
+      const n = await page.$$eval('.st-settings .st-info', (e) => e.length);
+      assert(n >= 12, 'info buttons: ' + n);
+      await page.click('.st-settings .st-info[data-key="koMode"]');
+      await waitFor(() => page.evaluate(() => { const b = document.querySelector('.st-infobox'); return b && !b.classList.contains('st-hidden') && /Mitterer/.test(b.textContent) && /참고 문헌/.test(b.textContent); }), 3000, 'basis box with references');
+      await page.click('.st-infobox-head .st-icon');
+      await page.click('.st-head .st-icon');
+      await sleep(300);
     });
     await step('S: 현재 자막 무한 반복', async () => {
       await setTime(page, 10.3, true);
@@ -304,6 +377,18 @@ function ensureFixtures() {
       await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 2) < 0.01), 2000, 'rate capped at 2');
       await page.keyboard.press('Backslash');
       await sleep(200);
+    });
+    await step('반복 속도 사다리: S 반복마다 0.8→0.9→… 올라가고 끄면 원래 속도', async () => {
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { loopLadder: true } }, {}));
+      await sleep(300);
+      await setTime(page, 2.3, true);
+      await sleep(300);
+      await page.keyboard.press('KeyS');
+      await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.8) < 0.01), 3000, 'ladder starts at 0.8');
+      await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.9) < 0.01), 8000, 'second pass at 0.9');
+      await page.keyboard.press('KeyS');
+      await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 3000, 'rate restored');
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { loopLadder: false } }, {}));
     });
     await step('재생 화면을 떠나면 패널이 닫히고 돌아오면 다시 열린다', async () => {
       await page.evaluate(() => history.pushState({}, '', '/browse'));
@@ -534,6 +619,37 @@ function ensureFixtures() {
       assert(after.join() === '숙어', 'tag persists after reload: ' + after);
       await web.screenshot({ path: path.join(TMP, 'shots', 'web-list-tags.png') });
     });
+    await step('쉐도잉 세션: 듣기 → 속으로 → 글 보며 → 녹음 → 비교', async () => {
+      await web.goto('http://localhost:8766/#/shadow', { waitUntil: 'load' });
+      await waitFor(() => web.$('.quiz-setup'), 8000, 'shadow setup');
+      await web.select('.quiz-setup select', 'Mock Lecture Title');
+      await web.click('.quiz-setup .btn.primary');
+      await waitFor(() => web.$eval('.steps .step.on', (e) => e.textContent.startsWith('1')), 5000, 'step 1');
+      await waitFor(() => web.$eval('.shadow-card', (e) => e.classList.contains('playing')), 6000, 'autoplay step 1');
+      assert(await web.$eval('.shadow-card .answer', (e) => e.classList.contains('veiled-text')), 'text hidden at step 1');
+      await web.keyboard.press('KeyN'); await web.keyboard.press('KeyN');
+      await waitFor(() => web.$eval('.steps .step.on', (e) => e.textContent.startsWith('3')), 4000, 'step 3');
+      assert(await web.$eval('.shadow-card .answer', (e) => !e.classList.contains('veiled-text') && /frisbee/.test(e.textContent)), 'text shown at step 3');
+      await web.keyboard.press('KeyN');
+      await waitFor(() => web.$eval('.steps .step.on', (e) => e.textContent.startsWith('4')), 4000, 'step 4');
+      await web.click('.shadow-card .quiz-audio .play');
+      await waitFor(() => web.$eval('.steps .step.on', (e) => e.textContent.startsWith('5')), 20000, 'recorded then compare').catch(async (e) => { throw new Error(e.message + ' toast=' + await web.$eval('#toast', (t) => t.textContent)); });
+      await waitFor(() => web.$$eval('.shadow-card .attempt', (a) => a.length === 1), 5000, 'one recording saved');
+      await web.keyboard.press('KeyN');
+      await waitFor(() => web.$eval('.quiz-card', (e) => /끝/.test(e.textContent) || /2 \/ /.test(e.textContent)), 8000, 'next item or done');
+      await web.evaluate(async () => { await window.SubTutorRecorder.clearAll(); });
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await waitFor(() => web.$$eval('.item', (r) => r.length === 3), 8000, 'back to list');
+      await waitFor(() => web.$eval('#count-due', (e) => e.textContent === '3'), 5000, 'due badge');
+    });
+    await step('속도 사다리 ⤴: 0.8→0.9→1.0→1.15배로 네 번 재생', async () => {
+      const yt = '[data-id^="youtube:"]';
+      await web.click(yt + ' .ladder');
+      const seen = new Set();
+      await waitFor(async () => { const t = await web.$eval('#toast', (e) => e.textContent); const m = /⤴ ([\d.]+)×/.exec(t); if (m) seen.add(m[1]); return seen.has('1.15'); }, 25000, 'ladder reached 1.15×').catch(async (e) => { const dbg = await web.evaluate(() => JSON.stringify(window.__subtutorDebug ? { clip: window.__subtutorDebug.state.clip, ladderFor: window.__subtutorDebug.state.ladderFor, local: window.__subtutorDebug.state.clipLocal, toast: document.getElementById('toast').textContent, shadow: !!window.__subtutorDebug.state.shadow, log: window.__subtutorDebug.log.slice(-8) } : null)); throw new Error(e.message + ' seen=' + [...seen].join(',') + ' dbg=' + dbg); });
+      await waitFor(() => web.$eval(yt, (e) => !e.classList.contains('playing')), 6000, 'ladder finished');
+      assert(seen.has('0.8') && seen.has('1'), 'rates seen ' + [...seen].join(','));
+    });
     await step('오디오 구간 조정: ms 단위 버튼·드래그, 보관 오디오는 그 안에서 자르고 플레이어 재생은 조정 구간으로', async () => {
       const items = () => sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
       const yt = '[data-id^="youtube:"]';
@@ -692,9 +808,9 @@ function ensureFixtures() {
     });
     await step('같이 듣기: 플레이어 오디오 뒤에 최근 녹음이 재생된다', async () => {
       const labels = await web.$$eval('[data-id="netflix:12345:22000"] .rec-row > button', (b) => b.map((x) => x.textContent));
-      assert(/같이 듣기/.test(labels[labels.length - 1]), 'last button should be 같이 듣기: ' + labels.join(' | '));
+      assert(labels.some((l) => /같이 듣기/.test(l)), '같이 듣기 button present: ' + labels.join(' | '));
       await trackClipEvents();
-      await web.click('[data-id="netflix:12345:22000"] .rec-row > button:last-of-type');
+      await web.evaluate(() => [...document.querySelectorAll('[data-id="netflix:12345:22000"] .rec-row > button')].find((b) => /같이 듣기/.test(b.textContent)).click());
       await waitFor(() => web.$eval('[data-id="netflix:12345:22000"]', (e) => e.classList.contains('playing')), 8000, 'clip playing').catch(async (e) => { throw new Error(e.message + await clipDiag()); });
       await waitFor(() => web.$$eval('.item .attempt.playing', (a) => a.length === 1), 15000, 'recording playing after clip');
     });
@@ -717,9 +833,12 @@ function ensureFixtures() {
       const missing = await web.$$eval('.diff .missing', (els) => els.map((e) => e.textContent));
       assert(missing.join() === 'frisbee', 'missing ' + missing.join());
       await web.screenshot({ path: path.join(TMP, 'shots', 'web-quiz-result.png') });
+      const weak = await waitFor(async () => { const r = await sw.evaluate(async () => (await chrome.storage.local.get('stats')).stats); return r && r.weak && r.weak.frisbee ? r.weak : null; }, 5000, 'weak word recorded');
+      assert(weak.frisbee === 1, 'weak words ' + JSON.stringify(weak));
       await web.keyboard.press('KeyC');
       await waitFor(() => web.$eval('.quiz-top', (e) => /2 \/ 2/.test(e.textContent)), 5000, 'next card');
-      await waitFor(() => web.$eval('#count-known', (e) => e.textContent === '1'), 5000, 'known count');
+      const graded = await waitFor(async () => { const all = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); const x = all.find((i) => i.text.includes('frisbee')); return x && x.review ? x : null; }, 5000, 'review scheduled');
+      assert(graded.box === 'learning' && graded.review.interval === 1 && graded.review.reps === 1 && graded.review.due > Date.now() + 20 * 3600 * 1000, 'srs schedule ' + JSON.stringify(graded.review) + ' box=' + graded.box);
       void answer;
     });
     await step('퀴즈: Z(잊어버렸어)는 카드를 다시 큐에 넣는다', async () => {
@@ -733,11 +852,30 @@ function ensureFixtures() {
         return all.find((i) => i.text.includes('Principal')).forgot === 1 ? all : null;
       }, 5000, 'stats written');
       const it = items.find((i) => i.text.includes('Principal'));
-      assert(it.forgot === 1 && it.reviews === 1 && it.box === 'learning', 'stats ' + JSON.stringify({ forgot: it.forgot, reviews: it.reviews, box: it.box }));
-      const known = items.find((i) => i.text.includes('frisbee'));
-      assert(known.box === 'known', 'known box');
+      assert(it.forgot === 1 && it.reviews === 1 && it.box === 'learning' && it.review && it.review.lapses === 1, 'stats ' + JSON.stringify({ forgot: it.forgot, reviews: it.reviews, box: it.box, review: it.review }));
+      const reviews = await sw.evaluate(async () => (await chrome.storage.local.get('stats')).stats.reviews.length);
+      assert(reviews >= 2, 'review log ' + reviews);
+    });
+    await step('설정: 학습 기능 토글·ⓘ 근거·진행 상황·약점 단어·추천', async () => {
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await waitFor(() => web.$$eval('.switch-row .switch[data-pref]', (e) => e.length === 6), 8000, 'six toggles');
+      assert(await web.$$eval('.settings p', (ps) => ps.filter((p) => p.textContent.length > 120).length) === 0, 'no long description paragraphs');
+      await waitFor(() => web.$eval('.dday', (e) => /^D[-+]\d+/.test(e.textContent) || /D-day/.test(e.textContent)), 5000, 'd-day');
+      await waitFor(() => web.$$eval('.weak .weak-w', (e) => e.map((x) => x.firstChild.textContent)).then((w) => (w.includes('frisbee') ? w : null)), 5000, 'weak word listed');
+      assert(await web.$$eval('.recs .rec', (e) => e.length) >= 8, 'recommendations');
+      await waitFor(() => web.$$eval('table.eps tbody tr', (r) => r.length >= 1), 5000, 'episode table');
+      await web.click('.info[data-key="srs"]');
+      await waitFor(() => web.evaluate(() => { const d = document.getElementById('info-dialog'); return d.open && /Cepeda/.test(d.textContent); }), 3000, 'basis dialog');
+      await web.click('#info-close');
+      await web.click('.switch[data-pref="recommend"]');
+      await waitFor(() => web.$$eval('.recs', (e) => e.length === 0), 4000, 'recommend hidden when off');
+      const pref = await sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings || {}).web);
+      assert(pref && pref.recommend === false && pref.srs === true, 'web prefs saved ' + JSON.stringify(pref));
+      await web.click('.switch[data-pref="recommend"]');
+      await waitFor(() => web.$$eval('.recs', (e) => e.length === 1), 4000, 'recommend back');
     });
     await step('알고 있는 표현 상자에서 다시 학습으로 되돌릴 수 있다', async () => {
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'items.update', id: 'netflix:12345:22000', patch: { box: 'known', knownAt: Date.now() } }, {}));
       await web.goto('http://localhost:8766/#/known', { waitUntil: 'load' });
       await waitFor(() => web.$$eval('.item', (r) => r.length === 1), 8000, 'known items');
       const btn = await web.$('.item .actions .btn');
