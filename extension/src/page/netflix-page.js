@@ -261,6 +261,7 @@
         case 'seek': { const p = player(); if (p) p.seek(Math.max(0, Math.round(d.ms))); break; }
         case 'play': { const p = player(); if (p) p.play(); break; }
         case 'pause': { const p = player(); if (p) p.pause(); break; }
+        case 'setRate': { const p = player(); if (p && p.setPlaybackRate && isFinite(d.rate)) { try { p.setPlaybackRate(d.rate); } catch (err) { /* ignore */ } } break; }
         case 'getState': reply(state()); break;
         case 'getMeta': reply({ meta: meta(d.videoId) }); break;
         case 'fetchText':

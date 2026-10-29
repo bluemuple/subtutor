@@ -259,6 +259,40 @@ function ensureFixtures() {
       await waitFor(() => page.$eval('.st-status', (e) => !/보정/.test(e.textContent)), 3000, 'offset reset');
       await page.click('.st-head .st-icon');
     });
+    await step('[ ] \\ 키로 재생 속도를 바꾸고 반복 재생에도 유지된다', async () => {
+      await setTime(page, 10.3, true);
+      await sleep(200);
+      await page.keyboard.press('BracketLeft');
+      await page.keyboard.press('BracketLeft');
+      await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.8) < 0.01), 2000, 'rate 0.8');
+      const chip = await page.$eval('.st-ov-chip.on-rate', (e) => e.textContent).catch(() => null);
+      assert(chip && /0\.8×/.test(chip), 'rate chip: ' + chip);
+      await page.keyboard.press('KeyS');
+      await sleep(3200);
+      const r1 = await page.evaluate(() => document.querySelector('video').playbackRate);
+      assert(Math.abs(r1 - 0.8) < 0.01, 'rate kept during loop: ' + r1);
+      const seeks = await page.evaluate(() => window.__seeks.length);
+      await page.evaluate(() => { document.querySelector('video').playbackRate = 1; });
+      await sleep(900);
+      const r2 = await page.evaluate(() => document.querySelector('video').playbackRate);
+      const seeks2 = await page.evaluate(() => window.__seeks.length);
+      assert(seeks2 >= seeks, 'loop seeking');
+      assert(Math.abs(r2 - 0.8) < 0.01 || seeks2 === seeks, 'rate re-applied after loop seek: ' + r2);
+      await page.keyboard.press('KeyS');
+      await page.keyboard.press('Backslash');
+      await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 2000, 'rate reset');
+      for (let i = 0; i < 12; i++) await page.keyboard.press('BracketRight');
+      await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 2) < 0.01), 2000, 'rate capped at 2');
+      await page.keyboard.press('Backslash');
+      await sleep(200);
+    });
+    await step('재생 화면을 떠나면 패널이 닫히고 돌아오면 다시 열린다', async () => {
+      await page.evaluate(() => history.pushState({}, '', '/browse'));
+      await waitFor(() => page.evaluate(() => document.getElementById('st-panel').classList.contains('st-closed') && !document.documentElement.classList.contains('st-panel-open') && document.getElementById('st-toggle').classList.contains('st-hidden')), 3000, 'panel closed off-watch');
+      await page.evaluate(() => history.pushState({}, '', '/watch/12345'));
+      await waitFor(() => page.evaluate(() => !document.getElementById('st-panel').classList.contains('st-closed')), 4000, 'panel back');
+      await waitFor(() => page.$$eval('.st-row', (r) => r.length === 10), 8000, 'rows back');
+    });
     await step('넷플릭스 모의 영상을 중간 위치에 정지해 둔다', async () => {
       await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 5; });
       await sleep(200);
@@ -377,14 +411,15 @@ function ensureFixtures() {
       assert(v === '물다 = bite 메모', 'comment: ' + v);
     });
     await step('녹음: 3개까지 저장, 4번째에 첫 번째가 삭제된다', async () => {
+      const clickRec = () => web.evaluate(() => document.querySelector('[data-id="netflix:12345:22000"] .rec-btn').click());
       for (let i = 0; i < 4; i++) {
-        await web.click('[data-id="netflix:12345:22000"] .rec-btn');
+        await clickRec();
         await waitFor(() => web.$eval('[data-id="netflix:12345:22000"] .rec-btn', (e) => e.classList.contains('recording')), 12000, 'recording ' + i).catch(async (e) => {
           const toastText = await web.$eval('#toast', (t) => t.textContent);
           throw new Error(e.message + ' toast=' + toastText + ' logs=' + logs.filter((l) => l.startsWith('[web')).slice(-5).join(' | '));
         });
         await sleep(700);
-        await web.click('[data-id="netflix:12345:22000"] .rec-btn');
+        await clickRec();
         await waitFor(() => web.$$eval('[data-id="netflix:12345:22000"] .attempt', (a, n) => a.length === n, Math.min(3, i + 1)), 6000, 'attempt count ' + i);
       }
       // 마지막 녹음 저장이 끝나 버튼이 다시 그려질 때까지 기다린다 (핸들이 떨어지는 경쟁 방지)

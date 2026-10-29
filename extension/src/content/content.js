@@ -41,6 +41,7 @@
     offsetMs: 0, offsetSource: '', alignSamples: [], lastNativeText: '',
     userScrollAt: 0, statusText: '', statusErr: false,
     ttPoll: null, tickCount: 0,
+    rate: 1, rateReapplyUntil: 0, clearanceCur: 0, clearanceLowSince: 0,
   };
   const trackCache = new Map(); // videoId -> tracks
   let pageVideoId = null;
@@ -179,11 +180,12 @@
     const v = adapter.video();
     if (id !== state.videoId) startVideo(id);
     if (v !== state.videoEl) attachVideo(v);
-    const active = !!(id && v);
+    const playerShown = typeof adapter.isPlayerActive === 'function' ? adapter.isPlayerActive(v) : true;
+    const active = !!(id && v && playerShown);
     if (active !== state.active) {
       state.active = active;
       if (active) { mountUI(); applySettings(); registerPlayer(); }
-      else if (ui.root) { ui.overlay.classList.add('st-hidden'); applySettings(); }
+      else { cancelModesPending(); state.loop = false; state.loopIdx = -1; if (ui.root) { ui.overlay.classList.add('st-hidden'); applySettings(); } }
     }
     if (active) { ensureOverlayMounted(); mountControlButton(); }
   }
@@ -235,12 +237,20 @@
   setInterval(checkVideo, 500);
 
   // ───────────── 영상별 자막 시간 보정 ─────────────
+  const platformOffsetKey = () => adapter.name + ':__last';
   async function loadOffset() {
     const key = offsetKey();
     try {
       const { offsets } = await chrome.storage.local.get('offsets');
+      if (key !== offsetKey()) return;
       const saved = offsets && offsets[key];
-      if (key === offsetKey() && saved && Number.isFinite(saved.ms)) { state.offsetMs = saved.ms; state.offsetSource = saved.source || 'saved'; updateStatusOffset(); }
+      if (saved && Number.isFinite(saved.ms)) { state.offsetMs = saved.ms; state.offsetSource = saved.source || 'saved'; }
+      else {
+        // 같은 플랫폼에서 마지막으로 쓴 보정값을 먼저 적용해 두고(프라임은 보통 비슷함), 자막 대조로 다시 확정한다
+        const last = offsets && offsets[platformOffsetKey()];
+        if (last && Number.isFinite(last.ms) && last.ms) { state.offsetMs = last.ms; state.offsetSource = 'guess'; }
+      }
+      updateStatusOffset();
     } catch (e) { /* ignore */ }
   }
   async function saveOffset(ms, source) {
@@ -250,6 +260,7 @@
       const { offsets } = await chrome.storage.local.get('offsets');
       const map = offsets && typeof offsets === 'object' ? offsets : {};
       if (state.offsetMs) map[offsetKey()] = { ms: state.offsetMs, source, at: Date.now() }; else delete map[offsetKey()];
+      if (source === 'auto' || source === 'manual') map[platformOffsetKey()] = { ms: state.offsetMs, source, at: Date.now() };
       const keys = Object.keys(map);
       if (keys.length > 300) keys.sort((a, b) => (map[a].at || 0) - (map[b].at || 0)).slice(0, keys.length - 300).forEach((k) => delete map[k]);
       await chrome.storage.local.set({ offsets: map });
@@ -751,7 +762,7 @@
     ui.list.addEventListener('touchmove', markScroll, { passive: true });
     ui.list.addEventListener('mousedown', (e) => { if (e.offsetX > ui.list.clientWidth) markScroll(); });
     ui.foot = el('div', { class: 'st-foot' });
-    ui.foot.innerHTML = '<b>A</b> 이전 · <b>S</b> 반복 · <b>D</b> 다음 · <b>F</b> 다시 듣기 · <b>E</b> 저장 · <b>P</b> AP · <b>W</b> 쉐도잉 · <b>`</b> 패널';
+    ui.foot.innerHTML = '<b>A</b> 이전 · <b>S</b> 반복 · <b>D</b> 다음 · <b>F</b> 다시 듣기 · <b>E</b> 저장 · <b>P</b> AP · <b>W</b> 쉐도잉 · <b>[</b> <b>]</b> 속도 · <b>\\</b> 1× · <b>`</b> 패널';
     ui.settings = buildSettings();
     ui.panel.append(head, ui.status, ui.list, ui.settings, ui.foot);
 
@@ -801,17 +812,29 @@
     for (let i = 0; e && i < 4; i++) { const cs = getComputedStyle(e); if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') return false; e = e.parentElement; }
     return true;
   }
-  function measureClearance(rect) {
+  function measureClearanceRaw(rect) {
     if (typeof adapter.clearance === 'function') return adapter.clearance(rect) || 0;
     if (!adapter.controlBars || !adapter.controlBars.length) return 0;
+    const root = (typeof adapter.controlRoot === 'function' && adapter.controlRoot()) || document;
+    const lowest = rect.top + rect.height * 0.55; // 영상 아래쪽 45% 안에 있는 컨트롤만 인정
     let top = Infinity;
     for (const sel of adapter.controlBars) {
-      for (const bar of document.querySelectorAll(sel)) {
+      for (const bar of root.querySelectorAll(sel)) {
         const r = bar.getBoundingClientRect();
-        if (r.height > 0 && r.top > rect.top && r.top < rect.bottom && visibleBar(bar)) top = Math.min(top, r.top);
+        if (r.height > 0 && r.width > 40 && r.top > lowest && r.top < rect.bottom && visibleBar(bar)) top = Math.min(top, r.top);
       }
     }
-    return top === Infinity ? 0 : Math.max(0, Math.round(rect.bottom - top)) + 6;
+    if (top === Infinity) return 0;
+    return Math.min(Math.round(rect.height * 0.4), Math.max(0, Math.round(rect.bottom - top)) + 6);
+  }
+  // 컨트롤이 잠깐 다시 그려질 때 자막이 아래로 떨어졌다 올라오지 않도록, 값이 낮아질 때는 1.2초 뒤에만 반영한다
+  function measureClearance(rect) {
+    const raw = measureClearanceRaw(rect);
+    const t = now();
+    if (raw >= state.clearanceCur) { state.clearanceCur = raw; state.clearanceLowSince = 0; return raw; }
+    if (!state.clearanceLowSince) state.clearanceLowSince = t;
+    if (t - state.clearanceLowSince > 1200) { state.clearanceCur = raw; state.clearanceLowSince = 0; return raw; }
+    return state.clearanceCur;
   }
   let lastRectKey = '';
   // 오버레이는 플레이어 DOM 안에 넣지 않고(플랫폼 CSS 간섭 방지) 화면에 고정한 채 <video>의 위치를 따라간다
@@ -854,6 +877,7 @@
     if (state.loop) ui.ovModes.append(el('span', { class: 'st-ov-chip on-loop' }, '🔁 반복'));
     if (settings.autoPause) ui.ovModes.append(el('span', { class: 'st-ov-chip on-ap' }, '⏸ AP'));
     if (settings.shadowing) ui.ovModes.append(el('span', { class: 'st-ov-chip on-shadow' }, '🗣 쉐도잉 ' + settings.shadowPauseSec + '초'));
+    if (Math.abs(state.rate - 1) > 0.01) ui.ovModes.append(el('span', { class: 'st-ov-chip on-rate' }, '⏩ ' + state.rate.toFixed(2).replace(/\.?0+$/, '') + '×'));
     if (ui.ctlBtn) { ui.ctlBtn.classList.toggle('off', !isEnabled()); ui.ctlBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기'; }
   }
   function setStatus(text, isErr) {
@@ -861,7 +885,7 @@
     if (!ui.status) return;
     ui.status.textContent = '';
     ui.status.append(text);
-    if (state.offsetMs) ui.status.append(el('span', { class: 'st-offset', title: '자막 시간 보정 (' + (state.offsetSource === 'auto' ? '자동 감지' : '수동') + ')' }, ' · 보정 ' + (state.offsetMs > 0 ? '+' : '') + (state.offsetMs / 1000).toFixed(1) + '초'));
+    if (state.offsetMs) ui.status.append(el('span', { class: 'st-offset', title: '자막 시간 보정 (' + (state.offsetSource === 'auto' ? '자동 감지' : state.offsetSource === 'guess' ? '이전 영상 값, 확인 중' : '수동') + ')' }, ' · 보정 ' + (state.offsetMs > 0 ? '+' : '') + (state.offsetMs / 1000).toFixed(1) + '초' + (state.offsetSource === 'guess' ? '?' : '')));
     ui.status.classList.toggle('st-err', !!isErr);
     if (isErr) ui.status.append(el('button', { onclick: () => { trackCache.delete(state.videoId); startVideo(state.videoId); } }, '다시 시도'));
   }
@@ -959,7 +983,7 @@
       'tracks=' + JSON.stringify((trackCache.get(state.videoId) || []).map((t) => t.lang + (t.cc ? '[cc]' : '') + (t.asr ? '[asr]' : '') + (t.forced ? '[f]' : ''))),
       'offset=' + state.offsetMs + ' (' + state.offsetSource + ') samples=' + JSON.stringify(state.alignSamples),
       'meta=' + JSON.stringify(state.meta) + ' status=' + state.statusText,
-      'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + settings.shadowPauseSec + 's audio=' + settings.audioMode,
+      'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + settings.shadowPauseSec + 's audio=' + settings.audioMode + ' rate=' + state.rate + ' clearance=' + state.clearanceCur,
       'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' clip=' + JSON.stringify(state.clip) + ' capturing=' + !!state.capturing + ' tabId=' + state.tabId,
     ].join('\n');
   }
@@ -1057,15 +1081,18 @@
       if (!best) return;
       state.alignSamples.push(Math.round(best.start - raw));
       if (state.alignSamples.length > 9) state.alignSamples.shift();
-      if (state.alignSamples.length >= 3) {
+      const need = state.offsetSource === 'auto' || state.offsetSource === 'manual' ? 3 : 2;
+      if (state.alignSamples.length >= need) {
         const sorted = state.alignSamples.slice().sort((a, b) => a - b);
         const med = sorted[Math.floor(sorted.length / 2)];
         const agree = sorted.filter((x) => Math.abs(x - med) <= 400).length;
-        if (agree >= 3) {
+        if (agree >= need) {
           const target = Math.abs(med) < 250 ? 0 : Math.round(med / 10) * 10;
           if (Math.abs(target - state.offsetMs) > 300) {
             saveOffset(target, 'auto');
             toast('자막 시간 자동 보정: ' + (target >= 0 ? '+' : '') + (target / 1000).toFixed(1) + '초');
+          } else if (state.offsetSource !== 'auto' && state.offsetSource !== 'manual') {
+            saveOffset(state.offsetMs, 'auto');
           }
         }
       }
@@ -1079,6 +1106,21 @@
     state.lastSeekAt = now();
     state.lastSeekTarget = ms;
     adapter.seek(Math.max(0, ms));
+    if (state.rate !== 1) state.rateReapplyUntil = now() + 2500; // 일부 플레이어는 탐색 뒤 속도를 되돌린다
+  }
+  function applyRate(quiet) {
+    const v = adapter.video();
+    const r = state.rate;
+    if (typeof adapter.setRate === 'function') adapter.setRate(r);
+    if (v) { try { if (Math.abs(v.playbackRate - r) > 0.01) v.playbackRate = r; } catch (e) { /* ignore */ } }
+    state.rateReapplyUntil = now() + 2500;
+    if (!quiet) toast('⏩ 재생 속도 ' + r.toFixed(2).replace(/\.?0+$/, '') + '×');
+    updateModeUI();
+  }
+  function changeRate(delta) {
+    const next = delta === 0 ? 1 : Math.round(clamp(state.rate + delta, 0.5, 2) * 100) / 100;
+    state.rate = next;
+    applyRate(false);
   }
   function markResume() { state.resumeByUsUntil = now() + 1500; }
   function requestPlay() { markResume(); state.playRequestedAt = now(); adapter.play(); }
@@ -1257,6 +1299,10 @@
     const prevIdx = state.prevIdx;
     const capturing = state.capturing;
 
+    if (now() < state.rateReapplyUntil && state.tickCount % 6 === 0) {
+      const v = adapter.video();
+      if (v && Math.abs(v.playbackRate - state.rate) > 0.01) applyRate(true);
+    }
     if (capturing) {
       if (!paused && now() - state.lastSeekAt > 150) capturing.anchors.push([wall(), raw]);
       if (raw >= capturing.endV + 300 || raw < capturing.startV - 8000) finishCapturing('done');
@@ -1296,10 +1342,10 @@
   setInterval(() => tick(false), 40);
 
   // ───────────── 단축키 ─────────────
-  const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: () => { const i = anchorIndex(); if (i >= 0) toggleSave(i); }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen) };
+  const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: () => { const i = anchorIndex(); if (i >= 0) toggleSave(i); }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
   function shouldHandleKey(e) {
     if (!state.active || !isEnabled()) return false;
-    if (!state.cues.length && e.code !== 'Backquote') return false;
+    if (!state.cues.length && !/^(Backquote|BracketLeft|BracketRight|Backslash)$/.test(e.code)) return false;
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
     if (isEditable(e.target) || (e.target && e.target.closest && e.target.closest('#st-panel input, #st-panel select, #st-panel textarea'))) return false;
     return !!KEY_ACTIONS[e.code];

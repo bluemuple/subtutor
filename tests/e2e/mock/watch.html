@@ -38,6 +38,8 @@
     isReady: () => video.readyState >= 1,
     getDuration: () => Math.round((video.duration || 0) * 1000),
     getMovieId: () => 12345,
+    getPlaybackRate: () => video.playbackRate,
+    setPlaybackRate: (r) => { video.playbackRate = r; },
     getTimedTextTrackList: () => tracks,
     getTimedTextTrack: () => tracks[0],
     setTimedTextTrack: async () => {},

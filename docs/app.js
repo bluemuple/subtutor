@@ -211,7 +211,7 @@
     try {
       R.stop();
       const ctrl = await R.start();
-      state.recording = { itemId, ctrl, startedAt: Date.now(), timer: setInterval(renderRecRows, 250) };
+      state.recording = { itemId, ctrl, startedAt: Date.now(), timer: setInterval(tickRecLabel, 250) };
       renderRecRows();
     } catch (e) {
       toast('마이크를 사용할 수 없습니다: ' + e.message);
@@ -246,6 +246,12 @@
     else node.append(el('span', { class: 'rec-hint' }, '녹음 후 "같이 듣기"로 원음과 비교해 보세요'));
   }
   function renderRecRows() { document.querySelectorAll('[data-rec-item]').forEach(fillRecRow); }
+  // 녹음 중 경과 시간은 버튼을 다시 만들지 않고 글자만 바꾼다 (클릭 중 요소가 바뀌지 않도록)
+  function tickRecLabel() {
+    if (!state.recording) return;
+    const secs = Math.floor((Date.now() - state.recording.startedAt) / 1000);
+    document.querySelectorAll('[data-rec-item="' + state.recording.itemId + '"] .rec-btn.recording').forEach((b) => { b.textContent = '■ 정지 ' + Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0'); });
+  }
 
   // ───────── 라우팅/렌더 ─────────
   function route() {

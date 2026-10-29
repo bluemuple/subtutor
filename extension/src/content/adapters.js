@@ -61,6 +61,8 @@ globalThis.SubTutorAdapters = (() => {
     seek(ms) { page.send({ type: 'seek', ms: Math.max(0, Math.round(ms)) }); },
     play() { page.send({ type: 'play' }); },
     pause() { page.send({ type: 'pause' }); },
+    setRate(rate) { page.send({ type: 'setRate', rate }); },
+    controlRoot() { return document.querySelector('.watch-video') || document.body; },
     nativeHideCss: '.player-timedtext { visibility: hidden !important; }',
     controlBars: ['[data-uia="controls-standard"]', '[data-uia="timeline"]'],
     layoutCss: 'html.st-panel-open .watch-video { width: calc(100vw - var(--st-panel-w, 400px)) !important; }',
@@ -87,6 +89,16 @@ globalThis.SubTutorAdapters = (() => {
       return m ? m[1] : null;
     },
     playerRoot() { return document.getElementById('dv-web-player') || document.body; },
+    controlRoot() { return document.getElementById('dv-web-player') || document.body; },
+    // 플레이어 오버레이가 닫히면(상세/메인 페이지) video 요소가 남아 있어도 비활성으로 본다
+    isPlayerActive(v) {
+      const root = document.getElementById('dv-web-player');
+      if (!root || !v || !root.contains(v)) return false;
+      const r = root.getBoundingClientRect();
+      if (r.width < 200 || r.height < 120) return false;
+      const cs = getComputedStyle(root);
+      return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+    },
     video() {
       // 상세 페이지의 예고편 플레이어가 아니라 본편 플레이어(#dv-web-player)의 video 를 쓴다
       const inPlayer = Array.from(document.querySelectorAll('#dv-web-player video'));
@@ -120,7 +132,7 @@ globalThis.SubTutorAdapters = (() => {
       setTimeout(() => { if (this.video() === v && !v.paused) this.clickPlayPause(); }, 600);
     },
     nativeHideCss: '.atvwebplayersdk-captions-overlay, .atvwebplayersdk-captions-text { visibility: hidden !important; }',
-    controlBars: ['.atvwebplayersdk-episode-timing-container', '.atvwebplayersdk-bottompanel-container'],
+    controlBars: ['.atvwebplayersdk-episode-timing-container', '.atvwebplayersdk-bottompanel-container', '.atvwebplayersdk-seekbar-container'],
     layoutCss: '',
     nativeCueSelector: '.atvwebplayersdk-captions-text',
     controlAnchor() {
@@ -184,6 +196,7 @@ globalThis.SubTutorAdapters = (() => {
     play: elementPlay,
     pause: elementPause,
     isAdPlaying() { const mp = document.getElementById('movie_player'); return !!(mp && mp.classList.contains('ad-showing')); },
+    controlRoot() { return document.getElementById('movie_player') || document.body; },
     nativeHideCss: '.ytp-caption-window-container, .caption-window { visibility: hidden !important; }',
     controlBars: [],
     clearance(rect) {
