@@ -1,4 +1,5 @@
-const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, offsetMs: 0 };
+const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {} };
+let currentPlatform = null;
 const $ = (id) => document.getElementById(id);
 let settings = Object.assign({}, DEFAULTS);
 
@@ -14,6 +15,9 @@ function render() {
   $('autoPause').checked = !!settings.autoPause;
   $('shadowing').checked = !!settings.shadowing;
   $('shadowPauseSec').value = String(settings.shadowPauseSec);
+  $('audioMode').value = settings.audioMode || 'off';
+  $('enabled').checked = !currentPlatform || !settings.enabled || settings.enabled[currentPlatform] !== false;
+  $('enabledRow').style.display = currentPlatform ? '' : 'none';
 }
 async function init() {
   $('version').textContent = 'v' + chrome.runtime.getManifest().version;
@@ -26,6 +30,8 @@ async function init() {
   $('autoPause').addEventListener('change', (e) => save({ autoPause: e.target.checked, shadowing: e.target.checked ? false : settings.shadowing }));
   $('shadowing').addEventListener('change', (e) => save({ shadowing: e.target.checked, autoPause: e.target.checked ? false : settings.autoPause }));
   sel.addEventListener('change', (e) => save({ shadowPauseSec: +e.target.value }));
+  $('audioMode').addEventListener('change', (e) => save({ audioMode: e.target.value }));
+  $('enabled').addEventListener('change', (e) => { if (!currentPlatform) return; save({ enabled: Object.assign({}, settings.enabled || {}, { [currentPlatform]: e.target.checked }) }); });
   $('openSite').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'openSite' }, () => window.close()));
   $('openNetflix').addEventListener('click', () => chrome.tabs.create({ url: 'https://www.netflix.com/browse' }));
 
@@ -33,7 +39,9 @@ async function init() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const res = tab ? await chrome.tabs.sendMessage(tab.id, { type: 'status' }).catch(() => null) : null;
     if (res && res.platform) {
-      const names = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+' };
+      currentPlatform = res.platform;
+      render();
+      const names = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+', youtube: '유튜브' };
       $('status').textContent = (names[res.platform] || res.platform) + (res.videoId ? ' · ' + (res.title || res.videoId) + ' · 자막 ' + res.cues + '줄' : ' · 재생 화면이 아닙니다');
     } else {
       $('status').textContent = '이 탭에서는 실행 중이 아닙니다 (넷플릭스 재생 화면에서 열어 보세요)';

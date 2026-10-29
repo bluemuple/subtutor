@@ -5,7 +5,7 @@
   const B = window.SubTutorBridge;
   const R = window.SubTutorRecorder;
   const $ = (sel, root) => (root || document).querySelector(sel);
-  const PLATFORM_NAMES = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+' };
+  const PLATFORM_NAMES = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+', youtube: '유튜브' };
   const README_URL = 'https://github.com/bluemuple/subtutor#readme';
 
   const state = {
@@ -51,7 +51,7 @@
 
   // ───────── 데이터 ─────────
   // 화면에 영향을 주는 필드만으로 서명을 만들어, 실제로 바뀐 경우에만 다시 그린다 (입력 중인 내용 보호)
-  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.comment, i.translation, i.reviews, i.forgot, i.savedAt].join('\u0001')).sort().join('\u0002');
+  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.comment, i.translation, i.reviews, i.forgot, i.savedAt, i.audio ? 1 : 0].join('\u0001')).sort().join('\u0002');
   async function loadItems(force) {
     if (!state.extOk) { render(); return; }
     let changed = !!force;
@@ -112,13 +112,52 @@
       }
     });
   }
+  const audioCache = new Map(); // itemId -> Blob
+  async function localAudioBlob(itemId) {
+    if (audioCache.has(itemId)) return audioCache.get(itemId);
+    try {
+      const r = await B.request('audio.get', { itemId }, 20000);
+      if (r && r.wav) {
+        const bin = atob(r.wav);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: 'audio/wav' });
+        audioCache.set(itemId, blob);
+        return blob;
+      }
+    } catch (e) { /* 원격 재생으로 */ }
+    audioCache.set(itemId, null);
+    return null;
+  }
+  let localAudio = null;
+  function stopLocalAudio() { if (localAudio) { try { localAudio.pause(); } catch (e) { /* ignore */ } localAudio = null; } }
   async function playItem(itemId) {
     if (!state.extOk) { toast('확장 프로그램이 필요합니다'); return; }
     R.stop();
     if (state.clip.itemId === itemId && state.clip.state === 'playing') {
+      stopLocalAudio();
       await B.request('clip.stop').catch(() => {});
       setClip(itemId, 'stopped');
       return;
+    }
+    stopLocalAudio();
+    const it = state.items.find((i) => i.id === itemId);
+    if (it && it.audio) {
+      const blob = await localAudioBlob(itemId);
+      if (blob) {
+        setClip(itemId, 'playing');
+        await new Promise((resolve) => {
+          const url = URL.createObjectURL(blob);
+          const a = new Audio(url);
+          localAudio = a;
+          const done = () => { URL.revokeObjectURL(url); if (localAudio === a) localAudio = null; resolve(); };
+          a.onended = done; a.onerror = done;
+          a.onpause = () => { if (!a.ended && localAudio !== a) done(); };
+          a.play().catch(done);
+        });
+        if (state.clip.itemId === itemId && state.clip.state === 'playing') setClip(itemId, 'ended');
+        return;
+      }
     }
     setClip(itemId, 'opening');
     try {
@@ -303,6 +342,7 @@
       el('div', { class: 'meta' }, [
         el('span', null, S.formatTime(it.startMs) + ' – ' + S.formatTime(it.endMs)),
         el('span', null, PLATFORM_NAMES[it.platform] || it.platform),
+        it.audio ? el('span', { class: 'has-audio', title: '확장 프로그램에 보관된 오디오로 바로 재생합니다' }, '🔊 오디오 보관') : null,
         el('span', null, '저장 ' + fmtDate(it.savedAt || Date.now())),
         it.reviews ? el('span', null, '복습 ' + it.reviews + '회' + (it.forgot ? ' · 잊음 ' + it.forgot : '')) : null,
         el('button', { class: 'link', onclick: () => B.request('item.open', { itemId: it.id }, 60000).catch((e) => toast(e.message)) }, '플레이어에서 열기 ↗'),
@@ -502,7 +542,7 @@
       el('section', null, [
         el('h3', null, '확장 프로그램'),
         el('p', null, state.extOk ? '연결됨 · 버전 ' + (B.version || '') : '감지되지 않음'),
-        el('p', null, ['저장한 자막·설정은 크롬 확장 프로그램 안(chrome.storage)에, 녹음은 이 사이트의 브라우저 저장소(IndexedDB)에 보관됩니다. 다른 컴퓨터로 옮기려면 아래에서 내보내기/가져오기를 사용하세요. ', el('a', { href: README_URL, target: '_blank', rel: 'noopener' }, '설치 방법·사용법 →')]),
+        el('p', null, ['저장한 자막·설정·보관한 대사 오디오는 크롬 확장 프로그램 안(chrome.storage)에, 내 목소리 녹음은 이 사이트의 브라우저 저장소(IndexedDB)에 보관됩니다. 확장 프로그램 ⚙ 에서 "별표 저장 시 오디오"를 켜면 대사 오디오를 보관하거나 PC에 WAV 파일로 내려받을 수 있고, 보관된 오디오가 있는 자막은 플레이어 탭 없이 바로 재생됩니다. 다른 컴퓨터로 옮기려면 아래에서 내보내기/가져오기를 사용하세요. ', el('a', { href: README_URL, target: '_blank', rel: 'noopener' }, '설치 방법·사용법 →')]),
       ]),
       el('section', null, [
         el('h3', null, '통계'),

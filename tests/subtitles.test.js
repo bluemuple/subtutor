@@ -203,3 +203,34 @@ test('formatTime', () => {
   assert.equal(S.formatTime(5422), '0:05');
   assert.equal(S.formatTime(3723400), '1:02:03');
 });
+
+const JSON3 = JSON.stringify({ wireMagic: 'pb3', events: [
+  { tStartMs: 0, dDurationMs: 5000, id: 1, wpWinPosId: 1, wsWinStyleId: 1 },
+  { tStartMs: 1230, dDurationMs: 2500, segs: [{ utf8: 'Hello there,' }, { utf8: '\nwelcome back.' }] },
+  { tStartMs: 4000, dDurationMs: 2000, segs: [{ utf8: 'Second line &amp; more' }] },
+] });
+const JSON3_ASR = JSON.stringify({ events: [
+  { tStartMs: 1000, dDurationMs: 6000, wWinId: 1, segs: [{ utf8: 'hello', acAsrConf: 0 }, { utf8: ' world', tOffsetMs: 500 }] },
+  { tStartMs: 3990, dDurationMs: 10, wWinId: 1, aAppend: 1, segs: [{ utf8: '\n' }] },
+  { tStartMs: 4000, dDurationMs: 5000, wWinId: 1, segs: [{ utf8: 'next', acAsrConf: 0 }, { utf8: ' sentence', tOffsetMs: 400 }] },
+] });
+
+test('YouTube json3: header events skipped, segs joined, entities decoded', () => {
+  const { cues } = S.parseJson3(JSON3);
+  assert.equal(cues.length, 2);
+  assert.equal(cues[0].start, 1230);
+  assert.equal(cues[0].end, 3730);
+  assert.equal(cues[0].text, 'Hello there,\nwelcome back.');
+  assert.equal(cues[1].text, 'Second line & more');
+  assert.equal(S.parseAny(JSON3).format, 'json3');
+});
+
+test('YouTube json3 ASR: append events dropped, overlapping ends clamped', () => {
+  const { cues } = S.parseJson3(JSON3_ASR, { asr: true });
+  assert.equal(cues.length, 2);
+  assert.equal(cues[0].text, 'hello world');
+  assert.equal(cues[0].end, 4000);
+  assert.equal(cues[1].start, 4000);
+  const unclamped = S.parseJson3(JSON3_ASR).cues;
+  assert.equal(unclamped[0].end, 7000);
+});

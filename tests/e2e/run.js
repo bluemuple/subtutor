@@ -57,7 +57,7 @@ function ensureFixtures() {
     userDataDir,
     args: [
       '--disable-extensions-except=' + EXT, '--load-extension=' + EXT,
-      '--host-resolver-rules=MAP www.netflix.com 127.0.0.1:8443, MAP translate.googleapis.com 127.0.0.1:8443, MAP clients5.google.com 127.0.0.1:8443',
+      '--host-resolver-rules=MAP www.netflix.com 127.0.0.1:8443, MAP www.youtube.com 127.0.0.1:8443, MAP translate.googleapis.com 127.0.0.1:8443, MAP clients5.google.com 127.0.0.1:8443',
       '--ignore-certificate-errors', '--autoplay-policy=no-user-gesture-required', '--mute-audio',
       '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--no-first-run', '--window-size=1400,900',
     ],
@@ -89,7 +89,7 @@ function ensureFixtures() {
     });
     await step('한국어 자막 트랙이 영어 줄에 연결된다', async () => {
       const status = await page.$eval('.st-status', (e) => e.textContent);
-      assert(/한국어 자막 10줄/.test(status), 'status: ' + status);
+      assert(/한국어 10줄 연결/.test(status), 'status: ' + status);
       const ko = await page.$$eval('.st-row .st-ko', (els) => els.map((e) => e.textContent));
       assert(ko[1].includes('래피'), 'ko row 2: ' + ko[1]);
     });
@@ -214,6 +214,110 @@ function ensureFixtures() {
       assert(res && res.translations && res.translations[0] === '[번역] hello world', 'mt: ' + JSON.stringify(res));
     });
 
+    await step('오버레이는 화면 고정이며 영상 사각형 안에 그려진다', async () => {
+      const r = await page.evaluate(() => {
+        const o = document.getElementById('st-overlay'); const v = document.querySelector('video');
+        const cs = getComputedStyle(o); const a = o.getBoundingClientRect(); const b = v.getBoundingClientRect();
+        return { pos: cs.position, parent: o.parentElement.tagName, a: [a.left, a.top, a.width, a.height].map(Math.round), b: [b.left, b.top, b.width, b.height].map(Math.round) };
+      });
+      assert(r.pos === 'fixed' && r.parent === 'BODY', 'overlay should be fixed on body: ' + JSON.stringify(r));
+      assert(Math.abs(r.a[0] - r.b[0]) <= 2 && Math.abs(r.a[2] - r.b[2]) <= 2 && Math.abs(r.a[1] - r.b[1]) <= 2, 'overlay rect should match video rect: ' + JSON.stringify(r));
+      assert(r.b[2] < 1100, 'video should have shrunk for the panel: ' + r.b[2]);
+    });
+    await step('컨트롤 바의 ST 버튼으로 켜고 끌 수 있다', async () => {
+      await waitFor(() => page.$('.st-ctl'), 5000, 'control button');
+      const placed = await page.evaluate(() => document.querySelector('.st-ctl').nextElementSibling.getAttribute('data-uia'));
+      assert(placed === 'control-audio-subtitle', 'button placed before subtitle control: ' + placed);
+      await page.click('.st-ctl');
+      await waitFor(() => page.evaluate(() => document.getElementById('st-panel').classList.contains('st-closed') && document.getElementById('st-overlay').classList.contains('st-hidden') && getComputedStyle(document.querySelector('.player-timedtext')).visibility === 'visible' && document.querySelector('.st-ctl').classList.contains('off')), 4000, 'disabled state');
+      const tBefore = await videoTime(page);
+      await page.keyboard.press('KeyD');
+      await sleep(400);
+      const tAfter = await videoTime(page);
+      assert(Math.abs(tAfter - tBefore) < 1.5, 'keys must be inactive while disabled');
+      await page.click('.st-ctl');
+      await waitFor(() => page.evaluate(() => !document.getElementById('st-panel').classList.contains('st-closed') && !document.querySelector('.st-ctl').classList.contains('off')), 4000, 'enabled again');
+      await sleep(400);
+    });
+    await step('영상별 자막 시간 보정이 표시·저장에 반영된다', async () => {
+      await page.click('.st-head .st-icon');
+      await page.waitForSelector('.st-settings:not(.st-hidden)');
+      await page.evaluate(() => { const i = document.querySelector('.st-offset-ctl input'); i.value = '-2000'; i.dispatchEvent(new Event('change', { bubbles: true })); });
+      await waitFor(() => page.$eval('.st-status', (e) => /보정 -2\.0초/.test(e.textContent)), 3000, 'offset in status');
+      await page.click('.st-head .st-icon');
+      // 자막 4번(14~16s) 은 보정 -2s 이면 영상 16~18s 에 표시된다
+      await setTime(page, 16.4, true);
+      await waitFor(() => page.evaluate(() => !document.getElementById('st-overlay').classList.contains('st-hidden') && document.querySelector('.st-ov-text').textContent.includes('facts')), 4000, 'shifted overlay');
+      await page.keyboard.press('KeyE');
+      await waitFor(async () => { const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); return items.some((i) => i.text.includes('facts') && i.startMs === 16000 && i.endMs === 18000 && i.offsetMs === -2000); }, 4000, 'saved in video time');
+      await page.keyboard.press('KeyE');
+      await waitFor(async () => { const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); return !items.some((i) => i.text.includes('facts')); }, 4000, 'unsaved');
+      const stored = await sw.evaluate(async () => (await chrome.storage.local.get('offsets')).offsets);
+      assert(stored && stored['netflix:12345'] && stored['netflix:12345'].ms === -2000, 'offset persisted: ' + JSON.stringify(stored));
+      await page.click('.st-head .st-icon');
+      await page.evaluate(() => { const b = [...document.querySelectorAll('.st-settings .st-btn')].find((x) => x.textContent === '보정 초기화'); b.click(); });
+      await waitFor(() => page.$eval('.st-status', (e) => !/보정/.test(e.textContent)), 3000, 'offset reset');
+      await page.click('.st-head .st-icon');
+    });
+    await step('넷플릭스 모의 영상을 중간 위치에 정지해 둔다', async () => {
+      await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 5; });
+      await sleep(200);
+      const st = await page.evaluate(() => { const v = document.querySelector('video'); return { paused: v.paused, ended: v.ended }; });
+      assert(st.paused && !st.ended, 'parked: ' + JSON.stringify(st));
+    });
+
+    console.log('▶ 모의 유튜브 페이지');
+    const yt = await browser.newPage();
+    yt.on('pageerror', (e) => logs.push('[yt pageerror] ' + e.message));
+    await yt.goto('https://www.youtube.com/watch?v=mock1234567', { waitUntil: 'domcontentloaded' });
+    await step('유튜브: json3 자막 10줄 + 자동 번역 한국어가 연결된다', async () => {
+      await yt.waitForSelector('#st-panel', { timeout: 15000 });
+      await waitFor(() => yt.$$eval('.st-row', (r) => r.length === 10), 15000, 'yt rows');
+      const status = await yt.$eval('.st-status', (e) => e.textContent);
+      assert(/영어 10줄/.test(status) && !/자동 생성/.test(status), 'manual track preferred: ' + status);
+      assert(/한국어 10줄 연결 \(유튜브 번역\)/.test(status), 'tlang merged: ' + status);
+      await waitFor(() => yt.$eval('.st-brand', (e) => /Mock Lecture Title/.test(e.textContent) && /Mock Channel/.test(e.textContent)), 8000, 'yt title');
+      const placed = await yt.evaluate(() => { const b = document.querySelector('.st-ctl'); return b && b.nextElementSibling.classList.contains('ytp-subtitles-button'); });
+      assert(placed, 'control button before CC button');
+      const margin = await yt.evaluate(() => getComputedStyle(document.querySelector('ytd-app')).marginRight);
+      assert(margin === '400px', 'ytd-app margin for panel: ' + margin);
+    });
+    await step('유튜브: D 키 이동과 오버레이', async () => {
+      await setTime(yt, 6.3, true);
+      await waitFor(() => yt.evaluate(() => !document.getElementById('st-overlay').classList.contains('st-hidden') && document.querySelector('.st-ov-text').textContent.includes('Raffie')), 5000, 'yt overlay');
+      await yt.keyboard.press('KeyD');
+      await waitFor(async () => { const t = await videoTime(yt); return t >= 9.8 && t < 10.6; }, 4000, 'yt next cue');
+    });
+    await step('유튜브: 별표 저장 시 대사 오디오를 캡처해 보관한다', async () => {
+      await yt.click('.st-head .st-icon');
+      await yt.waitForSelector('.st-settings:not(.st-hidden)');
+      const ok = await yt.evaluate(() => { const sel = [...document.querySelectorAll('.st-settings select')].find((s) => [...s.options].some((o) => o.value === 'store')); if (!sel) return false; sel.value = 'store'; sel.dispatchEvent(new Event('change', { bubbles: true })); return true; });
+      assert(ok, 'audio mode select');
+      await yt.click('.st-head .st-icon');
+      await setTime(yt, 22.3, true);
+      await sleep(300);
+      await yt.keyboard.press('KeyE');
+      const wavB64 = await waitFor(async () => {
+        const r = await sw.evaluate(async () => { const all = await chrome.storage.local.get(null); const k = Object.keys(all).find((x) => x.startsWith('audio:youtube:mock1234567:')); return k ? all[k] : null; });
+        return r || null;
+      }, 25000, 'stored audio').catch(async (e) => {
+        const toastText = await yt.$eval('.st-toast', (t) => t.textContent).catch(() => '');
+        throw new Error(e.message + ' toast=' + toastText);
+      });
+      const buf = Buffer.from(wavB64, 'base64');
+      assert(buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WAVE', 'wav header');
+      const rate = buf.readUInt32LE(24); const dataBytes = buf.readUInt32LE(40);
+      assert(rate === 16000, 'rate ' + rate);
+      const durMs = (dataBytes / 2 / rate) * 1000;
+      assert(durMs > 1800 && durMs < 3600, 'clip duration ' + durMs);
+      let nonZero = 0; for (let i = 44; i < buf.length; i += 2) if (buf.readInt16LE(i) !== 0) nonZero++;
+      assert(nonZero > 1000, 'audio should not be silent: ' + nonZero);
+      const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
+      const it = items.find((i) => i.platform === 'youtube');
+      assert(it && it.audio && it.audio.rate === 16000, 'item audio meta: ' + JSON.stringify(it && it.audio));
+      await yt.evaluate(() => document.querySelector('video').pause());
+    });
+
     console.log('▶ 웹사이트');
     await browser.defaultBrowserContext().overridePermissions('http://localhost:8766', ['microphone']);
     const web = await browser.newPage();
@@ -221,39 +325,61 @@ function ensureFixtures() {
     web.on('console', (m) => logs.push('[web ' + m.type() + '] ' + m.text()));
     web.on('dialog', (d) => d.accept());
     await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
-    await step('확장 프로그램이 감지되고 저장한 자막 2개가 보인다', async () => {
+    await step('확장 프로그램이 감지되고 저장한 자막 3개가 보인다', async () => {
       await waitFor(() => web.$eval('#ext-status', (e) => e.classList.contains('ok')), 8000, 'ext ok');
-      await waitFor(() => web.$$eval('.item', (r) => r.length === 2), 8000, 'items');
+      await waitFor(() => web.$$eval('.item', (r) => r.length === 3), 8000, 'items');
       const texts = await web.$$eval('.item .en', (els) => els.map((e) => e.textContent));
       assert(texts.some((t) => t.includes('frisbee')) && texts.some((t) => t.includes('Principal')), 'texts ' + texts);
-      const group = await web.$eval('.group-title', (e) => e.textContent);
-      assert(group.includes('Mock Show') && group.includes('S1:E2'), 'group ' + group);
+      const groups = await web.$$eval('.group-title', (els) => els.map((e) => e.textContent));
+      assert(groups.some((g) => g.includes('Mock Show') && g.includes('S1:E2')), 'group ' + groups);
+    });
+    await step('보관된 오디오가 있는 항목은 플레이어 탭 없이 바로 재생된다', async () => {
+      const row = await web.$('[data-id^="youtube:"]');
+      assert(row, 'youtube item row');
+      const badge = await row.$eval('.has-audio', (e) => e.textContent).catch(() => null);
+      assert(badge && badge.includes('오디오'), 'audio badge');
+      await yt.evaluate(() => { window.__pauses = []; });
+      await (await row.$('.play')).click();
+      await waitFor(() => web.$eval('[data-id^="youtube:"]', (e) => e.classList.contains('playing')), 5000, 'local playing');
+      await waitFor(() => web.$eval('[data-id^="youtube:"]', (e) => !e.classList.contains('playing')), 8000, 'local ended');
+      const pauses = await yt.evaluate(() => window.__pauses);
+      assert(pauses.length === 0, 'player tab untouched: ' + JSON.stringify(pauses));
+      await (await web.$('[data-id^="youtube:"] .btn.danger')).click();
+      await waitFor(() => web.$$eval('.item', (r) => r.length === 2), 5000, 'youtube item deleted');
+      const left = await sw.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith('audio:')));
+      assert(left.length === 0, 'audio removed with item: ' + left);
     });
     await step('웹에서 ▶ 를 누르면 플레이어 탭이 그 구간만 재생하고 멈춘다', async () => {
       await page.evaluate(() => { window.__pauses = []; });
-      const row = await web.$('.item');
+      await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 5; });
+      const row = await web.$('[data-id="netflix:12345:22000"]');
       await (await row.$('.play')).click();
-      await waitFor(() => web.$eval('.item', (e) => e.classList.contains('playing')), 8000, 'playing state');
-      await waitFor(() => web.$eval('.item .state', (e) => e.textContent === ''), 15000, 'ended');
+      await waitFor(() => web.$eval('[data-id="netflix:12345:22000"]', (e) => e.classList.contains('playing')), 8000, 'playing state');
+      await waitFor(() => web.$eval('[data-id="netflix:12345:22000"] .state', (e) => e.textContent === ''), 15000, 'ended').catch(async (e) => {
+        const st = await web.$eval('[data-id="netflix:12345:22000"] .state', (x) => x.textContent).catch(() => '?');
+        const mock = await page.evaluate(() => { const v = document.querySelector('video'); return { paused: v.paused, t: v.currentTime, ended: v.ended, seeks: window.__seeks.slice(-4), pauses: window.__pauses.slice(-4), vis: document.visibilityState }; });
+        const diag = await page.evaluate(() => { const b = [...document.querySelectorAll('.st-settings .st-btn')].find((x) => x.textContent === '진단 정보'); if (b) b.click(); return document.querySelector('.st-diag') ? document.querySelector('.st-diag').textContent.split('\n').slice(-2).join(' | ') : ''; });
+        throw new Error(e.message + ' state=' + st + ' mock=' + JSON.stringify(mock) + ' diag=' + diag);
+      });
       const pauses = await page.evaluate(() => window.__pauses);
       const last = pauses[pauses.length - 1];
       assert(last >= 24100 && last <= 24700, 'paused at ' + JSON.stringify(pauses));
     });
     await step('코멘트를 쓰면 저장되고 새로고침 후에도 남는다', async () => {
-      const ta = await web.$('.item .comment');
+      const ta = await web.$('[data-id="netflix:12345:22000"] .comment');
       await ta.click();
       await ta.type('물다 = bite 메모');
       await web.keyboard.press('Tab');
       await sleep(400);
       await web.reload({ waitUntil: 'load' });
       await waitFor(() => web.$$eval('.item', (r) => r.length === 2), 8000, 'items after reload');
-      const v = await web.$eval('.item .comment', (e) => e.value);
+      const v = await web.$eval('[data-id="netflix:12345:22000"] .comment', (e) => e.value);
       assert(v === '물다 = bite 메모', 'comment: ' + v);
     });
     await step('녹음: 3개까지 저장, 4번째에 첫 번째가 삭제된다', async () => {
       for (let i = 0; i < 4; i++) {
         await web.click('[data-id="netflix:12345:22000"] .rec-btn');
-        await waitFor(() => web.$eval('.item .rec-btn', (e) => e.classList.contains('recording')), 5000, 'recording ' + i).catch(async (e) => {
+        await waitFor(() => web.$eval('[data-id="netflix:12345:22000"] .rec-btn', (e) => e.classList.contains('recording')), 12000, 'recording ' + i).catch(async (e) => {
           const toastText = await web.$eval('#toast', (t) => t.textContent);
           throw new Error(e.message + ' toast=' + toastText + ' logs=' + logs.filter((l) => l.startsWith('[web')).slice(-5).join(' | '));
         });
@@ -282,6 +408,7 @@ function ensureFixtures() {
     await step('퀴즈: 받아쓰기 확인 후 C로 "알고 있는 표현" 상자로 이동', async () => {
       await web.goto('http://localhost:8766/#/quiz', { waitUntil: 'load' });
       await waitFor(() => web.$('.quiz-setup'), 8000, 'setup');
+      await web.select('.quiz-setup select', 'Mock Show');
       await web.click('.quiz-setup .btn.primary');
       await waitFor(() => web.$('.dictation'), 8000, 'card');
       await sleep(300);

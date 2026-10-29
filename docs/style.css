@@ -35,7 +35,8 @@ main { max-width: 1100px; margin: 0 auto; padding: 18px 20px 80px; }
 .item { display: grid; grid-template-columns: 44px 1fr 260px; gap: 12px; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 8px; align-items: start; }
 .item.playing { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
 .item.known { opacity: .85; }
-.play { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--accent); color: #fff; font-size: 17px; display: flex; align-items: center; justify-content: center; }
+.item .play { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--accent); color: #fff; font-size: 17px; display: flex; align-items: center; justify-content: center; padding: 0; }
+.quiz-card .play { white-space: nowrap; }
 .play:hover { filter: brightness(1.1); }
 .play.busy { background: var(--card2); color: var(--muted); }
 .play.active { background: #f59e0b; color: #111; }
@@ -130,3 +131,5 @@ code { background: #111; padding: 1px 5px; border-radius: 4px; font-size: 13px; 
   main { padding: 14px 12px 80px; }
   .top { padding: 10px 12px; gap: 10px; }
 }
+
+.has-audio { color: var(--green); }

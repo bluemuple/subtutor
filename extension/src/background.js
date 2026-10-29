@@ -5,10 +5,11 @@
 const SITE_URL = 'https://bluemuple.github.io/subtutor/';
 const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
-  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, offsetMs: 0,
+  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {},
 };
 const PLATFORM_URL_PATTERNS = {
   netflix: ['https://www.netflix.com/watch/*'],
+  youtube: ['https://www.youtube.com/watch*'],
   prime: ['https://www.primevideo.com/*', 'https://*.amazon.com/*', 'https://*.amazon.co.uk/*', 'https://*.amazon.co.jp/*', 'https://*.amazon.de/*', 'https://*.amazon.com.au/*'],
   disney: ['https://www.disneyplus.com/*'],
 };
@@ -130,11 +131,13 @@ function videoIdFromUrl(platform, url) {
     if (platform === 'netflix') m = /\/watch\/(\d+)/.exec(u.pathname);
     else if (platform === 'disney') m = /\/(?:play|video)\/([^/?#]+)/.exec(u.pathname);
     else if (platform === 'prime') m = /\/(?:detail|gp\/video\/detail)\/([A-Z0-9]{8,})/i.exec(u.pathname);
+    else if (platform === 'youtube') return u.pathname === '/watch' ? u.searchParams.get('v') : null;
     return m ? m[1] : null;
   } catch (e) { return null; }
 }
 function watchUrl(item) {
   if (item.platform === 'netflix') return 'https://www.netflix.com/watch/' + item.videoId + '?t=' + Math.max(0, Math.floor((item.startMs || 0) / 1000));
+  if (item.platform === 'youtube') return 'https://www.youtube.com/watch?v=' + item.videoId + '&t=' + Math.max(0, Math.floor((item.startMs || 0) / 1000)) + 's';
   if (item.platform === 'disney') return item.url || ('https://www.disneyplus.com/play/' + item.videoId);
   return item.url;
 }
@@ -172,7 +175,7 @@ async function waitForReady(tabId, item, timeoutMs) {
   const t0 = Date.now();
   while (Date.now() - t0 < (timeoutMs || 45000)) {
     const s = await tabStatus(tabId);
-    if (s && s.ready && s.platform === item.platform && (String(s.videoId) === String(item.videoId) || item.platform === 'prime')) return s;
+    if (s && s.ready && s.platform === item.platform && String(s.videoId) === String(item.videoId)) return s;
     await new Promise((r) => setTimeout(r, 700));
   }
   return null;
@@ -204,7 +207,11 @@ async function playClip(item, websiteTabId) {
     const cur2 = await currentClip();
     if (!cur2 || cur2.clipId !== clipId) return { clipId, cancelled: true };
     if (!s) {
-      notifyWeb(websiteTabId, { itemId: item.id, clipId, state: 'error', message: '플레이어가 준비되지 않았습니다. 플레이어 탭에서 영상이 재생되는지(프로필 선택 등) 확인하세요.' });
+      const other = await tabStatus(tabId);
+      const msg = other && other.ready && String(other.videoId) !== String(item.videoId)
+        ? '플레이어 탭에 다른 영상이 열려 있습니다. 저장한 자막의 영상(' + (item.title || item.videoId) + (item.episode ? ' ' + item.episode : '') + ')을 재생한 뒤 다시 시도하세요.'
+        : '플레이어가 준비되지 않았습니다. 플레이어 탭에서 영상이 재생되는지(프로필 선택 등) 확인하세요.';
+      notifyWeb(websiteTabId, { itemId: item.id, clipId, state: 'error', message: msg });
       await setActiveClip(null);
       return { clipId, error: 'not-ready' };
     }
@@ -229,6 +236,32 @@ async function openSite() {
   }
 }
 
+// ───────── 오디오 (별표 저장 시 캡처한 WAV) ─────────
+const audioKey = (id) => 'audio:' + id;
+async function saveAudio(msg) {
+  const out = { ok: true };
+  const mode = msg.mode || 'store';
+  if ((mode === 'store' || mode === 'both') && msg.store) {
+    await chrome.storage.local.set({ [audioKey(msg.id)]: msg.store });
+    await withItems((items) => updateItem(items, msg.id, { audio: { rate: 16000, ms: msg.durationMs || 0, savedAt: Date.now() } }));
+    out.stored = true;
+  }
+  if ((mode === 'download' || mode === 'both') && msg.download) {
+    const fileName = String(msg.fileName || 'SubTutor/clip.wav').replace(/^\/+/, '');
+    try {
+      out.downloadId = await chrome.downloads.download({ url: 'data:audio/wav;base64,' + msg.download, filename: fileName, conflictAction: 'uniquify', saveAs: false });
+      out.fileName = fileName;
+    } catch (e) {
+      throw new Error('파일 다운로드 실패: ' + ((e && e.message) || e));
+    }
+  }
+  return out;
+}
+async function removeAudio(ids) {
+  const keys = ids.map(audioKey);
+  if (keys.length) await chrome.storage.local.remove(keys);
+}
+
 // ───────── 메시지 처리 ─────────
 function updateItem(items, id, patch) {
   const it = items.find((i) => i.id === id);
@@ -246,8 +279,10 @@ async function handleMessage(msg, sender) {
       const reg = await getRegistry();
       reg[tabId] = { platform: msg.platform, videoId: msg.videoId, ready: !!msg.ready, at: Date.now() };
       await setRegistry(reg);
-      return { ok: true };
+      return { ok: true, tabId };
     }
+    case 'audio.save': return saveAudio(msg);
+    case 'audio.get': { const r = await chrome.storage.local.get(audioKey(msg.id)); return { wav: r[audioKey(msg.id)] || null }; }
     case 'player.event': {
       const clip = await currentClip();
       if (!clip || clip.clipId !== msg.clipId) return { ok: false };
@@ -267,7 +302,7 @@ async function handleMessage(msg, sender) {
         return { write: true, items, result: { ok: true } };
       });
     case 'items.update': return withItems((items) => updateItem(items, msg.id, msg.patch));
-    case 'items.remove': return withItems((items) => ({ write: true, items: items.filter((i) => i.id !== msg.id), result: { ok: true } }));
+    case 'items.remove': await removeAudio([msg.id]); return withItems((items) => ({ write: true, items: items.filter((i) => i.id !== msg.id), result: { ok: true } }));
     case 'translate': return translateTexts(Array.isArray(msg.texts) ? msg.texts.map(String) : [], msg.from || 'en', msg.to || 'ko');
     case 'fetch.text': {
       const res = await fetch(msg.url);
@@ -290,8 +325,15 @@ async function handleMessage(msg, sender) {
     case 'web.ping': return { ok: true, version: chrome.runtime.getManifest().version };
     case 'web.items.list': return { items: await getItems() };
     case 'web.items.update': return withItems((items) => updateItem(items, p.id, p.patch));
-    case 'web.items.remove': return withItems((items) => ({ write: true, items: items.filter((i) => i.id !== p.id), result: { ok: true } }));
-    case 'web.items.clear': return withItems(() => ({ write: true, items: [], result: { ok: true } }));
+    case 'web.items.remove': await removeAudio([p.id]); return withItems((items) => ({ write: true, items: items.filter((i) => i.id !== p.id), result: { ok: true } }));
+    case 'web.items.clear': { const ids = (await getItems()).map((i) => i.id); await removeAudio(ids); return withItems(() => ({ write: true, items: [], result: { ok: true } })); }
+    case 'web.audio.get': { const r = await chrome.storage.local.get(audioKey(p.itemId)); return { wav: r[audioKey(p.itemId)] || null }; }
+    case 'web.audio.remove': { await removeAudio([p.itemId]); return withItems((items) => updateItem(items, p.itemId, { audio: null })); }
+    case 'web.setEnabled': {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab) { try { await chrome.tabs.sendMessage(tab.id, { type: 'setEnabled', enabled: !!p.enabled }); } catch (e) { /* ignore */ } }
+      return { ok: true };
+    }
     case 'web.items.import': {
       const incoming = Array.isArray(p.items) ? p.items : [];
       return withItems((items) => {

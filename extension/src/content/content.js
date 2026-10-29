@@ -1,6 +1,6 @@
 /*
  * SubTutor – 콘텐츠 스크립트 (ISOLATED world)
- * 자막 패널, 영상 위 영어+한국어 자막, 단축키(A/S/D/F/E/P/W), 자동 일시정지, 쉐도잉, 자막 저장, 웹사이트 원격 재생.
+ * 자막 패널, 영상 위 영어+한국어 자막, 단축키(A/S/D/F/E/P/W), 자동 일시정지, 쉐도잉, 자막 저장(+오디오 캡처), 웹사이트 원격 재생.
  */
 (() => {
   'use strict';
@@ -25,21 +25,22 @@
     shadowPauseSec: 2,
     leadMs: 150,
     tailMs: 200,
-    offsetMs: 0,
+    audioMode: 'off',           // off | store | download | both : 별표 저장 시 오디오 처리
+    enabled: {},                // 플랫폼별 켜기/끄기 { netflix: true, ... }
   };
   let settings = Object.assign({}, DEFAULT_SETTINGS);
 
   const state = {
-    videoId: null, videoEl: null, active: false,
-    cues: [], koCues: [], enTrack: null, koTrack: null, runToken: 0, trackRun: 0, loading: false,
+    videoId: null, videoEl: null, active: false, tabId: null,
+    cues: [], koCues: [], enTrack: null, koTrack: null, runToken: 0, trackRun: 0,
     current: -1, lastShown: -1, prevIdx: -1, lastT: 0, lastPaused: null, lastDisplayIdx: -2,
     loop: false, loopIdx: -1, lastLoopSeekAt: 0,
-    pausedFor: -1, pausedAt: 0, shadowTimer: null, shadowCueIdx: -1, endTimer: null, resumeByUsUntil: 0, seekByUsUntil: 0,
-    clip: null,
-    saved: new Map(), meta: null, metaTries: 0,
-    offsetAuto: 0, alignSamples: [], lastNativeText: '',
+    pausedFor: -1, pausedAt: 0, shadowTimer: null, endTimer: null, resumeByUsUntil: 0, pauseByUsUntil: 0, seekByUsUntil: 0, lastSeekAt: 0, lastSeekTarget: NaN, playRequestedAt: 0, ensureTimer: null,
+    clip: null, capturing: null,
+    saved: new Map(), meta: null,
+    offsetMs: 0, offsetSource: '', alignSamples: [], lastNativeText: '',
     userScrollAt: 0, statusText: '', statusErr: false,
-    ttPoll: null,
+    ttPoll: null, tickCount: 0,
   };
   const trackCache = new Map(); // videoId -> tracks
   let pageVideoId = null;
@@ -49,6 +50,7 @@
 
   // ───────────── 유틸 ─────────────
   const now = () => performance.now();
+  const wall = () => performance.timeOrigin + performance.now();
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   function el(tag, attrs, children) {
     const n = document.createElement(tag);
@@ -74,8 +76,13 @@
     });
   }
   const isEditable = (t) => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
-  const effectiveOffset = () => (settings.offsetMs || 0) + (state.offsetAuto || 0);
-  const nowMs = () => { const raw = adapter.timeMs(); return isFinite(raw) ? raw + effectiveOffset() : NaN; };
+  const isEnabled = () => !settings.enabled || settings.enabled[adapter.name] !== false;
+  const effectiveOffset = () => state.offsetMs || 0;
+  const rawMs = () => adapter.timeMs();
+  const nowMs = () => { const raw = rawMs(); return isFinite(raw) ? raw + effectiveOffset() : NaN; };
+  const cueVideoMs = (c) => c.start - effectiveOffset();
+  const cueVideoEndMs = (c) => c.end - effectiveOffset();
+  const offsetKey = () => adapter.name + ':' + state.videoId;
 
   function koFor(c) {
     if (!c) return '';
@@ -106,6 +113,13 @@
     chrome.storage.local.set({ settings }).catch(() => {});
     applySettings();
   }
+  function setEnabled(on) {
+    const enabled = Object.assign({}, settings.enabled || {}, { [adapter.name]: !!on });
+    saveSettings({ enabled });
+    if (!on) { cancelModesPending(); state.loop = false; state.loopIdx = -1; }
+    toast(on ? 'SubTutor 켬' : 'SubTutor 끔 (컨트롤 바의 ST 버튼이나 팝업에서 다시 켤 수 있어요)');
+    updateModeUI();
+  }
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
     if (changes.settings && changes.settings.newValue) {
@@ -121,12 +135,13 @@
     if (!msg || !msg.type) return;
     switch (msg.type) {
       case 'status':
-        sendResponse({ platform: adapter.name, videoId: state.videoId, ready: isPlayerReady(), cues: state.cues.length, title: state.meta && state.meta.title });
+        sendResponse({ platform: adapter.name, videoId: state.videoId, ready: isPlayerReady(), cues: state.cues.length, title: state.meta && state.meta.title, enabled: isEnabled(), offsetMs: state.offsetMs });
         break;
       case 'playRange': startClip(msg); sendResponse({ ok: true }); break;
       case 'stopClip': stopClip('stopped'); sendResponse({ ok: true }); break;
-      case 'seekTo': cancelModesPending(); seekTo(msg.ms); if (msg.play !== false) adapter.play(); sendResponse({ ok: true }); break;
+      case 'seekTo': cancelModesPending(); playFrom(msg.ms, msg.play === false); sendResponse({ ok: true }); break;
       case 'togglePanel': setPanelOpen(!settings.panelOpen); sendResponse({ ok: true }); break;
+      case 'setEnabled': setEnabled(!!msg.enabled); sendResponse({ ok: true }); break;
       default: return;
     }
   });
@@ -147,7 +162,7 @@
       case 'tracks': onTracks(d); break;
       case 'video': if (d.videoId && d.videoId !== pageVideoId) { pageVideoId = d.videoId; checkVideo(); } break;
       case 'master': onMaster(d.url); break;
-      case 'meta': if (d.meta && d.meta.title) { pageMeta = d.meta; setMeta(d.meta); } break;
+      case 'meta': if (d.meta && d.meta.title && (!d.videoId || d.videoId === state.videoId)) { pageMeta = d.meta; setMeta(d.meta); } break;
       case 'time': A.shared.pageTime = { ms: d.ms, at: now(), advancing: !!d.advancing }; break;
       case 'navigate': checkVideo(); break;
       default: break;
@@ -168,9 +183,9 @@
     if (active !== state.active) {
       state.active = active;
       if (active) { mountUI(); applySettings(); registerPlayer(); }
-      else if (ui.root) { ui.overlay.classList.add('st-hidden'); }
+      else if (ui.root) { ui.overlay.classList.add('st-hidden'); applySettings(); }
     }
-    if (active) ensureOverlayMounted();
+    if (active) { ensureOverlayMounted(); mountControlButton(); }
   }
   function startVideo(id) {
     state.runToken++;
@@ -178,13 +193,14 @@
     state.videoId = id;
     state.cues = []; state.koCues = []; state.enTrack = null; state.koTrack = null;
     state.current = -1; state.lastShown = -1; state.prevIdx = -1; state.lastDisplayIdx = -2;
-    state.loop = false; state.loopIdx = -1; state.pausedFor = -1; state.clip = null;
-    state.saved = new Map(); state.meta = null; state.metaTries = 0; state.offsetAuto = 0; state.alignSamples = []; state.lastNativeText = '';
-    clearShadow(); clearEndTimer(); stopTextTrackPoll();
+    state.loop = false; state.loopIdx = -1; state.pausedFor = -1; state.clip = null; state.capturing = null;
+    state.saved = new Map(); state.meta = null; state.offsetMs = 0; state.offsetSource = ''; state.alignSamples = []; state.lastNativeText = '';
+    clearShadow(); clearEndTimer(); stopTextTrackPoll(); clearTimeout(state.ensureTimer);
     if (ui.root) { renderList(); renderOverlay(true); updateModeUI(); }
     if (!id) return;
     page.send({ type: 'hello' });
     setStatus('자막 불러오는 중…');
+    loadOffset();
     loadTracks(id);
     loadSaved();
     loadMeta();
@@ -198,8 +214,13 @@
       // 사용자가 직접 재생을 눌렀다: 쉐도잉 대기/자동 일시정지 상태를 푼다
       if (state.shadowTimer || state.pausedFor >= 0) { clearShadow(); state.pausedFor = -1; }
     });
+    v.addEventListener('pause', () => {
+      // 우리가 play() 를 건 직후의 pause 는 플레이어의 되돌림이므로 재시도를 유지하고, 그 밖의 pause 는 사용자의 뜻으로 보고 재시도를 멈춘다
+      if (now() - state.playRequestedAt > 400 && now() > state.pauseByUsUntil) clearTimeout(state.ensureTimer);
+    });
     v.addEventListener('seeking', () => {
       if (now() < state.seekByUsUntil) return;
+      state.lastSeekAt = now();
       clearShadow(); state.pausedFor = -1;
     });
     registerPlayer();
@@ -208,10 +229,37 @@
   function registerPlayer() {
     clearTimeout(registerTimer);
     registerTimer = setTimeout(() => {
-      bg({ type: 'player.hello', platform: adapter.name, videoId: state.videoId, ready: isPlayerReady() }).catch(() => {});
+      bg({ type: 'player.hello', platform: adapter.name, videoId: state.videoId, ready: isPlayerReady() }).then((r) => { if (r && Number.isInteger(r.tabId)) state.tabId = r.tabId; }).catch(() => {});
     }, 200);
   }
   setInterval(checkVideo, 500);
+
+  // ───────────── 영상별 자막 시간 보정 ─────────────
+  async function loadOffset() {
+    const key = offsetKey();
+    try {
+      const { offsets } = await chrome.storage.local.get('offsets');
+      const saved = offsets && offsets[key];
+      if (key === offsetKey() && saved && Number.isFinite(saved.ms)) { state.offsetMs = saved.ms; state.offsetSource = saved.source || 'saved'; updateStatusOffset(); }
+    } catch (e) { /* ignore */ }
+  }
+  async function saveOffset(ms, source) {
+    state.offsetMs = Math.round(ms);
+    state.offsetSource = source;
+    try {
+      const { offsets } = await chrome.storage.local.get('offsets');
+      const map = offsets && typeof offsets === 'object' ? offsets : {};
+      if (state.offsetMs) map[offsetKey()] = { ms: state.offsetMs, source, at: Date.now() }; else delete map[offsetKey()];
+      const keys = Object.keys(map);
+      if (keys.length > 300) keys.sort((a, b) => (map[a].at || 0) - (map[b].at || 0)).slice(0, keys.length - 300).forEach((k) => delete map[k]);
+      await chrome.storage.local.set({ offsets: map });
+    } catch (e) { /* ignore */ }
+    state.current = -1; state.prevIdx = -1;
+    updateStatusOffset();
+    syncSettingsForm();
+    renderOverlay(true);
+  }
+  function updateStatusOffset() { if (ui.status) setStatus(state.statusText, state.statusErr); }
 
   // ───────────── 자막 트랙 로딩 ─────────────
   function pickTrack(tracks, lang) {
@@ -219,7 +267,8 @@
     const cands = tracks.filter((t) => t && !t.forced && String(t.lang || '').toLowerCase().split(/[-_]/)[0] === want);
     if (!cands.length) return null;
     const sdh = (t) => t.cc || /sdh|\[cc\]|closed caption|청각/i.test(t.label || '');
-    cands.sort((a, b) => (sdh(a) === sdh(b) ? 0 : sdh(a) ? 1 : -1));
+    const score = (t) => (t.translated ? 4 : 0) + (sdh(t) ? 2 : 0) + (t.asr ? 1 : 0);
+    cands.sort((a, b) => score(a) - score(b));
     return cands[0];
   }
   function onTracks(d) {
@@ -233,7 +282,7 @@
     try {
       const r = await page.request({ type: 'fetchText', url }, 25000);
       if (r && r.ok && typeof r.text === 'string') return r.text;
-      throw new Error(r && r.error || 'page fetch failed');
+      throw new Error((r && r.error) || 'page fetch failed');
     } catch (e) {
       const r = await bg({ type: 'fetch.text', url });
       if (r && typeof r.text === 'string') return r.text;
@@ -273,10 +322,24 @@
       ]);
       if (token !== state.trackRun) return;
       setCues(enCues, koCues, en, ko);
+      if (!ko && adapter.name === 'netflix') netflixKoFallback(token);
     } catch (e) {
       if (token !== state.trackRun) return;
       setStatus('자막을 내려받지 못했습니다: ' + (e && e.message), true);
     }
+  }
+  // manifest 에 한국어가 없어도 플레이어 트랙 목록에 있으면 잠시 트랙을 바꿔 받아온다
+  async function netflixKoFallback(token) {
+    try {
+      const r = await page.request({ type: 'hydrate', lang: 'ko', preferCC: false }, 25000);
+      if (token !== state.trackRun || !r || !r.track) return;
+      const koCues = await loadTrackCues(r.track);
+      if (token !== state.trackRun || !koCues.length) return;
+      state.koCues = koCues; state.koTrack = r.track;
+      const merged = S.mergeTranslations(state.cues, koCues);
+      state.cues.forEach((c) => { if (c.koSource === 'track') c.koTrack = c.ko; delete c.ko; delete c.koSource; });
+      if (merged) { setStatus('영어 ' + state.cues.length + '줄' + (state.enTrack && state.enTrack.cc ? ' (CC)' : '') + ' · 한국어 자막 ' + merged + '줄 연결'); refreshAllKo(); }
+    } catch (e) { /* 기계 번역으로 계속 */ }
   }
   function setCues(enCues, koCues, enTrack, koTrack) {
     state.cues = enCues; state.koCues = koCues || []; state.enTrack = enTrack; state.koTrack = koTrack || null;
@@ -284,8 +347,8 @@
     const merged = S.mergeTranslations(state.cues, state.koCues);
     state.cues.forEach((c) => { if (c.koSource === 'track') c.koTrack = c.ko; delete c.ko; delete c.koSource; });
     state.current = -1; state.lastShown = -1; state.prevIdx = -1; state.lastDisplayIdx = -2;
-    const parts = ['영어 ' + state.cues.length + '줄' + (enTrack && enTrack.cc ? ' (CC)' : '')];
-    if (merged) parts.push('한국어 자막 ' + merged + '줄 연결');
+    const parts = ['영어 ' + state.cues.length + '줄' + (enTrack && enTrack.cc ? ' (CC)' : '') + (enTrack && enTrack.asr ? ' (자동 생성)' : '')];
+    if (merged) parts.push('한국어 ' + merged + '줄 연결' + (koTrack && koTrack.translated ? ' (유튜브 번역)' : ''));
     else if (settings.translationSource !== 'off' && settings.translationSource !== 'track') parts.push('한국어: 기계 번역');
     setStatus(parts.join(' · '));
     renderList();
@@ -302,7 +365,6 @@
       if (token !== state.runToken) return;
       if (r && Array.isArray(r.tracks) && r.tracks.length) { trackCache.set(vid, r.tracks); applyTracks(r.tracks); return; }
     } catch (e) { /* 페이지 스크립트가 아직 없거나 트랙이 아직 안 옴 */ }
-    // 잠시 기다렸다가도 안 오면 대체 경로
     setTimeout(() => { if (token === state.runToken && !state.cues.length && !trackCache.has(vid)) fallbackTracks(vid, token); }, 7000);
   }
   async function fallbackTracks(vid, token) {
@@ -313,8 +375,7 @@
         if (token !== state.runToken) return;
         if (!enR || !enR.track) { setStatus('영어 자막을 찾지 못했습니다. 넷플릭스 자막을 영어로 켠 뒤 새로고침해 보세요.', true); return; }
         const koR = await page.request({ type: 'hydrate', lang: 'ko', preferCC: false }, 20000).catch(() => null);
-        if (token !== state.runToken) return;
-        if (state.cues.length) return; // 그 사이 manifest 경로로 자막이 들어왔다
+        if (token !== state.runToken || state.cues.length) return;
         const tracks = [enR.track].concat(koR && koR.track ? [koR.track] : []);
         trackCache.set(vid, tracks);
         applyTracks(tracks);
@@ -324,10 +385,9 @@
       return;
     }
     if (adapter.supportsTextTracks && tryTextTracks()) return;
-    setStatus('자막을 아직 못 찾았습니다. 플레이어에서 자막을 영어로 켜 보세요.', true);
+    setStatus(adapter.name === 'youtube' ? '이 영상에는 자막 트랙이 없습니다.' : '자막을 아직 못 찾았습니다. 플레이어에서 자막을 영어로 켜 보세요.', true);
     if (adapter.supportsTextTracks) startTextTrackPoll();
   }
-  // <video>.textTracks 에 큐가 있으면 그것을 영어 자막으로 쓴다 (프라임 비디오 대체 경로)
   function readTextTrackCues() {
     const v = adapter.video();
     if (!v || !v.textTracks) return null;
@@ -368,7 +428,6 @@
   }
   function stopTextTrackPoll() { if (state.ttPoll) { clearInterval(state.ttPoll); state.ttPoll = null; } }
 
-  // 디즈니+: HLS 마스터 플레이리스트에서 자막 트랙 → 세그먼트 목록
   async function onMaster(url) {
     if (adapter.name !== 'disney' || !url || url === masterUrlPending) return;
     masterUrlPending = url;
@@ -449,7 +508,7 @@
     if (!state.videoId) return;
     try {
       const res = await bg({ type: 'items.list', platform: adapter.name, videoId: state.videoId });
-      state.saved = new Map((res && res.items || []).map((it) => [it.id, it]));
+      state.saved = new Map(((res && res.items) || []).map((it) => [it.id, it]));
       refreshSavedMarks();
       renderOverlay(true);
     } catch (e) { /* ignore */ }
@@ -459,7 +518,8 @@
     return {
       id: itemIdFor(c), platform: adapter.name, videoId: state.videoId, url: adapter.pageUrl(state.videoId),
       title: meta.title || (adapter.label + ' ' + state.videoId), episode: meta.episode || '',
-      startMs: c.start, endMs: c.end, text: c.text,
+      startMs: Math.round(cueVideoMs(c)), endMs: Math.round(cueVideoEndMs(c)), subStartMs: c.start, offsetMs: effectiveOffset(),
+      text: c.text,
       translation: koFor(c) || c.koTrack || c.koMt || '', translationSource: c.koTrack ? 'track' : (c.koMt ? 'mt' : ''),
       prevText: state.cues[i - 1] ? state.cues[i - 1].text : '', nextText: state.cues[i + 1] ? state.cues[i + 1].text : '',
       savedAt: Date.now(), box: 'learning', comment: '', reviews: 0, forgot: 0,
@@ -480,12 +540,14 @@
         state.saved.set(id, item);
         refreshSavedMarks(); renderOverlay(true);
         await bg({ type: 'items.save', item });
-        toast('★ 저장했습니다');
+        toast('★ 저장했습니다' + (settings.audioMode !== 'off' ? ' · 오디오 녹음 준비' : ''));
         if (!item.translation) {
-          const res = await bg({ type: 'translate', texts: [c.text.replace(/\n/g, ' ')], from: 'en', to: 'ko' }).catch(() => null);
-          const t = res && res.translations && res.translations[0];
-          if (t) { c.koMt = t; updateRowKo(i); await bg({ type: 'items.update', id, patch: { translation: t, translationSource: 'mt' } }).catch(() => {}); }
+          bg({ type: 'translate', texts: [c.text.replace(/\n/g, ' ')], from: 'en', to: 'ko' }).then((res) => {
+            const t = res && res.translations && res.translations[0];
+            if (t) { c.koMt = t; updateRowKo(i); bg({ type: 'items.update', id, patch: { translation: t, translationSource: 'mt' } }).catch(() => {}); }
+          }).catch(() => {});
         }
+        if (settings.audioMode && settings.audioMode !== 'off') queueCapture(i, item);
       }
     } catch (e) {
       toast('저장 실패: ' + (e && e.message));
@@ -503,12 +565,139 @@
     }
   }
 
+  // ───────────── 오디오 캡처 (별표 저장 시) ─────────────
+  const capture = { frame: null, ready: null, reqId: 0, pending: new Map(), queue: [], busy: false };
+  function ensureCaptureFrame() {
+    if (capture.ready) return capture.ready;
+    capture.ready = new Promise((resolve, reject) => {
+      const frame = el('iframe', { src: chrome.runtime.getURL('capture/capture.html'), allow: 'microphone; autoplay', style: 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;border:0;left:-9999px;top:0' });
+      capture.frame = frame;
+      const timer = setTimeout(() => reject(new Error('캡처 프레임이 응답하지 않습니다')), 8000);
+      window.addEventListener('message', (e) => {
+        if (e.source !== frame.contentWindow || !e.data || e.data.__stcap !== 'res') return;
+        const d = e.data;
+        if (d.ready) { clearTimeout(timer); resolve(frame); return; }
+        const p = capture.pending.get(d.id);
+        if (p) { clearTimeout(p.timer); capture.pending.delete(d.id); p.resolve(d); }
+      });
+      document.documentElement.append(frame);
+    });
+    capture.ready.catch(() => { capture.ready = null; });
+    return capture.ready;
+  }
+  function frameRequest(cmd, payload, timeout) {
+    return ensureCaptureFrame().then((frame) => new Promise((resolve, reject) => {
+      const id = ++capture.reqId;
+      const timer = setTimeout(() => { capture.pending.delete(id); reject(new Error('캡처 응답 시간 초과: ' + cmd)); }, timeout || 15000);
+      capture.pending.set(id, { resolve, timer });
+      frame.contentWindow.postMessage(Object.assign({ __stcap: 'req', id, cmd }, payload || {}), '*');
+    }));
+  }
+  function queueCapture(i, item) {
+    capture.queue.push({ i, item });
+    if (!capture.busy) runCaptureQueue();
+  }
+  async function runCaptureQueue() {
+    capture.busy = true;
+    while (capture.queue.length) {
+      const job = capture.queue.shift();
+      try { await captureCue(job.i, job.item); } catch (e) { toast('오디오 저장 실패: ' + (e && e.message)); }
+    }
+    capture.busy = false;
+  }
+  function fileNameFor(item) {
+    const Au = globalThis.SubTutorAudio;
+    const safe = (s, n) => (Au ? Au.safeFileName(s, n) : String(s).replace(/[\\/:*?"<>|]/g, ' ').slice(0, n));
+    const clock = Au ? Au.fmtClock(item.startMs) : String(Math.floor(item.startMs / 1000));
+    return 'SubTutor/' + safe(item.title + (item.episode ? ' ' + item.episode : ''), 60) + '/' + clock + ' ' + safe(item.text.replace(/\n/g, ' '), 60) + '.wav';
+  }
+  // 대사 구간을 재생하면서 (벽시계, 영상시간) 쌍을 모은다. 끝나면 resolve.
+  function playSegmentForCapture(startV, endV) {
+    return new Promise((resolve) => {
+      state.capturing = { startV, endV, anchors: [], done: resolve, startedAt: now() };
+      playFrom(startV - 400);
+      setTimeout(() => { if (state.capturing && state.capturing.done === resolve) finishCapturing('timeout'); }, Math.min(30000, (endV - startV) + 12000));
+    });
+  }
+  function finishCapturing(reason) {
+    const cap = state.capturing;
+    if (!cap) return;
+    state.capturing = null;
+    cap.reason = reason;
+    cap.done(cap);
+  }
+  async function captureCue(i, item) {
+    const c = state.cues[i];
+    if (!c) return;
+    const startV = cueVideoMs(c), endV = cueVideoEndMs(c);
+    const mode = settings.audioMode;
+    let result;
+    if (adapter.name === 'youtube' || !chrome.runtime.getURL) result = await captureViaElement(startV, endV);
+    else result = await captureViaTab(startV, endV);
+    if (!result) return;
+    if (result.silent) { toast('이 영상의 오디오는 캡처가 차단되어 있습니다(보호된 재생)'); return; }
+    const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, download: result.download, fileName: fileNameFor(item), durationMs: result.durationMs });
+    toast(mode === 'download' ? '🔊 오디오 파일 저장: ' + (r && r.fileName || '다운로드 폴더/SubTutor') : (mode === 'both' ? '🔊 오디오 저장 (파일 + 웹 퀴즈용)' : '🔊 오디오를 웹 퀴즈용으로 보관했습니다'));
+    if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
+  }
+  async function captureViaTab(startV, endV) {
+    const started = await frameRequest('start', { tabId: state.tabId, limitMs: 60000 }, 15000);
+    if (!started || !started.ok) {
+      if (started && started.unavailable === 'grant') {
+        toast('오디오 저장 권한: 크롬 툴바의 SubTutor 아이콘을 한 번 누른 뒤(이 탭 허용) 다시 저장해 주세요', 4000);
+        return null;
+      }
+      throw new Error((started && started.error) || '캡처 시작 실패');
+    }
+    const cap = await playSegmentForCapture(startV, endV);
+    if (cap.reason === 'timeout' && cap.anchors.length < 3) { await frameRequest('stop', {}, 3000).catch(() => {}); throw new Error('재생이 진행되지 않아 녹음을 중단했습니다'); }
+    const res = await frameRequest('finish', { startMs: startV, endMs: endV, anchors: cap.anchors, downloadRate: 0, storeRate: 16000 }, 20000);
+    if (!res || !res.ok) throw new Error((res && res.error) || '녹음 마무리 실패');
+    return res;
+  }
+  async function captureViaElement(startV, endV) {
+    const Au = globalThis.SubTutorAudio;
+    if (!Au) throw new Error('오디오 유틸을 불러오지 못했습니다 (확장 프로그램을 다시 로드하세요)');
+    const v = adapter.video();
+    if (!v) throw new Error('video 없음');
+    const stream = v.captureStream ? v.captureStream() : (v.mozCaptureStream ? v.mozCaptureStream() : null);
+    if (!stream) throw new Error('이 브라우저는 영상 스트림 캡처를 지원하지 않습니다');
+    const tracks = stream.getAudioTracks();
+    if (!tracks.length) throw new Error('오디오 트랙을 찾지 못했습니다 (재생을 시작한 뒤 다시 시도)');
+    const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => MediaRecorder.isTypeSupported(m)) || '';
+    const rec = new MediaRecorder(new MediaStream(tracks), mime ? { mimeType: mime } : undefined);
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((r) => { rec.onstop = r; });
+    rec.start(100);
+    const recStartWall = wall();
+    const cap = await playSegmentForCapture(startV, endV);
+    await new Promise((r) => setTimeout(r, 350));
+    rec.stop();
+    await stopped;
+    const blob = new Blob(chunks, { type: rec.mimeType || mime || 'audio/webm' });
+    if (!blob.size) throw new Error('녹음 데이터가 비었습니다');
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    let audio;
+    try { audio = await ctx.decodeAudioData(await blob.arrayBuffer()); } finally { ctx.close().catch(() => {}); }
+    const n = audio.length, rate = audio.sampleRate;
+    const mono = new Float32Array(n);
+    for (let ch = 0; ch < audio.numberOfChannels; ch++) { const d = audio.getChannelData(ch); for (let k = 0; k < n; k++) mono[k] += d[k] / audio.numberOfChannels; }
+    const offset = Au.mediaClockOffset(cap.anchors);
+    if (offset === null) throw new Error('재생이 진행되지 않아 녹음하지 못했습니다');
+    const PAD = 250;
+    const samples = Au.clipSamples([{ startFrame: 0, samples: mono }], { originMs: recStartWall, sampleRate: rate, startMs: startV - PAD + offset, endMs: endV + PAD + offset });
+    if (!samples) throw new Error('대사 구간이 녹음되지 않았습니다');
+    if (Au.isSilent(samples)) return { silent: true };
+    const norm = Au.normalize(samples, 0.95);
+    return { ok: true, durationMs: Math.round((samples.length * 1000) / rate), download: Au.bytesToBase64(Au.encodeMonoWav(norm, rate)), store: Au.bytesToBase64(Au.encodeMonoWav(Au.resample(norm, rate, 16000), 16000)) };
+  }
+
   // ───────────── 제목 ─────────────
   function setMeta(m) {
     if (!m || !m.title) return;
     state.meta = { title: String(m.title), episode: String(m.episode || '') };
-    if (ui.title) ui.title.textContent = state.meta.title + (state.meta.episode ? ' · ' + state.meta.episode : '');
-    if (ui.title) ui.title.title = ui.title.textContent;
+    if (ui.title) { ui.title.textContent = state.meta.title + (state.meta.episode ? ' · ' + state.meta.episode : ''); ui.title.title = ui.title.textContent; }
   }
   async function loadMeta() {
     const token = state.runToken;
@@ -536,15 +725,14 @@
     ui.nativeStyle = el('style', { id: 'st-native-style' });
     document.documentElement.append(ui.nativeStyle);
 
-    // 패널
     ui.panel = el('div', { id: 'st-panel' });
     ui.title = el('div', { class: 'st-brand', text: 'SubTutor' });
     ui.btnAP = el('button', { class: 'st-mode', title: '자동 일시정지 (P): 자막이 끝나면 멈춥니다. F로 다시 듣기', onclick: () => setMode('autoPause', !settings.autoPause) }, 'AP');
     ui.btnShadow = el('button', { class: 'st-mode st-shadow', title: '쉐도잉 (W): 자막이 끝나면 쉬었다가 자동으로 이어 재생합니다', onclick: () => setMode('shadowing', !settings.shadowing) }, '쉐도잉');
     ui.shadowSec = el('select', { class: 'st-shadow-sec', title: '쉐도잉 쉬는 시간', onchange: (e) => saveSettings({ shadowPauseSec: +e.target.value }) });
     for (let s = 1; s <= 7; s++) ui.shadowSec.append(el('option', { value: s }, s + '초'));
-    ui.btnSettings = el('button', { class: 'st-icon', title: '설정', onclick: () => ui.settings.classList.toggle('st-hidden') }, '⚙');
-    ui.btnClose = el('button', { class: 'st-icon', title: '패널 닫기', onclick: () => setPanelOpen(false) }, '✕');
+    ui.btnSettings = el('button', { class: 'st-icon', title: '설정', onclick: () => { ui.settings.classList.toggle('st-hidden'); syncSettingsForm(); } }, '⚙');
+    ui.btnClose = el('button', { class: 'st-icon', title: '패널 닫기 (`)', onclick: () => setPanelOpen(false) }, '✕');
     const head = el('div', { class: 'st-head' }, [ui.title, ui.btnAP, ui.btnShadow, ui.shadowSec, ui.btnSettings, ui.btnClose]);
     ui.status = el('div', { class: 'st-status' });
     ui.list = el('div', { class: 'st-list' });
@@ -567,7 +755,6 @@
     ui.toggle = el('button', { id: 'st-toggle', title: 'SubTutor 자막 패널 열기 (`)', onclick: () => setPanelOpen(true) }, '‹');
     document.body.append(ui.panel, ui.toggle);
 
-    // 영상 위 자막
     ui.overlay = el('div', { id: 'st-overlay', class: 'st-hidden' });
     ui.ovText = el('span', { class: 'st-ov-text' });
     ui.ovStar = el('button', { class: 'st-ov-star', title: '이 자막 저장 (E)', onclick: (e) => { e.stopPropagation(); const i = displayIndex(); if (i >= 0) toggleSave(i); } }, '☆');
@@ -583,7 +770,7 @@
     ensureOverlayMounted();
 
     document.addEventListener('fullscreenchange', onFullscreenChange);
-    startClearanceWatch();
+    window.addEventListener('resize', () => positionOverlay(true));
     startNativeAlignWatch();
     renderList();
     updateModeUI();
@@ -591,33 +778,66 @@
     if (state.statusText) setStatus(state.statusText, state.statusErr);
     refreshSavedMarks();
   }
+  function overlayHost() {
+    const fs = document.fullscreenElement;
+    return fs && fs !== document.documentElement && fs !== document.body ? fs : document.body;
+  }
   function ensureOverlayMounted() {
     if (!ui.overlay) return;
-    const container = adapter.container();
-    if (!container) return;
-    if (ui.overlay.parentElement !== container) {
-      const pos = getComputedStyle(container).position;
-      if (pos === 'static') container.style.position = 'relative';
-      container.append(ui.overlay, ui.toast);
-    }
+    const host = overlayHost();
+    if (ui.overlay.parentElement !== host) { host.append(ui.overlay, ui.toast); positionOverlay(true); }
   }
   function onFullscreenChange() {
-    const fs = document.fullscreenElement;
-    const host = fs && fs !== document.documentElement && fs !== document.body ? fs : document.body;
+    const host = overlayHost();
     if (ui.panel && ui.panel.parentElement !== host) host.append(ui.panel, ui.toggle);
     ensureOverlayMounted();
+    setTimeout(() => positionOverlay(true), 300);
   }
-  function setPanelOpen(open) {
-    saveSettings({ panelOpen: !!open });
+  function visibleBar(elm) {
+    let e = elm;
+    for (let i = 0; e && i < 4; i++) { const cs = getComputedStyle(e); if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') return false; e = e.parentElement; }
+    return true;
   }
+  function measureClearance(rect) {
+    if (typeof adapter.clearance === 'function') return adapter.clearance(rect) || 0;
+    if (!adapter.controlBars || !adapter.controlBars.length) return 0;
+    let top = Infinity;
+    for (const sel of adapter.controlBars) {
+      for (const bar of document.querySelectorAll(sel)) {
+        const r = bar.getBoundingClientRect();
+        if (r.height > 0 && r.top > rect.top && r.top < rect.bottom && visibleBar(bar)) top = Math.min(top, r.top);
+      }
+    }
+    return top === Infinity ? 0 : Math.max(0, Math.round(rect.bottom - top)) + 6;
+  }
+  let lastRectKey = '';
+  // 오버레이는 플레이어 DOM 안에 넣지 않고(플랫폼 CSS 간섭 방지) 화면에 고정한 채 <video>의 위치를 따라간다
+  function positionOverlay(force) {
+    if (!ui.overlay) return;
+    const v = adapter.video();
+    if (!v) return;
+    const r = v.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const clearance = measureClearance(r);
+    const key = [r.left, r.top, r.width, r.height, clearance].map(Math.round).join(',');
+    if (!force && key === lastRectKey) return;
+    lastRectKey = key;
+    const s = ui.overlay.style;
+    s.left = r.left + 'px'; s.top = r.top + 'px'; s.width = r.width + 'px'; s.height = r.height + 'px';
+    s.setProperty('--st-unit', (r.width / 100) + 'px');
+    s.setProperty('--st-clearance', clearance + 'px');
+    if (ui.toast) { ui.toast.style.left = (r.left + r.width / 2) + 'px'; ui.toast.style.top = (r.top + r.height * 0.1) + 'px'; }
+  }
+  function setPanelOpen(open) { saveSettings({ panelOpen: !!open }); }
   function applySettings() {
     if (!ui.root) return;
-    const open = settings.panelOpen && state.active;
+    const enabled = isEnabled();
+    const open = settings.panelOpen && state.active && enabled;
     ui.panel.classList.toggle('st-closed', !open);
-    ui.toggle.classList.toggle('st-hidden', open || !state.active);
+    ui.toggle.classList.toggle('st-hidden', open || !state.active || !enabled);
     document.documentElement.classList.toggle('st-panel-open', open);
     document.documentElement.style.setProperty('--st-font-scale', String((settings.fontScale || 100) / 100));
-    ui.nativeStyle.textContent = settings.hideNative && state.active ? (adapter.nativeHideCss || '') : '';
+    ui.nativeStyle.textContent = settings.hideNative && state.active && enabled ? (adapter.nativeHideCss || '') : '';
     ui.shadowSec.value = String(settings.shadowPauseSec);
     syncSettingsForm();
     updateModeUI();
@@ -627,28 +847,43 @@
     if (!ui.root) return;
     ui.btnAP.classList.toggle('on', !!settings.autoPause);
     ui.btnShadow.classList.toggle('on', !!settings.shadowing);
-    ui.btnShadow.textContent = '쉐도잉';
     ui.ovModes.textContent = '';
     if (state.loop) ui.ovModes.append(el('span', { class: 'st-ov-chip on-loop' }, '🔁 반복'));
     if (settings.autoPause) ui.ovModes.append(el('span', { class: 'st-ov-chip on-ap' }, '⏸ AP'));
     if (settings.shadowing) ui.ovModes.append(el('span', { class: 'st-ov-chip on-shadow' }, '🗣 쉐도잉 ' + settings.shadowPauseSec + '초'));
+    if (ui.ctlBtn) { ui.ctlBtn.classList.toggle('off', !isEnabled()); ui.ctlBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기'; }
   }
   function setStatus(text, isErr) {
     state.statusText = text; state.statusErr = !!isErr;
     if (!ui.status) return;
-    ui.status.textContent = text;
+    ui.status.textContent = '';
+    ui.status.append(text);
+    if (state.offsetMs) ui.status.append(el('span', { class: 'st-offset', title: '자막 시간 보정 (' + (state.offsetSource === 'auto' ? '자동 감지' : '수동') + ')' }, ' · 보정 ' + (state.offsetMs > 0 ? '+' : '') + (state.offsetMs / 1000).toFixed(1) + '초'));
     ui.status.classList.toggle('st-err', !!isErr);
-    if (isErr) {
-      ui.status.append(el('button', { onclick: () => { trackCache.delete(state.videoId); startVideo(state.videoId); } }, '다시 시도'));
-    }
+    if (isErr) ui.status.append(el('button', { onclick: () => { trackCache.delete(state.videoId); startVideo(state.videoId); } }, '다시 시도'));
   }
   let toastTimer = null;
-  function toast(text) {
+  function toast(text, ms) {
     if (!ui.toast) return;
     ui.toast.textContent = text;
     ui.toast.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => ui.toast.classList.remove('show'), 1300);
+    toastTimer = setTimeout(() => ui.toast.classList.remove('show'), ms || 1400);
+  }
+
+  // 플레이어 컨트롤 바의 켜기/끄기 버튼 (Language Reactor 식)
+  function mountControlButton() {
+    if (!adapter.controlAnchor) return;
+    let anchor = null;
+    try { anchor = adapter.controlAnchor(); } catch (e) { anchor = null; }
+    if (!anchor || !anchor.parentElement) return;
+    if (ui.ctlBtn && ui.ctlBtn.isConnected && ui.ctlBtn.nextElementSibling === anchor) return;
+    if (!ui.ctlBtn) {
+      ui.ctlBtn = el('button', { class: 'st-ctl st-ctl-' + adapter.name, title: 'SubTutor 끄기', 'aria-label': 'SubTutor 켜기/끄기' }, el('span', { class: 'st-ctl-badge' }, 'ST'));
+      ui.ctlBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); setEnabled(!isEnabled()); });
+    }
+    anchor.parentElement.insertBefore(ui.ctlBtn, anchor);
+    updateModeUI();
   }
 
   function buildSettings() {
@@ -658,12 +893,17 @@
     const sw = (key, onChange) => { const i = el('input', { type: 'checkbox', class: 'st-switch' }); i.addEventListener('change', () => (onChange || ((v) => saveSettings({ [key]: v })))(i.checked)); f[key] = i; return i; };
     f.translationSource = el('select', { onchange: (e) => { saveSettings({ translationSource: e.target.value }); refreshAllKo(); if (state.current >= 0) ensureTranslations(state.current); } });
     [['auto', '자동 (플랫폼 한국어 자막 → 없으면 기계번역)'], ['track', '플랫폼 한국어 자막만'], ['mt', '기계 번역만'], ['off', '끄기']].forEach(([v, t]) => f.translationSource.append(el('option', { value: v }, t)));
+    f.audioMode = el('select', { onchange: (e) => saveSettings({ audioMode: e.target.value }) });
+    [['off', '저장 안 함'], ['store', '웹 퀴즈용으로 보관 (확장 프로그램 안)'], ['download', 'PC에 WAV 파일로 다운로드'], ['both', '둘 다']].forEach(([v, t]) => f.audioMode.append(el('option', { value: v }, t)));
     f.fontScale = el('input', { type: 'range', min: 60, max: 160, step: 5 });
     f.fontScale.addEventListener('input', () => saveSettings({ fontScale: +f.fontScale.value }));
     f.shadowPauseSec = el('input', { type: 'range', min: 1, max: 7, step: 1 });
     f.shadowPauseSecLabel = el('span', { text: '' });
     f.shadowPauseSec.addEventListener('input', () => { f.shadowPauseSecLabel.textContent = f.shadowPauseSec.value + '초'; saveSettings({ shadowPauseSec: +f.shadowPauseSec.value }); });
     const num = (key, min, max) => { const i = el('input', { type: 'number', min, max, step: 50 }); i.addEventListener('change', () => saveSettings({ [key]: clamp(+i.value || 0, min, max) })); f[key] = i; return i; };
+    f.offset = el('input', { type: 'number', min: -120000, max: 120000, step: 100 });
+    f.offset.addEventListener('change', () => saveOffset(clamp(+f.offset.value || 0, -120000, 120000), 'manual'));
+    f.offsetHint = el('small', { text: '' });
     f.diag = el('div', { class: 'st-diag' });
     box.append(
       el('h4', { text: '번역' }),
@@ -678,10 +918,13 @@
       field('쉐도잉 쉬는 시간', el('span', null, [f.shadowPauseSec, ' ', f.shadowPauseSecLabel]), '자막이 끝난 뒤 따라 말할 시간 (1~7초)'),
       field('재생 시작 여유 (ms)', num('leadMs', 0, 2000), '자막 시작보다 이만큼 앞에서 재생'),
       field('재생 끝 여유 (ms)', num('tailMs', 0, 2000)),
-      field('자막 시간 보정 (ms)', num('offsetMs', -60000, 60000), '자막이 소리보다 늦으면 음수, 빠르면 양수'),
-      el('h4', { text: '저장한 자막' }),
+      el('div', { class: 'st-field' }, [el('label', null, ['이 영상 자막 시간 보정 (ms)', f.offsetHint]), el('span', { class: 'st-offset-ctl' }, [el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs - 500, 'manual') }, '−0.5초'), f.offset, el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs + 500, 'manual') }, '+0.5초')])]),
+      el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: () => { state.alignSamples = []; saveOffset(0, 'manual'); toast('보정값을 지웠습니다. 플랫폼 자막이 켜져 있으면 다시 자동 감지합니다'); } }, '보정 초기화')]),
+      el('h4', { text: '저장' }),
+      field('별표 저장 시 오디오', f.audioMode, '대사를 한 번 다시 재생하며 녹음합니다. 넷플릭스·프라임은 툴바 아이콘을 눌러 탭 허용이 필요할 수 있습니다'),
       el('div', { class: 'st-btn-row' }, [
         el('button', { class: 'st-btn st-primary', onclick: () => bg({ type: 'openSite' }).catch(() => {}) }, '웹에서 저장 목록 · 퀴즈 열기'),
+        el('button', { class: 'st-btn', onclick: () => setEnabled(false) }, '이 사이트에서 SubTutor 끄기'),
         el('button', { class: 'st-btn', onclick: () => { f.diag.textContent = diagnostics(); navigator.clipboard && navigator.clipboard.writeText(f.diag.textContent).then(() => toast('진단 정보를 복사했습니다'), () => {}); } }, '진단 정보'),
       ]),
       f.diag,
@@ -695,23 +938,26 @@
     f.overlay.checked = !!settings.overlay;
     f.hideNative.checked = !!settings.hideNative;
     f.translationSource.value = settings.translationSource;
+    f.audioMode.value = settings.audioMode || 'off';
     f.fontScale.value = settings.fontScale;
     f.shadowPauseSec.value = settings.shadowPauseSec;
     f.shadowPauseSecLabel.textContent = settings.shadowPauseSec + '초';
-    f.leadMs.value = settings.leadMs; f.tailMs.value = settings.tailMs; f.offsetMs.value = settings.offsetMs;
+    f.leadMs.value = settings.leadMs; f.tailMs.value = settings.tailMs;
+    f.offset.value = state.offsetMs;
+    f.offsetHint.textContent = state.offsetMs ? (state.offsetSource === 'auto' ? '플랫폼 자막과 대조해 자동 감지한 값' : '직접 입력한 값') + ' · 자막이 소리보다 빠르면 음수' : '자막이 소리보다 빠르면 음수, 늦으면 양수. 플랫폼 자막이 켜져 있으면 자동 감지';
   }
   function diagnostics() {
     const v = adapter.video();
     return [
       'SubTutor ' + (chrome.runtime.getManifest ? chrome.runtime.getManifest().version : ''),
-      'platform=' + adapter.name + ' videoId=' + state.videoId + ' url=' + location.href,
-      'video=' + (v ? 'yes rs=' + v.readyState + ' t=' + v.currentTime.toFixed(2) + ' dur=' + v.duration : 'no') + ' pageTime=' + (A.shared.pageTime.at ? Math.round(A.shared.pageTime.ms) : '-'),
+      'platform=' + adapter.name + ' videoId=' + state.videoId + ' enabled=' + isEnabled() + ' url=' + location.href,
+      'video=' + (v ? 'yes rs=' + v.readyState + ' t=' + v.currentTime.toFixed(2) + ' dur=' + v.duration + ' paused=' + v.paused : 'no') + ' videos=' + document.querySelectorAll('video').length + ' pageTime=' + (A.shared.pageTime.at ? Math.round(A.shared.pageTime.ms) : '-'),
       'cues=' + state.cues.length + ' ko=' + state.koCues.length + ' en=' + JSON.stringify(state.enTrack && { lang: state.enTrack.lang, label: state.enTrack.label, format: state.enTrack.format }) + ' ko=' + JSON.stringify(state.koTrack && { lang: state.koTrack.lang, label: state.koTrack.label }),
-      'tracks=' + JSON.stringify((trackCache.get(state.videoId) || []).map((t) => t.lang + (t.cc ? '[cc]' : '') + (t.forced ? '[f]' : ''))),
-      'offset=' + settings.offsetMs + ' auto=' + state.offsetAuto + ' samples=' + JSON.stringify(state.alignSamples),
+      'tracks=' + JSON.stringify((trackCache.get(state.videoId) || []).map((t) => t.lang + (t.cc ? '[cc]' : '') + (t.asr ? '[asr]' : '') + (t.forced ? '[f]' : ''))),
+      'offset=' + state.offsetMs + ' (' + state.offsetSource + ') samples=' + JSON.stringify(state.alignSamples),
       'meta=' + JSON.stringify(state.meta) + ' status=' + state.statusText,
-      'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + settings.shadowPauseSec + 's',
-      'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' paused=' + adapter.isPaused() + ' clip=' + JSON.stringify(state.clip),
+      'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + settings.shadowPauseSec + 's audio=' + settings.audioMode,
+      'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' clip=' + JSON.stringify(state.clip) + ' capturing=' + !!state.capturing + ' tabId=' + state.tabId,
     ].join('\n');
   }
 
@@ -770,7 +1016,6 @@
   // 영상 위 자막
   function displayIndex() {
     if (state.current >= 0) return state.current;
-    // 자동 일시정지/쉐도잉으로 멈춘 동안(멈춤 요청 직후 포함)에는 방금 끝난 자막을 계속 보여 준다
     if (state.pausedFor >= 0 && (adapter.isPaused() || now() - state.pausedAt < 1500)) return state.pausedFor;
     return -1;
   }
@@ -779,37 +1024,14 @@
     const i = displayIndex();
     if (!force && i === state.lastDisplayIdx) return;
     state.lastDisplayIdx = i;
-    if (!settings.overlay || i < 0 || !state.cues[i]) { ui.overlay.classList.add('st-hidden'); return; }
+    if (!settings.overlay || !isEnabled() || i < 0 || !state.cues[i] || (adapter.isAdPlaying && adapter.isAdPlaying())) { ui.overlay.classList.add('st-hidden'); return; }
     const c = state.cues[i];
     ui.ovText.textContent = c.text;
     ui.ovKo.textContent = settings.showTranslation ? koFor(c) : '';
     ui.ovStar.textContent = state.saved.has(itemIdFor(c)) ? '★' : '☆';
     ui.overlay.classList.remove('st-hidden');
   }
-  // 플랫폼 컨트롤 바가 보이면 자막을 그만큼 올린다
-  function startClearanceWatch() {
-    let frame = 0;
-    const measure = () => {
-      frame = 0;
-      const container = ui.overlay && ui.overlay.parentElement;
-      if (!container || !adapter.controlBars) return;
-      const bottom = container.getBoundingClientRect().bottom;
-      let top = Infinity;
-      for (const sel of adapter.controlBars) {
-        const bar = container.querySelector(sel) || document.querySelector(sel);
-        if (!bar) continue;
-        const r = bar.getBoundingClientRect();
-        if (r.height > 0 && r.top < bottom) top = Math.min(top, r.top);
-      }
-      const px = top === Infinity ? 0 : Math.max(0, Math.round(bottom - top));
-      ui.overlay.style.setProperty('--st-clearance', px + 'px');
-    };
-    const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
-    new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
-    window.addEventListener('resize', schedule);
-    setInterval(schedule, 1000);
-  }
-  // 플랫폼이 그리는 자막 텍스트와 우리 큐를 맞춰 시간 보정값을 자동으로 찾는다 (프라임/디즈니)
+  // 플랫폼이 그리는 자막 문장과 우리 큐를 대조해 자막 시간 보정값을 자동으로 찾는다 (프라임/디즈니/유튜브)
   function startNativeAlignWatch() {
     if (adapter.name === 'netflix' || !adapter.nativeCueSelector) return;
     const check = () => {
@@ -819,27 +1041,29 @@
       const text = Array.from(nodes).map((n) => n.textContent.trim()).filter(Boolean).join(' ');
       if (!text || text === state.lastNativeText) return;
       state.lastNativeText = text;
-      const raw = adapter.timeMs();
+      if (adapter.isPaused() || now() - state.lastSeekAt < 2500 || now() - state.pausedAt < 2500) return;
+      const raw = rawMs();
       if (!isFinite(raw)) return;
       const norm = S.normalizeForCompare(text);
       if (norm.split(' ').length < 3) return;
-      // 현재 시간 ±90초 안에서 같은 문장을 찾는다
       let best = null;
       for (const c of state.cues) {
-        if (c.start < raw - 90000 || c.start > raw + 90000) continue;
+        if (c.start < raw - 120000 || c.start > raw + 120000) continue;
         if (S.normalizeForCompare(c.text) === norm) { if (best) { best = null; break; } best = c; }
       }
       if (!best) return;
-      const sample = best.start - raw; // 우리 시간 = raw + offset 이 되게 하는 offset
-      state.alignSamples.push(Math.round(sample));
-      if (state.alignSamples.length > 7) state.alignSamples.shift();
+      state.alignSamples.push(Math.round(best.start - raw));
+      if (state.alignSamples.length > 9) state.alignSamples.shift();
       if (state.alignSamples.length >= 3) {
         const sorted = state.alignSamples.slice().sort((a, b) => a - b);
         const med = sorted[Math.floor(sorted.length / 2)];
-        const spread = sorted[sorted.length - 1] - sorted[0];
-        if (spread < 400 && Math.abs(med - state.offsetAuto) > 250) {
-          state.offsetAuto = Math.abs(med) < 250 ? 0 : med;
-          toast('자막 시간 자동 보정: ' + (state.offsetAuto >= 0 ? '+' : '') + state.offsetAuto + 'ms');
+        const agree = sorted.filter((x) => Math.abs(x - med) <= 400).length;
+        if (agree >= 3) {
+          const target = Math.abs(med) < 250 ? 0 : Math.round(med / 10) * 10;
+          if (Math.abs(target - state.offsetMs) > 300) {
+            saveOffset(target, 'auto');
+            toast('자막 시간 자동 보정: ' + (target >= 0 ? '+' : '') + (target / 1000).toFixed(1) + '초');
+          }
         }
       }
     };
@@ -849,7 +1073,35 @@
   // ───────────── 재생 제어 ─────────────
   function seekTo(ms) {
     state.seekByUsUntil = now() + 1500;
+    state.lastSeekAt = now();
+    state.lastSeekTarget = ms;
     adapter.seek(Math.max(0, ms));
+  }
+  function markResume() { state.resumeByUsUntil = now() + 1500; }
+  function requestPlay() { markResume(); state.playRequestedAt = now(); adapter.play(); }
+  // 정지 상태면 재생을 먼저 걸고 탐색한다 (프라임은 정지 중 탐색 뒤의 play 가 취소된다). 그 뒤 실제로 재생되는지 확인하고 재시도.
+  function playFrom(videoMs, keepPaused) {
+    const wasPaused = adapter.isPaused();
+    if (!keepPaused && wasPaused) requestPlay();
+    seekTo(videoMs);
+    if (!keepPaused) ensurePlaying(videoMs);
+  }
+  function ensurePlaying(targetMs) {
+    clearTimeout(state.ensureTimer);
+    let tries = 0;
+    const check = () => {
+      state.ensureTimer = null;
+      if (!state.active) return;
+      const raw = rawMs();
+      const farOff = isFinite(raw) && Math.abs(raw - targetMs) > 4000 && now() - state.lastSeekAt < 8000;
+      if (adapter.isPaused() || farOff) {
+        if (tries++ >= 4) return;
+        if (farOff) seekTo(targetMs);
+        requestPlay();
+        state.ensureTimer = setTimeout(check, 700 + tries * 400);
+      }
+    };
+    state.ensureTimer = setTimeout(check, 700);
   }
   function cancelModesPending() { clearShadow(); clearEndTimer(); state.pausedFor = -1; }
   function goToCue(i, opts) {
@@ -860,8 +1112,7 @@
     cancelModesPending();
     state.lastShown = i; state.prevIdx = -1;
     if (state.loop) state.loopIdx = i;
-    seekTo(c.start - settings.leadMs);
-    if (!opts || opts.play !== false) { markResume(); adapter.play(); }
+    playFrom(cueVideoMs(c) - settings.leadMs, !!(opts && opts.play === false));
     highlightRow(i, true);
   }
   function anchorIndex() {
@@ -906,11 +1157,12 @@
     toast(mode === 'autoPause' ? (on ? '⏸ 자동 일시정지 켬 (F: 다시 듣기)' : '자동 일시정지 끔') : (on ? '🗣 쉐도잉 켬 · ' + settings.shadowPauseSec + '초 쉬고 다음 자막' : '쉐도잉 끔'));
     updateModeUI();
   }
-  function markResume() { state.resumeByUsUntil = now() + 1500; }
   function pauseFor(i) {
     state.pausedFor = i;
     state.pausedAt = now();
     state.resumeByUsUntil = 0;
+    state.pauseByUsUntil = now() + 1500;
+    clearTimeout(state.ensureTimer);
     adapter.pause();
     renderOverlay(true);
     if (settings.shadowing) startShadowWait(i);
@@ -918,7 +1170,6 @@
   function startShadowWait(i) {
     clearShadow();
     const sec = clamp(+settings.shadowPauseSec || 2, 1, 7);
-    state.shadowCueIdx = i;
     ui.ovShadowText.textContent = '🗣 따라 말해 보세요 · ' + sec + '초 뒤 계속';
     ui.ovShadowBar.style.transition = 'none';
     ui.ovShadowBar.style.width = '100%';
@@ -927,10 +1178,7 @@
     state.shadowTimer = setTimeout(() => {
       state.shadowTimer = null;
       ui.ovShadow.classList.remove('on');
-      if (settings.shadowing && state.pausedFor === i && adapter.isPaused()) {
-        markResume();
-        adapter.play();
-      }
+      if (settings.shadowing && state.pausedFor === i && adapter.isPaused()) requestPlay();
     }, sec * 1000);
   }
   function clearShadow() {
@@ -944,19 +1192,17 @@
     if (!c) return;
     const v = adapter.video();
     const rate = (v && v.playbackRate) || 1;
-    const wait = Math.max(0, (c.end - t) / rate - 15);
-    state.endTimer = setTimeout(() => { state.endTimer = null; tick(true); }, wait);
+    const waitMs = Math.max(0, (c.end - t) / rate - 15);
+    state.endTimer = setTimeout(() => { state.endTimer = null; tick(true); }, waitMs);
   }
 
-  // 원격 재생 (웹사이트에서 "재생"을 눌렀을 때)
+  // 원격 재생 (웹사이트에서 "재생"을 눌렀을 때). startMs/endMs 는 영상 시간.
   function startClip(msg) {
     cancelModesPending();
     state.loop = false; state.loopIdx = -1; updateModeUI();
     state.clip = { clipId: msg.clipId, startMs: msg.startMs, endMs: msg.endMs, phase: 'seeking', startedAt: now(), playTries: 0, lastPlayAt: now() };
-    seekTo(msg.startMs - settings.leadMs);
-    markResume();
-    adapter.play();
-    highlightRow(S.findCueIndex(state.cues, msg.startMs + 10), true);
+    playFrom(msg.startMs - settings.leadMs);
+    highlightRow(S.findCueIndex(state.cues, msg.startMs + effectiveOffset() + 10), true);
   }
   function clipEvent(event, extra) {
     if (!state.clip) return;
@@ -966,35 +1212,29 @@
     if (!state.clip) return;
     const c = state.clip;
     state.clip = null;
+    clearTimeout(state.ensureTimer);
     bg({ type: 'player.event', clipId: c.clipId, event: reason === 'ended' ? 'ended' : 'stopped', reason }).catch(() => {});
   }
-  function handleClip(t, paused) {
+  function handleClip(raw, paused) {
     const c = state.clip;
     if (!c) return;
     const start = c.startMs - settings.leadMs;
     if (c.phase === 'seeking') {
-      if (!paused && t >= start - 600 && t < c.endMs) {
-        c.phase = 'playing';
-        clipEvent('playing');
-        return;
-      }
-      if (paused && now() - c.lastPlayAt > 1500 && c.playTries < 4) {
-        c.playTries++; c.lastPlayAt = now(); markResume(); adapter.play();
-      }
+      if (!paused && raw >= start - 600 && raw < c.endMs) { c.phase = 'playing'; clipEvent('playing'); return; }
       if (now() - c.startedAt > 25000) {
         state.clip = null;
         bg({ type: 'player.event', clipId: c.clipId, event: 'error', message: paused ? '플레이어가 재생을 시작하지 못했습니다. 플레이어 탭을 한 번 클릭한 뒤 다시 시도하세요.' : '탐색 시간 초과' }).catch(() => {});
       }
       return;
     }
-    if (t >= c.endMs + settings.tailMs || t < start - 3000) {
+    if (raw >= c.endMs + settings.tailMs || raw < start - 3000) {
+      state.pauseByUsUntil = now() + 1500;
       adapter.pause();
       state.clip = null;
       bg({ type: 'player.event', clipId: c.clipId, event: 'ended' }).catch(() => {});
       return;
     }
     if (paused && now() - c.lastPlayAt > 2500) {
-      // 사용자가 멈춤
       state.clip = null;
       bg({ type: 'player.event', clipId: c.clipId, event: 'stopped' }).catch(() => {});
     }
@@ -1003,40 +1243,45 @@
   // ───────────── 메인 루프 ─────────────
   function tick(fromTimer) {
     if (!state.active) return;
-    const t = nowMs();
-    if (!isFinite(t)) return;
+    state.tickCount++;
+    if (state.tickCount % 3 === 0) positionOverlay(false);
+    const raw = rawMs();
+    if (!isFinite(raw)) return;
     const paused = adapter.isPaused();
+    const t = raw + effectiveOffset();
     const cues = state.cues;
     const idx = cues.length ? S.findCueIndex(cues, t) : -1;
     const prevIdx = state.prevIdx;
+    const capturing = state.capturing;
 
+    if (capturing) {
+      if (!paused && now() - state.lastSeekAt > 150) capturing.anchors.push([wall(), raw]);
+      if (raw >= capturing.endV + 300 || raw < capturing.startV - 8000) finishCapturing('done');
+    }
     if (idx !== state.current) {
       state.current = idx;
       if (idx >= 0) {
         state.lastShown = idx;
         highlightRow(idx, false);
         ensureTranslations(idx);
-        if (!state.clip && !paused && (settings.autoPause || settings.shadowing) && !state.loop) scheduleEndCheck(idx, t);
+        if (!state.clip && !capturing && !paused && (settings.autoPause || settings.shadowing) && !state.loop) scheduleEndCheck(idx, t);
       }
     }
     if (idx < 0 && !paused && Math.abs(t - state.lastT) > 1500) state.lastShown = S.lastStartedIndex(cues, t);
 
     if (state.clip) {
-      handleClip(t, paused);
-    } else if (!paused) {
+      handleClip(raw, paused);
+    } else if (!paused && isEnabled() && !capturing) {
       if (state.loop && state.loopIdx >= 0 && cues[state.loopIdx]) {
         const c = cues[state.loopIdx];
         if ((t >= c.end + settings.tailMs - 20 || t < c.start - settings.leadMs - 2500) && now() - state.lastLoopSeekAt > 500) {
           state.lastLoopSeekAt = now();
-          seekTo(c.start - settings.leadMs);
+          seekTo(cueVideoMs(c) - settings.leadMs);
         }
       } else if ((settings.autoPause || settings.shadowing) && prevIdx >= 0 && prevIdx !== idx && cues[prevIdx]) {
         const ended = cues[prevIdx];
-        if (t >= ended.end - 80 && t < ended.end + 1500 && state.pausedFor !== prevIdx) {
-          pauseFor(prevIdx);
-        }
+        if (t >= ended.end - 80 && t < ended.end + 1500 && state.pausedFor !== prevIdx) pauseFor(prevIdx);
       } else if ((settings.autoPause || settings.shadowing) && fromTimer && idx >= 0 && cues[idx] && t >= cues[idx].end - 80 && state.pausedFor !== idx) {
-        // 타이머가 큐 끝 직전에 깨웠는데 아직 같은 큐 안이면 조금 뒤 다시 확인
         scheduleEndCheck(idx, t);
       }
     }
@@ -1050,7 +1295,8 @@
   // ───────────── 단축키 ─────────────
   const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: () => { const i = anchorIndex(); if (i >= 0) toggleSave(i); }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen) };
   function shouldHandleKey(e) {
-    if (!state.active || !state.cues.length && e.code !== 'Backquote') return false;
+    if (!state.active || !isEnabled()) return false;
+    if (!state.cues.length && e.code !== 'Backquote') return false;
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
     if (isEditable(e.target) || (e.target && e.target.closest && e.target.closest('#st-panel input, #st-panel select, #st-panel textarea'))) return false;
     return !!KEY_ACTIONS[e.code];
@@ -1061,7 +1307,7 @@
     if (e.repeat) return;
     KEY_ACTIONS[e.code]();
   }, true);
-  window.addEventListener('keyup', (e) => { if (shouldHandleKey(e)) { e.stopImmediatePropagation(); } }, true);
+  window.addEventListener('keyup', (e) => { if (shouldHandleKey(e)) e.stopImmediatePropagation(); }, true);
   window.addEventListener('keypress', (e) => { if (shouldHandleKey(e)) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
 
   // ───────────── 시작 ─────────────

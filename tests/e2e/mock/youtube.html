@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Mock Lecture - YouTube</title>
+<style>
+  body { margin: 0; background: #0f0f0f; color: #fff; font-family: sans-serif; }
+  ytd-app { display: block; }
+  #masthead-container { position: fixed; top: 0; left: 0; width: 100%; height: 56px; background: #202020; z-index: 5; }
+  #page-manager { padding-top: 56px; display: flex; gap: 24px; padding-left: 24px; }
+  #primary { width: 900px; }
+  #secondary { width: 400px; }
+  #movie_player { position: relative; width: 900px; height: 506px; background: #000; }
+  #movie_player video { width: 100%; height: 100%; }
+  .ytp-chrome-bottom { position: absolute; left: 12px; right: 12px; bottom: 0; height: 48px; background: rgba(255,255,255,.1); }
+  .ytp-right-controls { position: absolute; right: 0; bottom: 0; height: 48px; display: flex; }
+  .ytp-button { width: 48px; height: 48px; background: none; border: 0; color: #fff; }
+  .ytp-caption-window-container { position: absolute; bottom: 60px; width: 100%; text-align: center; }
+  .caption-window { display: inline-block; background: rgba(8,8,8,.75); padding: 2px 8px; }
+  .ytp-caption-segment { font-size: 20px; }
+  h1.ytd-watch-metadata { font-size: 18px; }
+</style>
+</head>
+<body>
+<ytd-app>
+  <div id="masthead-container">YouTube (mock)</div>
+  <div id="page-manager">
+    <div id="primary">
+      <div id="movie_player" class="html5-video-player">
+        <video class="html5-main-video" playsinline></video>
+        <div class="ytp-caption-window-container"><span class="caption-window"><span class="ytp-caption-segment">native cue</span></span></div>
+        <div class="ytp-chrome-bottom"><div class="ytp-right-controls"><button class="ytp-button ytp-subtitles-button" aria-label="Subtitles">CC</button><button class="ytp-button ytp-settings-button" aria-label="Settings">⚙</button><button class="ytp-button ytp-fullscreen-button">⛶</button></div></div>
+      </div>
+      <h1 class="ytd-watch-metadata"><yt-formatted-string>Mock Lecture Title</yt-formatted-string></h1>
+      <div id="owner"><ytd-channel-name><a href="#">Mock Channel</a></ytd-channel-name></div>
+    </div>
+    <div id="secondary">secondary column</div>
+  </div>
+</ytd-app>
+<script>
+  const video = document.querySelector('video');
+  window.__pauses = [];
+  video.addEventListener('pause', () => { window.__pauses.push(Math.round(video.currentTime * 1000)); });
+  window.ytInitialPlayerResponse = {
+    videoDetails: { videoId: 'mock1234567', title: 'Mock Lecture Title', author: 'Mock Channel' },
+    captions: { playerCaptionsTracklistRenderer: {
+      captionTracks: [
+        { baseUrl: location.origin + '/api/timedtext?v=mock1234567&lang=en&kind=asr', languageCode: 'en', kind: 'asr', name: { simpleText: 'English (auto-generated)' }, vssId: 'a.en' },
+        { baseUrl: location.origin + '/api/timedtext?v=mock1234567&lang=en', languageCode: 'en', name: { simpleText: 'English' }, vssId: '.en' },
+      ],
+      translationLanguages: [{ languageCode: 'ko', languageName: { simpleText: 'Korean' } }],
+    } },
+  };
+  document.getElementById('movie_player').getPlayerResponse = () => window.ytInitialPlayerResponse;
+  video.src = '/media/test.webm';
+  video.addEventListener('canplay', () => { if (!window.__started) { window.__started = true; video.play().catch(() => {}); } }, { once: true });
+</script>
+</body>
+</html>

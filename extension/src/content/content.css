@@ -68,22 +68,37 @@
 /* 영상이 패널만큼 줄어들도록 (플랫폼별 규칙은 어댑터가 추가) */
 html.st-panel-open { --st-panel-w: 400px; }
 
-/* ───────── 영상 위 자막 ───────── */
-#st-overlay { position: absolute; left: 0; right: 0; bottom: calc(9% + var(--st-clearance)); display: flex; flex-direction: column; align-items: center; pointer-events: none; z-index: 2147482000; transition: bottom .15s ease; font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Segoe UI", Roboto, sans-serif; }
+/* ───────── 영상 위 자막 (화면 고정, <video> 사각형을 따라감) ───────── */
+#st-overlay { position: fixed; left: 0; top: 0; width: 0; height: 0; box-sizing: border-box; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; padding-bottom: calc(var(--st-unit, 10px) * 5 + var(--st-clearance, 0px)); pointer-events: none; z-index: 2147482000; transition: padding-bottom .15s ease; font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Segoe UI", Roboto, sans-serif; --st-unit: 10px; }
 #st-overlay.st-hidden .st-ov-box { display: none; }
 .st-ov-box { max-width: 88%; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.st-ov-en { display: inline-flex; align-items: center; gap: 10px; background: rgba(0,0,0,.66); color: #fff; font-size: calc(clamp(20px, 2.5vw, 42px) * var(--st-font-scale)); font-weight: 600; padding: .14em .5em; border-radius: 8px; white-space: pre-line; text-shadow: 0 1px 2px rgba(0,0,0,.9); line-height: 1.3; }
-.st-ov-ko { display: inline-block; background: rgba(0,0,0,.56); color: #fde68a; font-size: calc(clamp(15px, 1.65vw, 28px) * var(--st-font-scale)); padding: .12em .55em; border-radius: 8px; line-height: 1.35; }
+.st-ov-en { display: inline-flex; align-items: center; gap: .4em; background: rgba(0,0,0,.66); color: #fff; font-size: clamp(14px, calc(var(--st-unit) * 2.5 * var(--st-font-scale, 1)), 52px); font-weight: 600; padding: .14em .5em; border-radius: 8px; white-space: pre-line; text-shadow: 0 1px 2px rgba(0,0,0,.9); line-height: 1.3; }
+.st-ov-ko { display: inline-block; background: rgba(0,0,0,.56); color: #fde68a; font-size: clamp(12px, calc(var(--st-unit) * 1.65 * var(--st-font-scale, 1)), 34px); padding: .12em .55em; border-radius: 8px; line-height: 1.35; }
 .st-ov-ko:empty { display: none; }
 .st-ov-star { pointer-events: auto; background: none; border: none; color: #fbbf24; cursor: pointer; font-size: .85em; line-height: 1; padding: 0; opacity: .75; }
 .st-ov-star:hover { opacity: 1; transform: scale(1.15); }
-.st-ov-modes { position: absolute; right: 16px; bottom: -4px; display: flex; gap: 6px; }
+.st-ov-modes { position: absolute; right: 16px; bottom: calc(var(--st-clearance, 0px) + 12px); display: flex; gap: 6px; }
 .st-ov-chip { background: rgba(0,0,0,.6); color: #ddd; border-radius: 12px; padding: 2px 9px; font-size: 12px; }
 .st-ov-chip.on-loop { color: #fbbf24; } .st-ov-chip.on-ap { color: #c4b5fd; } .st-ov-chip.on-shadow { color: #6ee7b7; }
-.st-ov-shadow { display: none; margin-top: 4px; width: min(380px, 60vw); background: rgba(0,0,0,.62); border-radius: 10px; padding: 8px 14px 10px; color: #fff; font-size: 15px; text-align: center; }
+.st-ov-shadow { display: none; margin-top: 4px; width: min(380px, 60%); background: rgba(0,0,0,.62); border-radius: 10px; padding: 8px 14px 10px; color: #fff; font-size: 15px; text-align: center; }
 .st-ov-shadow.on { display: block; }
 .st-ov-shadow-text { margin-bottom: 6px; }
 .st-ov-shadow-track { height: 5px; background: rgba(255,255,255,.2); border-radius: 3px; overflow: hidden; }
 .st-ov-shadow-bar { height: 100%; width: 100%; background: #6ee7b7; border-radius: 3px; }
-.st-toast { position: absolute; left: 50%; top: 12%; transform: translateX(-50%); background: rgba(20,20,20,.85); color: #fff; padding: 8px 16px; border-radius: 20px; font-size: 15px; z-index: 2147482500; pointer-events: none; opacity: 0; transition: opacity .15s; font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+.st-toast { position: fixed; left: 50%; top: 12%; transform: translateX(-50%); background: rgba(20,20,20,.88); color: #fff; padding: 8px 16px; border-radius: 20px; font-size: 15px; z-index: 2147482500; pointer-events: none; opacity: 0; transition: opacity .15s; font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; max-width: 70vw; text-align: center; }
 .st-toast.show { opacity: 1; }
+
+/* 상태줄의 보정 표시, 보정 컨트롤 */
+.st-offset { color: #6ee7b7; }
+.st-offset-ctl { display: inline-flex; align-items: center; gap: 4px; }
+.st-offset-ctl input[type=number] { width: 78px; }
+.st-btn.st-mini { padding: 3px 7px; font-size: 11px; }
+
+/* 플레이어 컨트롤 바의 켜기/끄기 버튼 */
+.st-ctl { all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: top; }
+.st-ctl-badge { font: 700 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; letter-spacing: .5px; color: #fff; background: #7c3aed; border-radius: 6px; padding: 5px 6px; box-shadow: 0 1px 3px rgba(0,0,0,.5); }
+.st-ctl:hover .st-ctl-badge { filter: brightness(1.15); }
+.st-ctl.off .st-ctl-badge { background: #555; color: #ccc; text-decoration: line-through; }
+.st-ctl-netflix { width: 2.6em; height: 100%; margin: 0 .2em; }
+.st-ctl-youtube { width: 48px; height: 100%; }
+.st-ctl-prime, .st-ctl-disney { width: 2.6em; height: 100%; margin: 0 .2em; }

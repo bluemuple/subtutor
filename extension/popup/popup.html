@@ -15,11 +15,14 @@
   </header>
 
   <section>
+    <label class="row" id="enabledRow"><span><b>이 사이트에서 SubTutor 사용</b></span><input type="checkbox" id="enabled" class="switch"></label>
     <label class="row"><span>자막 패널 열기</span><input type="checkbox" id="panelOpen" class="switch"></label>
     <label class="row"><span>한국어 번역 표시</span><input type="checkbox" id="showTranslation" class="switch"></label>
     <label class="row"><span>플랫폼 기본 자막 숨기기</span><input type="checkbox" id="hideNative" class="switch"></label>
     <label class="row"><span>자동 일시정지 <kbd>P</kbd></span><input type="checkbox" id="autoPause" class="switch"></label>
     <label class="row"><span>쉐도잉 <kbd>W</kbd> · 쉬는 시간 <select id="shadowPauseSec"></select></span><input type="checkbox" id="shadowing" class="switch"></label>
+    <label class="row"><span>별표 저장 시 오디오</span><select id="audioMode"><option value="off">저장 안 함</option><option value="store">웹 퀴즈용 보관</option><option value="download">PC에 WAV 다운로드</option><option value="both">둘 다</option></select></label>
+    <div class="hint" id="audioHint">넷플릭스·프라임에서 오디오 저장은 이 팝업을 연 탭에서 바로 허용됩니다(탭 오디오 캡처). 대사를 한 번 다시 재생하며 녹음합니다.</div>
   </section>
 
   <section class="buttons">

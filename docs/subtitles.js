@@ -168,10 +168,38 @@
     return { cues: finalizeCues(cues), lang };
   }
 
+  /** 유튜브 timedtext fmt=json3. asr=true면 자동 자막의 겹치는 끝 시간을 다음 큐 시작으로 자른다 */
+  function parseJson3(text, opts) {
+    let data;
+    try { data = typeof text === 'string' ? JSON.parse(text) : text; } catch (e) { return { cues: [] }; }
+    const events = data && Array.isArray(data.events) ? data.events : [];
+    const raw = [];
+    for (const ev of events) {
+      if (!ev || !Array.isArray(ev.segs) || ev.aAppend) continue;
+      const joined = ev.segs.map((sg) => (sg && sg.utf8) || '').join('').replace(/\u200b/g, '');
+      const cleaned = cleanCueText(joined);
+      if (!cleaned) continue;
+      const start = Math.round(+ev.tStartMs || 0);
+      const dur = Math.round(+ev.dDurationMs || 0);
+      raw.push({ start, end: start + (dur > 0 ? dur : 2000), text: cleaned });
+    }
+    raw.sort((a, b) => a.start - b.start);
+    if (opts && opts.asr) {
+      for (let i = 0; i < raw.length - 1; i++) {
+        if (raw[i].end > raw[i + 1].start) raw[i].end = Math.max(raw[i].start + 300, raw[i + 1].start);
+      }
+    }
+    return { cues: finalizeCues(raw) };
+  }
+
   /** 포맷을 추측해서 파싱. 반환: {cues, tsOffsetMs, hasTimestampMap, lang, format} */
   function parseAny(text, hint) {
     const s = String(text || '').replace(/^﻿/, '').trimStart();
     const h = (hint || '').toLowerCase();
+    if (h === 'json3' || h === 'json3-asr' || (s.startsWith('{') && /"events"\s*:/.test(s.slice(0, 2000)))) {
+      const r = parseJson3(s, { asr: h === 'json3-asr' });
+      return { cues: r.cues, tsOffsetMs: 0, hasTimestampMap: false, lang: null, format: 'json3' };
+    }
     if (/^<\?xml|^<tt\b|^<ttml/i.test(s) || h === 'ttml' || h === 'ttml2' || h === 'dfxp' || h === 'xml' || (s.startsWith('<') && /<p\b/i.test(s))) {
       const r = parseTTML(s);
       return { cues: r.cues, tsOffsetMs: 0, hasTimestampMap: false, lang: r.lang, format: 'ttml' };
@@ -319,7 +347,7 @@
   }
 
   return {
-    decodeEntities, cleanCueText, parseVttTime, parseTtmlTime, parseVTT, parseTTML, parseAny, parseSegments,
+    decodeEntities, cleanCueText, parseVttTime, parseTtmlTime, parseVTT, parseTTML, parseJson3, parseAny, parseSegments,
     finalizeCues, findCueIndex, lastStartedIndex, nextStartingIndex, mergeTranslations,
     normalizeForCompare, diffWords, formatTime, parseM3U8,
   };
