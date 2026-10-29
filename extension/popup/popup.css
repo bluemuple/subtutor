@@ -18,3 +18,8 @@ button.primary { background: #7c3aed; border-color: #7c3aed; color: #fff; }
 .keys { font-size: 12px; color: #bbb; }
 .keys div { margin: 3px 0; }
 .hint { color: #777; font-size: 11px; margin-top: 6px; }
+.hidden { display: none !important; }
+.row.folder { cursor: default; }
+.row.folder b { font-weight: 600; color: #ddd; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
+button.small { flex: none; padding: 3px 9px; font-size: 12px; border-radius: 6px; }
+.hint.warn { color: #fde68a; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }

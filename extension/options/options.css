@@ -1,0 +1,28 @@
+body { margin: 0; font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; background: #141418; color: #e6e6ec; }
+header { display: flex; align-items: center; gap: 12px; padding: 18px 28px; border-bottom: 1px solid #26262e; }
+h1 { margin: 0; font-size: 20px; color: #c4b5fd; }
+.sub { color: #777; font-size: 12px; }
+main { max-width: 760px; margin: 0 auto; padding: 20px 24px 60px; }
+section { background: #1b1b21; border: 1px solid #2a2a33; border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+h2 { margin: 0 0 8px; font-size: 16px; }
+.desc { color: #a0a0ae; margin: 6px 0 12px; }
+code { background: #0f0f12; padding: 1px 6px; border-radius: 4px; font-size: 13px; color: #ddd; }
+.status-box { background: #121216; border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; }
+.status-box > div { padding: 3px 0; }
+.k { display: inline-block; min-width: 110px; color: #8a8a98; }
+.path { color: #6b6b78; font-size: 13px; }
+#permState.ok { color: #34d399; } #permState.warn { color: #fbbf24; } #permState.bad { color: #f87171; }
+.buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+button { font: inherit; background: #2b2b33; color: #eee; border: 1px solid #444; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+button:hover { background: #363640; }
+button.primary { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+button.pulse { animation: pulse 1s infinite; border-color: #fbbf24; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 5px rgba(251,191,36,.25); } }
+.hidden { display: none !important; }
+.msg { min-height: 20px; margin-top: 10px; font-size: 13.5px; color: #a0a0ae; }
+.msg.ok { color: #a7f3d0; } .msg.warn { color: #fde68a; } .msg.bad { color: #fecaca; }
+details { margin-top: 12px; color: #a0a0ae; font-size: 13.5px; }
+summary { cursor: pointer; color: #c4b5fd; }
+details ul { padding-left: 20px; } details li { margin: 6px 0; }
+label.inline { display: flex; gap: 10px; align-items: center; }
+select { font: inherit; background: #111; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 4px 8px; }

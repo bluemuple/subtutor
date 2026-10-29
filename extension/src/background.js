@@ -2,10 +2,13 @@
  * SubTutor – 백그라운드 서비스 워커
  * 저장한 자막(items) 관리, 기계 번역(캐시), 플레이어 탭 찾기/열기, 웹사이트 ↔ 플레이어 원격 재생 중계.
  */
+import './lib/fs.js';
+const FS = globalThis.SubTutorFS;
 const SITE_URL = 'https://bluemuple.github.io/subtutor/';
 const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
   fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {},
+  audioDirName: '', // 사용자가 고른 오디오 저장 폴더 이름 (핸들은 IndexedDB). 비어 있으면 다운로드 폴더
 };
 const PLATFORM_URL_PATTERNS = {
   netflix: ['https://www.netflix.com/watch/*'],
@@ -189,7 +192,7 @@ function notifyWeb(tabId, payload) {
   if (!tabId) return;
   chrome.tabs.sendMessage(tabId, { type: 'web.event', event: 'clip.state', payload }).catch(() => {});
 }
-async function playClip(item, websiteTabId) {
+async function playClip(item, websiteTabId, loop) {
   const prev = await currentClip();
   if (prev && prev.tabId) { try { await chrome.tabs.sendMessage(prev.tabId, { type: 'stopClip' }); } catch (e) { /* ignore */ } }
   const clipId = 'clip-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
@@ -215,7 +218,7 @@ async function playClip(item, websiteTabId) {
       await setActiveClip(null);
       return { clipId, error: 'not-ready' };
     }
-    await chrome.tabs.sendMessage(tabId, { type: 'playRange', clipId, startMs: item.startMs, endMs: item.endMs });
+    await chrome.tabs.sendMessage(tabId, { type: 'playRange', clipId, startMs: item.startMs, endMs: item.endMs, loop: !!loop });
     return { clipId };
   } catch (e) {
     notifyWeb(websiteTabId, { itemId: item.id, clipId, state: 'error', message: String((e && e.message) || e) });
@@ -248,14 +251,41 @@ async function saveAudio(msg) {
   }
   if ((mode === 'download' || mode === 'both') && msg.download) {
     const fileName = String(msg.fileName || 'SubTutor/clip.mp3').replace(/^\/+/, '');
+    // 1) 사용자가 고른 폴더가 있고 권한이 살아 있으면 그 폴더 안에 바로 쓴다
+    const folder = await saveToFolder(fileName, msg.download);
+    if (folder.ok) { out.fileName = folder.path; out.location = 'folder'; return out; }
+    if (folder.reason && folder.reason !== 'none') { out.folderIssue = folder.reason === 'error' ? 'error' : 'prompt'; out.folderError = folder.error || ''; out.folderName = folder.name || ''; }
+    // 2) 아니면 크롬 다운로드 폴더(Downloads/SubTutor/…)
     try {
       out.downloadId = await chrome.downloads.download({ url: 'data:' + (msg.downloadMime || 'audio/wav') + ';base64,' + msg.download, filename: fileName, conflictAction: 'uniquify', saveAs: false });
-      out.fileName = fileName;
+      out.fileName = fileName; out.location = 'downloads';
     } catch (e) {
       throw new Error('파일 다운로드 실패: ' + ((e && e.message) || e));
     }
   }
   return out;
+}
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+async function saveToFolder(relPath, b64) {
+  if (!FS) return { ok: false, reason: 'none' };
+  try {
+    const st = await FS.status();
+    if (st.state === 'none') return { ok: false, reason: 'none' };
+    if (st.state !== 'granted') return { ok: false, reason: st.state, name: st.name };
+    return await FS.writeFile(relPath, base64ToBytes(b64));
+  } catch (e) {
+    return { ok: false, reason: 'error', error: String((e && e.message) || e) };
+  }
+}
+async function audioDirStatus() {
+  if (!FS) return { state: 'none' };
+  const st = await FS.status();
+  return { state: st.state, name: st.name || '' };
 }
 async function getAudio(id) {
   const r = await chrome.storage.local.get(audioKey(id));
@@ -324,6 +354,18 @@ async function handleMessage(msg, sender) {
       return { settings: s };
     }
     case 'openSite': await openSite(); return { ok: true };
+    case 'openOptions': await chrome.runtime.openOptionsPage(); return { ok: true };
+    case 'audioDir.status': return audioDirStatus();
+    // 설정 페이지를 닫았다가 다시 연다: 크롬은 확장 프로그램 탭이 모두 닫히면 폴더 권한을 '휴면' 상태로 돌리고,
+    // 그 상태에서 권한을 다시 요청해야 "매번 허용" 선택지가 있는 창을 띄운다.
+    case 'options.reopenForGrant': {
+      const url = chrome.runtime.getURL('options/options.html') + '#grant';
+      const tabs = await chrome.tabs.query({ url: chrome.runtime.getURL('options/options.html') + '*' });
+      for (const t of tabs) { try { await chrome.tabs.remove(t.id); } catch (e) { /* ignore */ } }
+      await new Promise((r) => setTimeout(r, 900));
+      await chrome.tabs.create({ url, active: true });
+      return { ok: true };
+    }
     case 'togglePanel': {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab) { try { await chrome.tabs.sendMessage(tab.id, { type: 'togglePanel' }); } catch (e) { return { ok: false, error: '이 탭에서는 SubTutor가 실행 중이 아닙니다' }; } }
@@ -364,7 +406,12 @@ async function handleMessage(msg, sender) {
     case 'web.clip.play': {
       const item = (await getItems()).find((i) => i.id === p.itemId);
       if (!item) throw new Error('항목을 찾을 수 없습니다');
-      return playClip(item, tabId);
+      return playClip(item, tabId, !!p.loop);
+    }
+    case 'web.clip.loop': {
+      const clip = await currentClip();
+      if (clip && clip.tabId) { try { await chrome.tabs.sendMessage(clip.tabId, { type: 'clipLoop', loop: !!p.loop }); } catch (e) { /* ignore */ } }
+      return { ok: true };
     }
     case 'web.clip.stop': {
       const clip = await currentClip();

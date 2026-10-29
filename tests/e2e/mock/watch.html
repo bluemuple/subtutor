@@ -64,6 +64,10 @@
   video.src = '/media/test.webm';
   video.addEventListener('canplay', () => { if (!window.__started) { window.__started = true; video.play().catch(() => {}); } }, { once: true });
   video.addEventListener('pause', () => { window.__pauses.push(Math.round(video.currentTime * 1000)); });
+  // 진단: 누가 pause 를 불렀는지
+  window.__pauseCalls = [];
+  const origPause = video.pause.bind(video);
+  video.pause = function () { window.__pauseCalls.push(Math.round(video.currentTime * 1000) + ':' + new Error().stack.split('\n').slice(2, 5).map((l) => l.trim().replace(/^at /, '')).join(' < ')); return origPause(); };
 </script>
 </body>
 </html>

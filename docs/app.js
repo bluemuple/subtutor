@@ -11,7 +11,9 @@
   const state = {
     items: [], extOk: false, view: 'list',
     filterTitle: '', search: '', sort: 'recent',
-    clip: { itemId: null, state: null, message: '' },
+    clip: { itemId: null, state: null, message: '', loop: false }, clipLocal: false,
+    repeat: false,                        // 🔁 반복: ▶ 로 재생한 대사를 계속 반복
+    hide: loadHide(), reveal: new Map(),  // 자막/뜻 감추기: 전체 기본값 + 항목별 예외
     recordings: new Map(), recording: null, playingRec: null,
     quiz: null, quizPrefs: { title: '', order: 'oldest', autoplay: true },
   };
@@ -83,8 +85,9 @@
   }
 
   // ───────── 플레이어 원격 재생 ─────────
-  function setClip(itemId, st, message) {
-    state.clip = { itemId, state: st, message: message || '' };
+  function setClip(itemId, st, message, loop) {
+    const keepLoop = loop === undefined ? (state.clip.itemId === itemId && !!state.clip.loop) : !!loop;
+    state.clip = { itemId, state: st, message: message || '', loop: keepLoop };
     renderClipStates();
     if (st === 'ended' || st === 'error' || st === 'stopped') {
       clipWaiters.splice(0).forEach((w) => w.resolve({ itemId, state: st }));
@@ -107,7 +110,7 @@
       }
       const se = node.querySelector('.state');
       if (se) {
-        se.textContent = mine ? (st === 'error' ? '재생 실패: ' + (state.clip.message || '') : (STATE_TEXT[st] || '')) : '';
+        se.textContent = mine ? (st === 'error' ? '재생 실패: ' + (state.clip.message || '') : (st === 'playing' && state.clip.loop ? '반복 재생 중 · ◼ 로 정지' : (STATE_TEXT[st] || ''))) : '';
         se.classList.toggle('err', mine && st === 'error');
       }
     });
@@ -131,25 +134,32 @@
     return null;
   }
   let localAudio = null;
-  function stopLocalAudio() { if (localAudio) { try { localAudio.pause(); } catch (e) { /* ignore */ } localAudio = null; } }
-  async function playItem(itemId) {
+  function stopLocalAudio() { if (localAudio) { const a = localAudio; localAudio = null; try { a.pause(); } catch (e) { /* ignore */ } } }
+  // ▶/◼: 같은 대사를 다시 누르면 정지, 다른 대사를 누르면 이전 것을 멈추고 재생. opts.loop 가 없으면 🔁 반복 토글을 따른다.
+  async function playItem(itemId, opts) {
+    opts = opts || {};
     if (!state.extOk) { toast('확장 프로그램이 필요합니다'); return; }
     R.stop();
-    if (state.clip.itemId === itemId && state.clip.state === 'playing') {
+    const cur = state.clip;
+    const busy = cur.state === 'playing' || cur.state === 'opening';
+    if (busy) {
+      // 정지 상태를 먼저 기록해 두어야, 멈추면서 끝나는 이전 재생이 '끝남'으로 덮어쓰지 않는다
+      setClip(cur.itemId, 'stopped');
       stopLocalAudio();
-      await B.request('clip.stop').catch(() => {});
-      setClip(itemId, 'stopped');
-      return;
-    }
-    stopLocalAudio();
+      if (!state.clipLocal) await B.request('clip.stop').catch(() => {});
+      if (cur.itemId === itemId) return;
+    } else stopLocalAudio();
+    const loop = opts.loop === undefined ? state.repeat : !!opts.loop;
     const it = state.items.find((i) => i.id === itemId);
     if (it && it.audio) {
       const blob = await localAudioBlob(itemId);
       if (blob) {
-        setClip(itemId, 'playing');
+        state.clipLocal = true;
+        setClip(itemId, 'playing', '', loop);
         await new Promise((resolve) => {
           const url = URL.createObjectURL(blob);
           const a = new Audio(url);
+          a.loop = loop;
           localAudio = a;
           const done = () => { URL.revokeObjectURL(url); if (localAudio === a) localAudio = null; resolve(); };
           a.onended = done; a.onerror = done;
@@ -160,20 +170,31 @@
         return;
       }
     }
-    setClip(itemId, 'opening');
+    state.clipLocal = false;
+    setClip(itemId, 'opening', '', loop);
     try {
-      const r = await B.request('clip.play', { itemId }, 90000);
+      const r = await B.request('clip.play', { itemId, loop }, 90000);
       if (r && r.error && state.clip.itemId === itemId && state.clip.state === 'opening') setClip(itemId, 'error', r.error === 'not-ready' ? '플레이어가 준비되지 않았습니다' : String(r.error));
     } catch (e) {
       setClip(itemId, 'error', e.message);
     }
   }
+  function setRepeat(on) {
+    state.repeat = !!on;
+    document.querySelectorAll('.repeat-toggle').forEach((b) => { b.classList.toggle('on', state.repeat); b.title = REPEAT_TITLE[state.repeat ? 1 : 0]; });
+    const active = state.clip.state === 'playing' || state.clip.state === 'opening';
+    if (localAudio) localAudio.loop = state.repeat;
+    if (active && !state.clipLocal) B.request('clip.loop', { loop: state.repeat }).catch(() => {});
+    if (active) { state.clip.loop = state.repeat; renderClipStates(); }
+  }
+  const REPEAT_TITLE = ['반복: 켜면 ▶ 로 재생한 대사를 계속 반복합니다', '반복 켜짐: ▶ 를 누른 대사를 계속 반복합니다. 다른 대사를 누르면 그 대사로 바뀌고, ◼ 로 멈춥니다'];
+  const repeatButton = () => el('button', { class: 'btn repeat-toggle' + (state.repeat ? ' on' : ''), title: REPEAT_TITLE[state.repeat ? 1 : 0], onclick: () => setRepeat(!state.repeat) }, '🔁 반복');
   function waitClipEnd() { return new Promise((resolve) => clipWaiters.push({ resolve })); }
   async function playTogether(itemId) {
     const recs = await getRecs(itemId);
     if (!recs.length) { toast('먼저 녹음을 해 주세요'); return; }
     const p = waitClipEnd();
-    await playItem(itemId);
+    await playItem(itemId, { loop: false });
     const r = await p;
     if (r.itemId === itemId && r.state === 'ended') await playRecording(itemId, recs[recs.length - 1]);
   }
@@ -253,6 +274,49 @@
     document.querySelectorAll('[data-rec-item="' + state.recording.itemId + '"] .rec-btn.recording').forEach((b) => { b.textContent = '■ 정지 ' + Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0'); });
   }
 
+  // ───────── 자막/뜻 감추기 ─────────
+  // 기본은 모두 감춤. 전체 토글은 이 탭(세션)에서 기억하고, 항목별로 연 것은 전체 토글을 누르면 초기화된다.
+  const FIELD_LABEL = { text: '자막', ko: '뜻' };
+  function loadHide() {
+    try { const v = JSON.parse(sessionStorage.getItem('subtutor.hide') || 'null'); if (v && typeof v === 'object') return { text: v.text !== false, ko: v.ko !== false }; } catch (e) { /* ignore */ }
+    return { text: true, ko: true };
+  }
+  function saveHide() { try { sessionStorage.setItem('subtutor.hide', JSON.stringify(state.hide)); } catch (e) { /* ignore */ } }
+  function isVeiled(id, field) {
+    const o = state.reveal.get(id);
+    if (o && o[field] !== undefined) return !o[field];
+    return !!state.hide[field];
+  }
+  function setGlobalHide(field, hidden) {
+    state.hide[field] = !!hidden;
+    state.reveal.forEach((o) => { delete o[field]; });
+    saveHide();
+    syncVeils();
+  }
+  function setItemVeil(id, field, hidden) {
+    const o = state.reveal.get(id) || {};
+    o[field] = !hidden;
+    state.reveal.set(id, o);
+    syncVeils();
+  }
+  function syncVeils() {
+    document.querySelectorAll('.item[data-id]').forEach((node) => {
+      const id = node.dataset.id;
+      for (const f of ['text', 'ko']) {
+        const v = isVeiled(id, f);
+        node.classList.toggle('veil-' + f, v);
+        const b = node.querySelector('.vis-' + f);
+        if (b) b.textContent = FIELD_LABEL[f] + (v ? ' 보기' : ' 감추기');
+      }
+    });
+    document.querySelectorAll('.hide-toggle').forEach((b) => {
+      const f = b.dataset.field;
+      b.textContent = FIELD_LABEL[f] + (state.hide[f] ? ' 모두 보이기' : ' 모두 감추기');
+      b.classList.toggle('on', !state.hide[f]);
+      b.title = state.hide[f] ? '모든 대사의 ' + FIELD_LABEL[f] + '을(를) 보입니다' : '모든 대사의 ' + FIELD_LABEL[f] + '을(를) 감춥니다 (항목별로 연 것도 함께)';
+    });
+  }
+
   // ───────── 라우팅/렌더 ─────────
   function route() {
     const m = /^#\/(\w+)/.exec(location.hash);
@@ -278,6 +342,7 @@
       default: break;
     }
     renderClipStates();
+    syncVeils(); // 목록이 문서에 붙은 뒤에 감추기 상태를 입힌다
   }
   function renderExtStatus() {
     const pill = $('#ext-status');
@@ -332,20 +397,29 @@
         g.items.forEach((it) => gEl.append(itemEl(it, kind)));
         body.append(gEl);
       }
+      syncVeils();
     };
     const sel = el('select', { onchange: (e) => { state.filterTitle = e.target.value; renderBody(); } }, [el('option', { value: '' }, '모든 작품')].concat(titles.map((t) => el('option', { value: t, selected: t === state.filterTitle }, t))));
     const search = el('input', { type: 'search', placeholder: '자막 · 번역 · 코멘트 검색', value: state.search, oninput: debounce((e) => { state.search = e.target.value; renderBody(); }, 150) });
     const sort = el('select', { onchange: (e) => { state.sort = e.target.value; renderBody(); } }, [el('option', { value: 'recent', selected: state.sort === 'recent' }, '최근 저장한 작품부터'), el('option', { value: 'title', selected: state.sort === 'title' }, '작품 이름순')]);
-    wrap.append(el('div', { class: 'toolbar' }, [sel, search, sort, countEl]), body);
+    const hideBtn = (f) => el('button', { class: 'btn hide-toggle', 'data-field': f, onclick: () => setGlobalHide(f, !state.hide[f]) }, '');
+    wrap.append(el('div', { class: 'toolbar' }, [sel, search, sort, hideBtn('text'), hideBtn('ko'), repeatButton(), countEl]), body);
     renderBody();
+    syncVeils();
     return wrap;
   }
   function itemEl(it, kind) {
-    const node = el('div', { class: 'item' + (kind === 'known' ? ' known' : ''), 'data-clip-item': it.id, 'data-id': it.id });
+    const node = el('div', { class: 'item' + (kind === 'known' ? ' known' : '') + (it.translation ? '' : ' no-ko'), 'data-clip-item': it.id, 'data-id': it.id });
     const play = el('button', { class: 'play', title: '플레이어에서 이 대사 재생', onclick: () => playItem(it.id) }, '▶');
     const body = el('div', { class: 'body' }, [
+      el('div', { class: 'vis-btns' }, [
+        el('button', { class: 'btn mini vis-text', title: '이 대사의 자막 보기/감추기', onclick: () => setItemVeil(it.id, 'text', !isVeiled(it.id, 'text')) }, '자막'),
+        el('button', { class: 'btn mini vis-ko', title: '이 대사의 뜻 보기/감추기', onclick: () => setItemVeil(it.id, 'ko', !isVeiled(it.id, 'ko')) }, '뜻'),
+      ]),
       el('div', { class: 'en', text: it.text }),
+      el('button', { class: 'veil veil-text-btn', title: '자막 보기', onclick: () => setItemVeil(it.id, 'text', false) }, '자막 감춤 · 눌러서 보기'),
       el('div', { class: 'ko', text: it.translation || '' }),
+      el('button', { class: 'veil veil-ko-btn', title: '뜻 보기', onclick: () => setItemVeil(it.id, 'ko', false) }, '뜻 감춤 · 눌러서 보기'),
       el('div', { class: 'meta' }, [
         el('span', null, S.formatTime(it.startMs) + ' – ' + S.formatTime(it.endMs)),
         el('span', null, PLATFORM_NAMES[it.platform] || it.platform),
@@ -424,6 +498,7 @@
       el('div', { class: 'quiz-audio' }, [
         el('button', { class: 'btn primary big play', 'data-label': '듣기', onclick: () => playItem(it.id) }, '▶ 듣기'),
         el('span', { class: 'count' }, 'Space'),
+        repeatButton(),
         el('button', { class: 'btn', onclick: () => { q.hint = !q.hint; render(); } }, q.hint ? '힌트 숨기기' : '힌트: 한국어 뜻'),
         el('span', { class: 'clip-state state' }),
       ]),
@@ -549,7 +624,7 @@
       el('section', null, [
         el('h3', null, '확장 프로그램'),
         el('p', null, state.extOk ? '연결됨 · 버전 ' + (B.version || '') : '감지되지 않음'),
-        el('p', null, ['저장한 자막·설정·보관한 대사 오디오는 크롬 확장 프로그램 안(chrome.storage)에, 내 목소리 녹음은 이 사이트의 브라우저 저장소(IndexedDB)에 보관됩니다. 확장 프로그램 ⚙ 에서 "별표 저장 시 오디오"를 켜면 대사 오디오를 보관하거나 PC에 WAV 파일로 내려받을 수 있고, 보관된 오디오가 있는 자막은 플레이어 탭 없이 바로 재생됩니다. 다른 컴퓨터로 옮기려면 아래에서 내보내기/가져오기를 사용하세요. ', el('a', { href: README_URL, target: '_blank', rel: 'noopener' }, '설치 방법·사용법 →')]),
+        el('p', null, ['저장한 자막·설정·보관한 대사 오디오는 크롬 확장 프로그램 안(chrome.storage)에, 내 목소리 녹음은 이 사이트의 브라우저 저장소(IndexedDB)에 보관됩니다. 확장 프로그램 ⚙ 에서 "별표 저장 시 오디오"를 켜면 대사 오디오를 보관하거나 PC에 MP3 파일로 저장할 수 있고(저장 폴더는 툴바 팝업 → 변경), 보관된 오디오가 있는 자막은 플레이어 탭 없이 바로 재생됩니다. 다른 컴퓨터로 옮기려면 아래에서 내보내기/가져오기를 사용하세요. ', el('a', { href: README_URL, target: '_blank', rel: 'noopener' }, '설치 방법·사용법 →')]),
       ]),
       el('section', null, [
         el('h3', null, '통계'),

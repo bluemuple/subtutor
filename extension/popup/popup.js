@@ -1,4 +1,5 @@
-const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {} };
+const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '' };
+const FS = globalThis.SubTutorFS;
 let currentPlatform = null;
 const $ = (id) => document.getElementById(id);
 let settings = Object.assign({}, DEFAULTS);
@@ -7,6 +8,14 @@ function save(patch) {
   settings = Object.assign({}, settings, patch);
   chrome.storage.local.set({ settings });
   render();
+}
+async function refreshDir() {
+  let st = { state: 'none' };
+  try { if (FS) st = await FS.status(); } catch (e) { /* ignore */ }
+  const has = st.state !== 'none';
+  $('dirName').textContent = (has ? st.name : '다운로드 폴더') + '/SubTutor';
+  $('dirName').title = has ? '지정한 폴더: ' + st.name : '크롬 다운로드 폴더 안의 SubTutor';
+  $('dirWarn').classList.toggle('hidden', !(has && st.state !== 'granted'));
 }
 function render() {
   $('panelOpen').checked = !!settings.panelOpen;
@@ -33,6 +42,14 @@ async function init() {
   $('audioMode').addEventListener('change', (e) => save({ audioMode: e.target.value }));
   $('enabled').addEventListener('change', (e) => { if (!currentPlatform) return; save({ enabled: Object.assign({}, settings.enabled || {}, { [currentPlatform]: e.target.checked }) }); });
   $('openSite').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'openSite' }, () => window.close()));
+  $('changeDir').addEventListener('click', () => { chrome.runtime.openOptionsPage(); window.close(); });
+  $('grantDir').addEventListener('click', async () => {
+    // 팝업에서는 크롬이 추가 창 없이 허용해 준다. 허용되지 않으면 설정 페이지에서 "매번 허용" 흐름으로 안내
+    const r = FS ? await FS.requestPermission() : 'none';
+    await refreshDir();
+    if (r !== 'granted') { chrome.runtime.openOptionsPage(); window.close(); }
+  });
+  refreshDir();
   $('openNetflix').addEventListener('click', () => chrome.tabs.create({ url: 'https://www.netflix.com/browse' }));
 
   try {

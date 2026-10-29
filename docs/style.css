@@ -133,3 +133,18 @@ code { background: #111; padding: 1px 5px; border-radius: 4px; font-size: 13px; 
 }
 
 .has-audio { color: var(--green); }
+
+/* 자막/뜻 감추기 · 반복 */
+.btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.hide-toggle, .btn.repeat-toggle { white-space: nowrap; }
+.btn.mini { padding: 1px 8px; font-size: 12px; border-radius: 6px; color: var(--muted); }
+.btn.mini:hover { color: var(--text); }
+.vis-btns { display: flex; gap: 6px; margin-bottom: 6px; }
+.veil { display: block; width: 100%; text-align: left; background: var(--card2); border: 1px dashed #3a3a46; border-radius: 8px; color: var(--dim); padding: 9px 12px; font-size: 13px; }
+.veil:hover { border-color: var(--accent2); color: var(--muted); }
+.veil-ko-btn { margin-top: 4px; padding: 5px 12px; }
+.item.veil-text .en, .item:not(.veil-text) .veil-text-btn,
+.item.veil-ko .ko, .item:not(.veil-ko) .veil-ko-btn,
+.item.no-ko .veil-ko-btn, .item.no-ko .vis-ko, .item.no-ko .ko { display: none; }
+.quiz-audio .repeat-toggle { padding: 8px 12px; }
+

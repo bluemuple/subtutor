@@ -70,6 +70,8 @@ function ensureFixtures() {
     const swTarget = await browser.waitForTarget((t) => t.type() === 'service_worker' && t.url().includes('background.js'), { timeout: 15000 });
     const sw = await swTarget.worker();
     assert(sw, 'service worker');
+    // 모듈 import 가 있는 서비스 워커는 컨텍스트가 생긴 뒤 조금 있다가 스크립트가 실행된다
+    await waitFor(() => sw.evaluate(() => typeof globalThis.__subtutorHandle === 'function' && !!(globalThis.chrome && chrome.storage)), 15000, 'service worker script ready');
     const extId = new URL(swTarget.url()).host;
     console.log('  extension id: ' + extId);
     await sw.evaluate(() => chrome.storage.local.clear());
@@ -300,6 +302,29 @@ function ensureFixtures() {
       assert(st.paused && !st.ended, 'parked: ' + JSON.stringify(st));
     });
 
+    console.log('▶ 설정 페이지 (오디오 저장 폴더)');
+    const opt = await browser.newPage();
+    opt.on('pageerror', (e) => logs.push('[opt pageerror] ' + e.message));
+    await opt.goto('chrome-extension://' + extId + '/options/options.html', { waitUntil: 'load' });
+    await step('설정 페이지: 기본은 다운로드 폴더, 폴더 핸들을 넣으면 허용 상태로 표시된다', async () => {
+      await waitFor(() => opt.$eval('#dirName', (e) => e.textContent === '크롬 다운로드 폴더'), 5000, 'default dir');
+      // 폴더 선택 창은 자동화할 수 없으므로, 브라우저 내부 저장소(OPFS)의 폴더 핸들을 같은 자리에 넣어 저장 경로/권한 흐름을 검증한다
+      await opt.evaluate(async () => {
+        const root = await navigator.storage.getDirectory();
+        const dir = await root.getDirectoryHandle('e2e-docs', { create: true });
+        await window.SubTutorFS.setHandle(dir);
+      });
+      await opt.reload({ waitUntil: 'load' });
+      await waitFor(() => opt.$eval('#dirName', (e) => e.textContent === 'e2e-docs'), 5000, 'dir name');
+      const perm = await opt.$eval('#permState', (e) => e.textContent);
+      assert(/허용됨/.test(perm), 'perm ' + perm);
+      const s = await waitFor(async () => { const r = await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings); return r && r.audioDirName === 'e2e-docs' ? r : null; }, 5000, 'settings.audioDirName');
+      assert(s.audioDirName === 'e2e-docs', 'settings.audioDirName ' + s.audioDirName);
+      const st = await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'audioDir.status' }, {}));
+      assert(st.state === 'granted' && st.name === 'e2e-docs', 'sw status ' + JSON.stringify(st));
+      await opt.screenshot({ path: path.join(TMP, 'shots', 'options-folder.png') });
+    });
+
     console.log('▶ 모의 유튜브 페이지');
     const yt = await browser.newPage();
     yt.on('pageerror', (e) => logs.push('[yt pageerror] ' + e.message));
@@ -322,10 +347,10 @@ function ensureFixtures() {
       await yt.keyboard.press('KeyD');
       await waitFor(async () => { const t = await videoTime(yt); return t >= 9.8 && t < 10.6; }, 4000, 'yt next cue');
     });
-    await step('유튜브: 별표 저장 시 대사 오디오를 캡처해 보관한다', async () => {
+    await step('유튜브: 별표 저장 시 대사 오디오를 캡처해 보관하고 지정 폴더에 MP3 로 쓴다', async () => {
       await yt.click('.st-head .st-icon');
       await yt.waitForSelector('.st-settings:not(.st-hidden)');
-      const ok = await yt.evaluate(() => { const sel = [...document.querySelectorAll('.st-settings select')].find((s) => [...s.options].some((o) => o.value === 'store')); if (!sel) return false; sel.value = 'store'; sel.dispatchEvent(new Event('change', { bubbles: true })); return true; });
+      const ok = await yt.evaluate(() => { const sel = [...document.querySelectorAll('.st-settings select')].find((s) => [...s.options].some((o) => o.value === 'both')); if (!sel) return false; sel.value = 'both'; sel.dispatchEvent(new Event('change', { bubbles: true })); return true; });
       assert(ok, 'audio mode select');
       await yt.click('.st-head .st-icon');
       await setTime(yt, 22.3, true);
@@ -350,6 +375,25 @@ function ensureFixtures() {
       const it = items.find((i) => i.platform === 'youtube');
       assert(it && it.audio && it.audio.format === 'mp3' && it.audio.rate === 32000, 'item audio meta: ' + JSON.stringify(it && it.audio));
       await yt.evaluate(() => document.querySelector('video').pause());
+      // 지정 폴더: <폴더>/SubTutor/<작품 에피소드>/<시각 대사>.mp3 (원본 샘플레이트 128kbps) — 다운로드 폴더로는 가지 않는다
+      const files = await opt.evaluate(async () => {
+        const root = await navigator.storage.getDirectory();
+        const out = [];
+        async function walk(dir, prefix) {
+          for await (const [name, h] of dir.entries()) {
+            if (h.kind === 'directory') await walk(h, prefix + name + '/');
+            else { const f = await h.getFile(); const head = new Uint8Array(await f.slice(0, 2).arrayBuffer()); out.push({ path: prefix + name, size: f.size, head: Array.from(head) }); }
+          }
+        }
+        await walk(await root.getDirectoryHandle('e2e-docs'), 'e2e-docs/');
+        return out;
+      });
+      assert(files.length === 1 && /^e2e-docs\/SubTutor\/Mock Lecture Title Mock Channel\/00-2\d .+\.mp3$/.test(files[0].path), 'folder file ' + JSON.stringify(files));
+      assert(files[0].size > 5000 && files[0].head[0] === 0xff && (files[0].head[1] & 0xe0) === 0xe0, 'mp3 in folder ' + JSON.stringify(files[0]));
+      const dls = await sw.evaluate(() => new Promise((r) => chrome.downloads.search({}, r)));
+      assert(dls.length === 0, 'no chrome download when folder works: ' + dls.length);
+      const toastText = await yt.$eval('.st-toast', (t) => t.textContent).catch(() => '');
+      assert(/e2e-docs\/SubTutor/.test(toastText), 'toast names folder: ' + toastText);
     });
 
     console.log('▶ 웹사이트');
@@ -359,6 +403,14 @@ function ensureFixtures() {
     web.on('console', (m) => logs.push('[web ' + m.type() + '] ' + m.text()));
     web.on('dialog', (d) => d.accept());
     await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+    const trackClipEvents = () => web.evaluate(() => { window.__clipEvents = []; window.SubTutorBridge.on('clip.state', (p) => window.__clipEvents.push(Object.assign({ at: Date.now() % 100000 }, p))); }).catch(() => {});
+    await trackClipEvents();
+    const clipDiag = async () => {
+      const ev = await web.evaluate(() => (window.__clipEvents || []).slice(-6)).catch(() => []);
+      const mock = await page.evaluate(() => { const v = document.querySelector('video'); return { paused: v.paused, t: v.currentTime, seeks: window.__seeks.slice(-5), pauses: window.__pauses.slice(-4), pauseCalls: (window.__pauseCalls || []).slice(-4) }; }).catch(() => null);
+      const diag = await page.evaluate(() => { const b = [...document.querySelectorAll('.st-settings .st-btn')].find((x) => x.textContent === '진단 정보'); if (b) b.click(); const d = document.querySelector('.st-diag'); return d ? d.textContent.split('\n').slice(-2).join(' | ') : ''; }).catch(() => '');
+      return ' events=' + JSON.stringify(ev) + ' mock=' + JSON.stringify(mock) + ' diag=' + diag;
+    };
     await step('확장 프로그램이 감지되고 저장한 자막 3개가 보인다', async () => {
       await waitFor(() => web.$eval('#ext-status', (e) => e.classList.contains('ok')), 8000, 'ext ok');
       await waitFor(() => web.$$eval('.item', (r) => r.length === 3), 8000, 'items');
@@ -366,6 +418,32 @@ function ensureFixtures() {
       assert(texts.some((t) => t.includes('frisbee')) && texts.some((t) => t.includes('Principal')), 'texts ' + texts);
       const groups = await web.$$eval('.group-title', (els) => els.map((e) => e.textContent));
       assert(groups.some((g) => g.includes('Mock Show') && g.includes('S1:E2')), 'group ' + groups);
+    });
+    await step('자막/뜻은 기본으로 감춰지고, 항목별·전체 토글로 보이거나 다시 감춘다', async () => {
+      const veiled = await web.$$eval('.item', (els) => els.map((e) => e.classList.contains('veil-text') && e.classList.contains('veil-ko')));
+      assert(veiled.length === 3 && veiled.every(Boolean), 'all veiled by default: ' + veiled);
+      const enVisible = await web.$$eval('.item .en', (els) => els.filter((e) => e.offsetParent !== null).length);
+      assert(enVisible === 0, 'no subtitle text visible: ' + enVisible);
+      const labels = await web.$$eval('.hide-toggle', (b) => b.map((x) => x.textContent));
+      assert(labels.join('|') === '자막 모두 보이기|뜻 모두 보이기', 'toolbar labels ' + labels.join('|'));
+      // 항목 하나만 자막 열기 (가림막 클릭)
+      await web.click('[data-id="netflix:12345:22000"] .veil-text-btn');
+      const one = await web.evaluate(() => ({ open: document.querySelector('[data-id="netflix:12345:22000"] .en').offsetParent !== null, others: [...document.querySelectorAll('.item .en')].filter((e) => e.offsetParent !== null).length, btn: document.querySelector('[data-id="netflix:12345:22000"] .vis-text').textContent }));
+      assert(one.open && one.others === 1 && one.btn === '자막 감추기', 'single reveal ' + JSON.stringify(one));
+      // 항목의 "뜻" 버튼으로 뜻 열기
+      await web.click('[data-id="netflix:12345:22000"] .vis-ko');
+      const ko = await web.evaluate(() => document.querySelector('[data-id="netflix:12345:22000"] .ko').offsetParent !== null);
+      assert(ko, 'ko revealed per item');
+      // 전체 보이기 → 전체 감추기 (항목별로 연 것도 함께 닫힌다)
+      await web.click('.hide-toggle[data-field="text"]');
+      let n = await web.$$eval('.item .en', (els) => els.filter((e) => e.offsetParent !== null).length);
+      assert(n === 3, 'all shown ' + n);
+      const lbl = await web.$eval('.hide-toggle[data-field="text"]', (b) => b.textContent);
+      assert(lbl === '자막 모두 감추기', 'label flipped ' + lbl);
+      await web.click('.hide-toggle[data-field="text"]');
+      n = await web.$$eval('.item .en', (els) => els.filter((e) => e.offsetParent !== null).length);
+      assert(n === 0, 'all hidden again ' + n);
+      await web.screenshot({ path: path.join(TMP, 'shots', 'web-list-veiled.png') });
     });
     await step('보관된 오디오가 있는 항목은 플레이어 탭 없이 바로 재생된다', async () => {
       const row = await web.$('[data-id^="youtube:"]');
@@ -378,10 +456,6 @@ function ensureFixtures() {
       await waitFor(() => web.$eval('[data-id^="youtube:"]', (e) => !e.classList.contains('playing')), 8000, 'local ended');
       const pauses = await yt.evaluate(() => window.__pauses);
       assert(pauses.length === 0, 'player tab untouched: ' + JSON.stringify(pauses));
-      await (await web.$('[data-id^="youtube:"] .btn.danger')).click();
-      await waitFor(() => web.$$eval('.item', (r) => r.length === 2), 5000, 'youtube item deleted');
-      const left = await sw.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith('audio:')));
-      assert(left.length === 0, 'audio removed with item: ' + left);
     });
     await step('웹에서 ▶ 를 누르면 플레이어 탭이 그 구간만 재생하고 멈춘다', async () => {
       await page.evaluate(() => { window.__pauses = []; });
@@ -398,6 +472,54 @@ function ensureFixtures() {
       const pauses = await page.evaluate(() => window.__pauses);
       const last = pauses[pauses.length - 1];
       assert(last >= 24100 && last <= 24700, 'paused at ' + JSON.stringify(pauses));
+    });
+    await step('재생 중 ◼ 를 누르면 플레이어가 바로 멈춘다', async () => {
+      await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 5; window.__pauses = []; });
+      const sel = '[data-id="netflix:12345:22000"]';
+      await web.click(sel + ' .play');
+      await waitFor(() => web.$eval(sel + ' .play', (e) => e.classList.contains('active')), 8000, 'playing');
+      await sleep(500);
+      await web.click(sel + ' .play');
+      await waitFor(() => web.$eval(sel, (e) => !e.classList.contains('playing')), 3000, 'stopped state');
+      await waitFor(() => videoPaused(page), 2500, 'player paused by stop');
+      const t = await videoTime(page);
+      assert(t < 24.0, 'stopped before the clip end: ' + t);
+      await sleep(600);
+      assert(await videoPaused(page), 'stays paused');
+    });
+    await step('🔁 반복: 보관 오디오·플레이어 재생을 되풀이하고, 다른 대사를 누르면 이전 것이 멈춘다', async () => {
+      await web.click('.toolbar .repeat-toggle');
+      assert(await web.$eval('.toolbar .repeat-toggle', (b) => b.classList.contains('on')), 'repeat on');
+      const ytSel = '[data-id^="youtube:"]', nfSel = '[data-id="netflix:12345:22000"]';
+      await web.click(ytSel + ' .play');
+      await waitFor(() => web.$eval(ytSel, (e) => e.classList.contains('playing')), 5000, 'local playing');
+      await sleep(7500); // 보관 오디오(약 2.7초)보다 훨씬 길게 — 반복이 아니면 끝났을 시간
+      assert(await web.$eval(ytSel, (e) => e.classList.contains('playing')), 'local audio keeps looping');
+      const st = await web.$eval(ytSel + ' .state', (e) => e.textContent);
+      assert(/반복 재생 중/.test(st), 'state text ' + st);
+      // 다른 대사(플레이어 원격 재생)를 누르면 이전 것은 멈추고 그 대사가 반복된다
+      await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 5; window.__pauses = []; window.__seeks = []; });
+      await web.click(nfSel + ' .play');
+      await waitFor(() => web.$eval(ytSel, (e) => !e.classList.contains('playing')), 3000, 'previous stopped');
+      await waitFor(() => web.$eval(nfSel + ' .play', (e) => e.classList.contains('active')), 10000, 'remote playing');
+      // 구간 끝(24.4s+0.2s)에서 시작점(22.0s-0.15s)으로 되돌리는 탐색이 처음 재생 탐색 뒤에 한 번 더 기록돼야 한다
+      await waitFor(() => page.evaluate(() => window.__seeks.filter((s) => Math.abs(s - 21850) < 120).length >= 2), 12000, 'loop seek back to start').catch(async (e) => {
+        const d = await page.evaluate(() => ({ t: document.querySelector('video').currentTime, paused: document.querySelector('video').paused, seeks: window.__seeks.slice(-5), pauses: window.__pauses.slice(-3) }));
+        throw new Error(e.message + ' ' + JSON.stringify(d));
+      });
+      const tLoop = await videoTime(page);
+      assert(tLoop >= 21.5 && tLoop < 25, 'time inside the clip after loop: ' + tLoop);
+      if (!(await web.$eval(nfSel, (e) => e.classList.contains('playing')))) throw new Error('still playing while looping' + await clipDiag());
+      // 숨은 탭에서는 브라우저가 탐색 직후 잠깐 멈출 수 있고, 확장 프로그램이 곧바로 다시 재생한다
+      await waitFor(async () => !(await videoPaused(page)), 3000, 'player resumes after loop seek').catch(async (e) => { throw new Error(e.message + await clipDiag()); });
+      await web.click(nfSel + ' .play');
+      await waitFor(() => videoPaused(page), 3000, 'paused after stop');
+      await web.click('.toolbar .repeat-toggle');
+      assert(!(await web.$eval('.toolbar .repeat-toggle', (b) => b.classList.contains('on'))), 'repeat off');
+      await (await web.$(ytSel + ' .btn.danger')).click();
+      await waitFor(() => web.$$eval('.item', (r) => r.length === 2), 5000, 'youtube item deleted');
+      const left = await sw.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith('audio:')));
+      assert(left.length === 0, 'audio removed with item: ' + left);
     });
     await step('코멘트를 쓰면 저장되고 새로고침 후에도 남는다', async () => {
       const ta = await web.$('[data-id="netflix:12345:22000"] .comment');
@@ -436,8 +558,9 @@ function ensureFixtures() {
     await step('같이 듣기: 플레이어 오디오 뒤에 최근 녹음이 재생된다', async () => {
       const labels = await web.$$eval('[data-id="netflix:12345:22000"] .rec-row > button', (b) => b.map((x) => x.textContent));
       assert(/같이 듣기/.test(labels[labels.length - 1]), 'last button should be 같이 듣기: ' + labels.join(' | '));
+      await trackClipEvents();
       await web.click('[data-id="netflix:12345:22000"] .rec-row > button:last-of-type');
-      await waitFor(() => web.$eval('.item', (e) => e.classList.contains('playing')), 8000, 'clip playing');
+      await waitFor(() => web.$eval('[data-id="netflix:12345:22000"]', (e) => e.classList.contains('playing')), 8000, 'clip playing').catch(async (e) => { throw new Error(e.message + await clipDiag()); });
       await waitFor(() => web.$$eval('.item .attempt.playing', (a) => a.length === 1), 15000, 'recording playing after clip');
     });
     await step('퀴즈: 받아쓰기 확인 후 C로 "알고 있는 표현" 상자로 이동', async () => {

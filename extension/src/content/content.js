@@ -140,6 +140,7 @@
         break;
       case 'playRange': startClip(msg); sendResponse({ ok: true }); break;
       case 'stopClip': stopClip('stopped'); sendResponse({ ok: true }); break;
+      case 'clipLoop': if (state.clip) state.clip.loop = !!msg.loop; sendResponse({ ok: true }); break;
       case 'seekTo': cancelModesPending(); playFrom(msg.ms, msg.play === false); sendResponse({ ok: true }); break;
       case 'togglePanel': setPanelOpen(!settings.panelOpen); sendResponse({ ok: true }); break;
       case 'setEnabled': setEnabled(!!msg.enabled); sendResponse({ ok: true }); break;
@@ -649,7 +650,13 @@
     if (result.silent) { toast('이 영상의 오디오는 캡처가 차단되어 있습니다(보호된 재생)'); return; }
     const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, storeFormat: result.storeFormat || 'wav', storeMime: result.storeMime || 'audio/wav', storeRate: result.storeRate || 16000, download: result.download, downloadMime: result.downloadMime || 'audio/wav', fileName: fileNameFor(item, result.downloadFormat || 'wav'), durationMs: result.durationMs });
     const fmt = (result.downloadFormat || 'wav').toUpperCase();
-    toast(mode === 'download' ? '🔊 ' + fmt + ' 파일 저장: ' + ((r && r.fileName) || '다운로드 폴더/SubTutor') : (mode === 'both' ? '🔊 오디오 저장 (' + fmt + ' 파일 + 웹 퀴즈용)' : '🔊 오디오를 웹 퀴즈용으로 보관했습니다'), 2500);
+    if (mode === 'store') toast('🔊 오디오를 웹 퀴즈용으로 보관했습니다', 2500);
+    else {
+      const where = r && r.location === 'folder' ? (r.fileName || '') : '다운로드 폴더/' + ((r && r.fileName) || 'SubTutor');
+      const extra = r && r.folderIssue === 'prompt' ? ' · 지정한 폴더의 권한이 풀려 다운로드 폴더에 저장했습니다. 툴바의 SubTutor 아이콘 → "폴더 권한 허용"'
+        : (r && r.folderIssue === 'error' ? ' · 지정한 폴더에 쓰지 못해 다운로드 폴더에 저장했습니다 (' + (r.folderError || '') + ')' : '');
+      toast('🔊 ' + fmt + ' 파일 저장: ' + where + (mode === 'both' ? ' (+ 웹 퀴즈용 보관)' : '') + extra, extra ? 6000 : 2500);
+    }
     if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
   }
   async function captureViaTab(startV, endV) {
@@ -921,7 +928,7 @@
     f.translationSource = el('select', { onchange: (e) => { saveSettings({ translationSource: e.target.value }); refreshAllKo(); if (state.current >= 0) ensureTranslations(state.current); } });
     [['auto', '자동 (플랫폼 한국어 자막 → 없으면 기계번역)'], ['track', '플랫폼 한국어 자막만'], ['mt', '기계 번역만'], ['off', '끄기']].forEach(([v, t]) => f.translationSource.append(el('option', { value: v }, t)));
     f.audioMode = el('select', { onchange: (e) => saveSettings({ audioMode: e.target.value }) });
-    [['off', '저장 안 함'], ['store', '웹 퀴즈용으로 보관 (확장 프로그램 안)'], ['download', 'PC에 WAV 파일로 다운로드'], ['both', '둘 다']].forEach(([v, t]) => f.audioMode.append(el('option', { value: v }, t)));
+    [['off', '저장 안 함'], ['store', '웹 퀴즈용으로 보관 (확장 프로그램 안)'], ['download', 'PC에 MP3 파일로 저장'], ['both', '둘 다']].forEach(([v, t]) => f.audioMode.append(el('option', { value: v }, t)));
     f.fontScale = el('input', { type: 'range', min: 60, max: 160, step: 5 });
     f.fontScale.addEventListener('input', () => saveSettings({ fontScale: +f.fontScale.value }));
     f.shadowPauseSec = el('input', { type: 'range', min: 1, max: 7, step: 1 });
@@ -948,7 +955,7 @@
       el('div', { class: 'st-field' }, [el('label', null, ['이 영상 자막 시간 보정 (ms)', f.offsetHint]), el('span', { class: 'st-offset-ctl' }, [el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs - 500, 'manual') }, '−0.5초'), f.offset, el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs + 500, 'manual') }, '+0.5초')])]),
       el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: () => { state.alignSamples = []; saveOffset(0, 'manual'); toast('보정값을 지웠습니다. 플랫폼 자막이 켜져 있으면 다시 자동 감지합니다'); } }, '보정 초기화')]),
       el('h4', { text: '저장' }),
-      field('별표 저장 시 오디오', f.audioMode, '대사를 한 번 다시 재생하며 녹음합니다. 넷플릭스·프라임은 툴바 아이콘을 눌러 탭 허용이 필요할 수 있습니다'),
+      field('별표 저장 시 오디오', f.audioMode, '대사를 한 번 다시 재생하며 녹음합니다. 넷플릭스·프라임은 툴바 아이콘을 눌러 탭 허용이 필요할 수 있습니다. 저장 폴더는 툴바 팝업 → "변경"에서 고릅니다'),
       el('div', { class: 'st-btn-row' }, [
         el('button', { class: 'st-btn st-primary', onclick: () => bg({ type: 'openSite' }).catch(() => {}) }, '웹에서 저장 목록 · 퀴즈 열기'),
         el('button', { class: 'st-btn', onclick: () => setEnabled(false) }, '이 사이트에서 SubTutor 끄기'),
@@ -1245,7 +1252,7 @@
   function startClip(msg) {
     cancelModesPending();
     state.loop = false; state.loopIdx = -1; updateModeUI();
-    state.clip = { clipId: msg.clipId, startMs: msg.startMs, endMs: msg.endMs, phase: 'seeking', startedAt: now(), playTries: 0, lastPlayAt: now() };
+    state.clip = { clipId: msg.clipId, startMs: msg.startMs, endMs: msg.endMs, loop: !!msg.loop, loops: 0, lastLoopAt: 0, phase: 'seeking', startedAt: now(), playTries: 0, lastPlayAt: now() };
     playFrom(msg.startMs - settings.leadMs);
     highlightRow(S.findCueIndex(state.cues, msg.startMs + effectiveOffset() + 10), true);
   }
@@ -1258,6 +1265,8 @@
     const c = state.clip;
     state.clip = null;
     clearTimeout(state.ensureTimer);
+    // 웹사이트의 정지(또는 다른 대사 재생)로 멈출 때는 플레이어도 멈춘다. 플레이어에서 직접 이동한 경우('user')는 그대로 둔다
+    if (reason === 'stopped') { state.pauseByUsUntil = now() + 1500; adapter.pause(); }
     bg({ type: 'player.event', clipId: c.clipId, event: reason === 'ended' ? 'ended' : 'stopped', reason }).catch(() => {});
   }
   function handleClip(raw, paused) {
@@ -1272,6 +1281,11 @@
       }
       return;
     }
+    if (c.loop && raw >= c.endMs + settings.tailMs && raw < c.endMs + 4000) {
+      // 반복 재생: 구간 끝에서 처음으로 되돌린다 (탐색이 반영되기 전의 중복 탐색은 막는다)
+      if (now() - c.lastLoopAt > 500) { c.lastLoopAt = now(); c.loops++; c.lastPlayAt = now(); c.playTries = 0; seekTo(start); }
+      return;
+    }
     if (raw >= c.endMs + settings.tailMs || raw < start - 3000) {
       state.pauseByUsUntil = now() + 1500;
       adapter.pause();
@@ -1279,9 +1293,13 @@
       bg({ type: 'player.event', clipId: c.clipId, event: 'ended' }).catch(() => {});
       return;
     }
-    if (paused && now() - c.lastPlayAt > 2500) {
-      state.clip = null;
-      bg({ type: 'player.event', clipId: c.clipId, event: 'stopped' }).catch(() => {});
+    if (paused) {
+      // 백그라운드 탭에서는 브라우저가 탐색 직후 영상을 멈추기도 한다: 반복 탐색 뒤 잠깐 사이의 멈춤은 다시 재생을 건다
+      if (c.loop && now() - c.lastLoopAt < 2500 && c.playTries < 3 && now() - c.lastPlayAt > 300) { c.playTries++; c.lastPlayAt = now(); requestPlay(); return; }
+      if (now() - c.lastPlayAt > 2500) {
+        state.clip = null;
+        bg({ type: 'player.event', clipId: c.clipId, event: 'stopped' }).catch(() => {});
+      }
     }
   }
 

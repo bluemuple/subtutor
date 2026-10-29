@@ -21,7 +21,9 @@
     <label class="row"><span>플랫폼 기본 자막 숨기기</span><input type="checkbox" id="hideNative" class="switch"></label>
     <label class="row"><span>자동 일시정지 <kbd>P</kbd></span><input type="checkbox" id="autoPause" class="switch"></label>
     <label class="row"><span>쉐도잉 <kbd>W</kbd> · 쉬는 시간 <select id="shadowPauseSec"></select></span><input type="checkbox" id="shadowing" class="switch"></label>
-    <label class="row"><span>별표 저장 시 오디오</span><select id="audioMode"><option value="off">저장 안 함</option><option value="store">웹 퀴즈용 보관</option><option value="download">PC에 WAV 다운로드</option><option value="both">둘 다</option></select></label>
+    <label class="row"><span>별표 저장 시 오디오</span><select id="audioMode"><option value="off">저장 안 함</option><option value="store">웹 퀴즈용 보관</option><option value="download">PC에 MP3 파일로 저장</option><option value="both">둘 다</option></select></label>
+    <div class="row folder"><span>저장 폴더: <b id="dirName">다운로드 폴더/SubTutor</b></span><button id="changeDir" class="small" title="오디오 파일을 저장할 폴더 고르기">변경…</button></div>
+    <div id="dirWarn" class="hint warn hidden">지정한 폴더의 권한이 풀려 있어 지금은 다운로드 폴더에 저장됩니다. <button id="grantDir" class="small">폴더 권한 허용</button></div>
     <div class="hint" id="audioHint">넷플릭스·프라임에서 오디오 저장은 이 팝업을 연 탭에서 바로 허용됩니다(탭 오디오 캡처). 대사를 한 번 다시 재생하며 녹음합니다.</div>
   </section>
 
@@ -36,6 +38,7 @@
     <div><kbd>[</kbd> 느리게 &nbsp; <kbd>]</kbd> 빠르게 &nbsp; <kbd>\</kbd> 1배속 (반복 재생에도 유지)</div>
     <div class="hint">단축키는 넷플릭스/프라임/디즈니+ 재생 화면에서 동작합니다. 패널의 ⚙ 에서 번역 출처·자막 크기·시간 보정을 바꿀 수 있습니다.</div>
   </section>
+  <script src="../src/lib/fs.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
