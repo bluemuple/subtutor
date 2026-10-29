@@ -38,11 +38,16 @@
     return n;
   }
   let toastTimer;
-  function toast(msg) {
+  function toast(msg, ms) {
     const t = $('#toast');
     t.textContent = msg; t.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+    toastTimer = setTimeout(() => t.classList.remove('show'), ms || 2200);
+  }
+  // 보관된 오디오가 없어 플레이어 탭으로 가는 첫 재생에 한 번만 안내한다
+  function hintStoredAudio() {
+    try { if (sessionStorage.getItem('subtutor.hint.audio')) return; sessionStorage.setItem('subtutor.hint.audio', '1'); } catch (e) { /* ignore */ }
+    toast('보관된 오디오가 없어 플레이어 탭에서 재생합니다. 확장 프로그램 설정의 "별표 저장 시 오디오"를 "웹 퀴즈용으로 보관"으로 켜 두면 이후 저장하는 대사는 탭 없이 바로 재생됩니다.', 7000);
   }
   const isEditable = (t) => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
   const learning = () => state.items.filter((i) => (i.box || 'learning') === 'learning');
@@ -171,6 +176,7 @@
       }
     }
     state.clipLocal = false;
+    if (it && !it.audio) hintStoredAudio();
     setClip(itemId, 'opening', '', loop);
     try {
       const r = await B.request('clip.play', { itemId, loop }, 90000);

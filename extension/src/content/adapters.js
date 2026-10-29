@@ -32,16 +32,49 @@ globalThis.SubTutorAdapters = (() => {
     },
   };
 
+  // 열린 shadow DOM 까지 찾는다 (디즈니+ 플레이어는 web component 안에 자막·컨트롤을 그린다). 어댑터가 deep 이면 켜진다
+  const roots = { at: 0, list: [document], deep: false };
+  function collectShadowRoots(start, acc, budget) {
+    const walker = document.createTreeWalker(start, NodeFilter.SHOW_ELEMENT);
+    let n = walker.currentNode;
+    while (n && budget.n-- > 0) {
+      if (n.shadowRoot && !acc.has(n.shadowRoot)) { acc.add(n.shadowRoot); collectShadowRoots(n.shadowRoot, acc, budget); }
+      n = walker.nextNode();
+    }
+    return acc;
+  }
+  function deepRoots() {
+    if (!roots.deep) return [document];
+    const t = performance.now();
+    if (t - roots.at < 1000) return roots.list;
+    const acc = collectShadowRoots(document.documentElement, new Set(), { n: 20000 });
+    roots.list = [document].concat(Array.from(acc));
+    roots.at = t;
+    return roots.list;
+  }
+  // from(문서 또는 요소) 안에서 selector 를 찾되, deep 이면 열린 shadow root 들도 함께 본다
+  function qsaDeep(selector, from) {
+    const base = from || document;
+    const out = Array.from(base.querySelectorAll(selector));
+    if (!roots.deep) return out;
+    for (const r of deepRoots()) {
+      if (r === document) continue;
+      if (base !== document && !(base.contains && (base.contains(r.host) || base === r.host))) continue;
+      for (const e of r.querySelectorAll(selector)) if (!out.includes(e)) out.push(e);
+    }
+    return out;
+  }
+
   function scoreVideo(v) {
     return (v.readyState > 0 ? 4 : 0) + (!v.paused ? 4 : 0) + (isFinite(v.duration) && v.duration > 0 ? 2 : 0) + (v.currentTime > 0 ? 1 : 0) + Math.min(1, (v.clientWidth * v.clientHeight) / 1e6);
   }
   function pickVideo(list) {
-    const vids = list || Array.from(document.querySelectorAll('video'));
+    const vids = list || qsaDeep('video');
     if (!vids.length) return null;
     if (vids.length === 1) return vids[0];
     return vids.map((v) => ({ v, score: scoreVideo(v) })).sort((a, b) => b.score - a.score)[0].v;
   }
-  const findButton = (root, re) => Array.from((root || document).querySelectorAll('button, [role="button"]')).find((b) => re.test((b.getAttribute('aria-label') || b.getAttribute('title') || '').trim()));
+  const findButton = (root, re) => qsaDeep('button, [role="button"]', root || document).find((b) => re.test((b.getAttribute('aria-label') || b.getAttribute('title') || '').trim()));
 
   const videoTime = function () { const v = this.video(); return v ? v.currentTime * 1000 : NaN; };
   const videoPaused = function () { const v = this.video(); return v ? v.paused : true; };
@@ -65,7 +98,8 @@ globalThis.SubTutorAdapters = (() => {
     controlRoot() { return document.querySelector('.watch-video') || document.body; },
     nativeHideCss: '.player-timedtext { visibility: hidden !important; }',
     controlBars: ['[data-uia="controls-standard"]', '[data-uia="timeline"]'],
-    layoutCss: 'html.st-panel-open .watch-video { width: calc(100vw - var(--st-panel-w, 400px)) !important; }',
+    layoutCss: 'html.st-panel-open:not(.st-fs-hidden) .watch-video { width: calc(100vw - var(--st-panel-w, 400px)) !important; }',
+    fitVideo: true, // 패널이 열리면 영상(플레이어 영역)을 패널 왼쪽까지로 줄인다
     nativeCueSelector: '.player-timedtext-text-container',
     controlAnchor() { return document.querySelector('[data-uia="control-audio-subtitle"]'); },
     domTitle() {
@@ -133,7 +167,8 @@ globalThis.SubTutorAdapters = (() => {
     },
     nativeHideCss: '.atvwebplayersdk-captions-overlay, .atvwebplayersdk-captions-text { visibility: hidden !important; }',
     controlBars: ['.atvwebplayersdk-episode-timing-container', '.atvwebplayersdk-bottompanel-container', '.atvwebplayersdk-seekbar-container'],
-    layoutCss: '',
+    layoutCss: 'html.st-panel-open:not(.st-fs-hidden) #dv-web-player { width: calc(100vw - var(--st-panel-w, 400px)) !important; }',
+    fitVideo: true,
     nativeCueSelector: '.atvwebplayersdk-captions-text',
     controlAnchor() {
       const root = this.playerRoot();
@@ -165,10 +200,12 @@ globalThis.SubTutorAdapters = (() => {
     seek(ms) { page.send({ type: 'seek', ms: Math.max(0, Math.round(ms)) }); },
     play() { page.send({ type: 'play' }); },
     pause() { page.send({ type: 'pause' }); },
-    nativeHideCss: '.dss-subtitle-renderer-wrapper, .dss-subtitle-renderer-cue-window { visibility: hidden !important; }',
-    controlBars: ['.controls__footer', '[data-testid="player-controls"]', '.btm-media-overlays-container .controls'],
-    layoutCss: '',
-    nativeCueSelector: '.dss-subtitle-renderer-cue',
+    deep: true, // 자막·컨트롤이 disney-web-player 요소의 열린 shadow DOM 안에 있다
+    nativeHideCss: '.dss-subtitle-renderer-wrapper, .dss-subtitle-renderer-cue-window, .hive-subtitle-renderer-wrapper, .hive-subtitle-renderer-cue-positioning-box, .hive-subtitle-renderer-cue-window, timed-text-override-region, .timed-text-override-region, #timed-text-override-region, .TimedTextOverlay { visibility: hidden !important; opacity: 0 !important; }',
+    controlBars: ['.controls__footer', '[data-testid="player-controls"]', '.btm-media-overlays-container .controls', '[class*="controls-footer"]', '[class*="progress-bar"]', '[class*="scrubber"]'],
+    layoutCss: 'html.st-panel-open:not(.st-fs-hidden) disney-web-player, html.st-panel-open:not(.st-fs-hidden) disney-web-player-ui, html.st-panel-open:not(.st-fs-hidden) main-app-player { width: calc(100vw - var(--st-panel-w, 400px)) !important; }',
+    fitVideo: true,
+    nativeCueSelector: '.hive-subtitle-renderer-cue-window, .dss-subtitle-renderer-cue, .TimedTextOverlay',
     controlAnchor() { return findButton(document, /subtitle|자막|audio|오디오|字幕/i) || null; },
     domTitle() {
       const t = document.querySelector('.title-field, [data-testid="title"]');
@@ -207,7 +244,9 @@ globalThis.SubTutorAdapters = (() => {
       const r = bar.getBoundingClientRect();
       return r.height > 0 && r.top > rect.top ? Math.max(0, Math.round(rect.bottom - r.top)) + 8 : 0;
     },
-    layoutCss: 'html.st-panel-open ytd-app { margin-right: var(--st-panel-w, 400px); } html.st-panel-open #masthead-container { width: calc(100% - var(--st-panel-w, 400px)) !important; } ytd-app:fullscreen { margin-right: 0 !important; }',
+    // 패널은 페이지를 밀지 않고 오른쪽 추천 영상 영역 위에 겹친다. 마스트헤드(검색창)는 가리지 않고, 전체화면에서는 맨 위부터
+    layoutCss: 'html.st-panel-open:not(:fullscreen) #st-panel { top: 56px; }',
+    fitVideo: false,
     nativeCueSelector: '.ytp-caption-segment',
     controlAnchor() { return document.querySelector('#movie_player .ytp-subtitles-button') || document.querySelector('#movie_player .ytp-settings-button'); },
     domTitle() {
@@ -221,12 +260,14 @@ globalThis.SubTutorAdapters = (() => {
 
   function detect() {
     const h = location.hostname;
-    if (/(^|\.)netflix\.com$/.test(h)) return netflix;
-    if (/(^|\.)primevideo\.com$/.test(h) || /(^|\.)amazon\.(com|co\.uk|co\.jp|de|com\.au)$/.test(h)) return prime;
-    if (/(^|\.)disneyplus\.com$/.test(h)) return disney;
-    if (h === 'www.youtube.com' || h === 'youtube.com' || h === 'm.youtube.com') return youtube;
-    return null;
+    let a = null;
+    if (/(^|\.)netflix\.com$/.test(h)) a = netflix;
+    else if (/(^|\.)primevideo\.com$/.test(h) || /(^|\.)amazon\.(com|co\.uk|co\.jp|de|com\.au)$/.test(h)) a = prime;
+    else if (/(^|\.)disneyplus\.com$/.test(h)) a = disney;
+    else if (h === 'www.youtube.com' || h === 'youtube.com' || h === 'm.youtube.com') a = youtube;
+    roots.deep = !!(a && a.deep);
+    return a;
   }
 
-  return { shared, page, detect, pickVideo, findButton };
+  return { shared, page, detect, pickVideo, findButton, qsaDeep, deepRoots };
 })();

@@ -188,7 +188,8 @@
       if (active) { mountUI(); applySettings(); registerPlayer(); }
       else { cancelModesPending(); state.loop = false; state.loopIdx = -1; if (ui.root) { ui.overlay.classList.add('st-hidden'); applySettings(); } }
     }
-    if (active) { ensureOverlayMounted(); mountControlButton(); }
+    if (active) { ensureOverlayMounted(); mountControlButton(); if (adapter.deep && (state.tickCount % 4 === 0)) syncShadowNativeStyles(); }
+    if (ui.root) fitVideoBesidePanel();
   }
   function startVideo(id) {
     state.runToken++;
@@ -826,7 +827,7 @@
     const lowest = rect.top + rect.height * 0.55; // 영상 아래쪽 45% 안에 있는 컨트롤만 인정
     let top = Infinity;
     for (const sel of adapter.controlBars) {
-      for (const bar of root.querySelectorAll(sel)) {
+      for (const bar of A.qsaDeep(sel, root)) {
         const r = bar.getBoundingClientRect();
         if (r.height > 0 && r.width > 40 && r.top > lowest && r.top < rect.bottom && visibleBar(bar)) top = Math.min(top, r.top);
       }
@@ -862,6 +863,66 @@
     if (ui.toast) { ui.toast.style.left = (r.left + r.width / 2) + 'px'; ui.toast.style.top = (r.top + r.height * 0.1) + 'px'; }
   }
   function setPanelOpen(open) { saveSettings({ panelOpen: !!open }); }
+  // 디즈니+처럼 자막을 열린 shadow DOM 안에 그리는 플레이어는 문서의 <style> 이 닿지 않으므로, 각 shadow root 에도 같은 스타일을 넣는다
+  const shadowStyles = new WeakMap(); // ShadowRoot -> <style>
+  function nativeHideCssNow() { return settings.hideNative && state.active && isEnabled() ? (adapter.nativeHideCss || '') : ''; }
+  function syncShadowNativeStyles() {
+    if (!adapter.deep || !ui.root) return;
+    const css = nativeHideCssNow();
+    for (const r of A.deepRoots()) {
+      if (r === document) continue;
+      let st = shadowStyles.get(r);
+      if (!css) { if (st) { st.remove(); shadowStyles.delete(r); } continue; }
+      if (!st || !st.isConnected) { st = el('style', { class: 'st-native-style' }); r.append(st); shadowStyles.set(r, st); }
+      if (st.textContent !== css) st.textContent = css;
+    }
+  }
+  // 플랫폼 CSS(adapter.layoutCss)로 영상이 안 줄어들면, video 의 조상 중 화면을 꽉 채우는 요소를 바깥쪽부터 골라 너비를 패널만큼 줄여 본다 (효과를 확인하며 다음 후보로)
+  const fit = { el: null, prev: null, appliedAt: 0, tried: 0, cycleAt: 0 };
+  function panelWidth() { const w = ui.panel ? ui.panel.getBoundingClientRect().width : 0; return w > 50 ? w : 400; }
+  function videoOverlapsPanel(v) { const r = v.getBoundingClientRect(); return r.width > 0 && r.right > window.innerWidth - panelWidth() + 4; }
+  function fitCandidates(v) {
+    const out = [];
+    const up = (e) => e.parentElement || (e.getRootNode && e.getRootNode().host) || null; // shadow host 를 넘어 올라간다
+    for (let e = up(v); e && e !== document.body && e !== document.documentElement; e = up(e)) {
+      const r = e.getBoundingClientRect();
+      if (r.width >= window.innerWidth * 0.9 && r.height >= window.innerHeight * 0.6) out.push(e);
+    }
+    return out.reverse(); // body 에 가까운 것부터
+  }
+  function restoreFit() {
+    if (fit.el) {
+      try { if (fit.prev && fit.prev.value) fit.el.style.setProperty('width', fit.prev.value, fit.prev.priority); else fit.el.style.removeProperty('width'); } catch (e) { /* ignore */ }
+    }
+    fit.el = null; fit.prev = null; fit.appliedAt = 0;
+  }
+  function fitVideoBesidePanel() {
+    const v = adapter.video();
+    const open = settings.panelOpen && state.active && isEnabled();
+    if (!open || !adapter.fitVideo || !v || !panelVisibleInFullscreen()) { if (fit.el) restoreFit(); fit.tried = 0; return; }
+    if (!videoOverlapsPanel(v)) { fit.tried = 0; return; } // CSS 규칙이나 이전 적용으로 이미 맞음
+    if (fit.el && now() - fit.appliedAt < 700) return; // 적용 직후: 반영을 기다린다
+    if (now() < fit.cycleAt) return;
+    const cands = fitCandidates(v);
+    if (!cands.length) return;
+    let idx = fit.el ? cands.indexOf(fit.el) + 1 : 0;
+    restoreFit();
+    if (idx >= cands.length) { fit.cycleAt = now() + 4000; return; } // 모두 실패: 잠시 뒤 처음부터
+    const target = cands[idx];
+    fit.el = target;
+    fit.prev = { value: target.style.getPropertyValue('width'), priority: target.style.getPropertyPriority('width') };
+    fit.appliedAt = now();
+    target.style.setProperty('width', 'calc(100vw - ' + panelWidth() + 'px)', 'important');
+  }
+  window.addEventListener('resize', () => { if (fit.el) { restoreFit(); fit.cycleAt = 0; } });
+  // 플레이어 요소만 전체화면이 되면 문서에 붙은 패널은 보이지 않으므로, 그때는 영상을 줄이지 않는다
+  function panelVisibleInFullscreen() { const fs = document.fullscreenElement; return !fs || !ui.panel || fs.contains(ui.panel); }
+  document.addEventListener('fullscreenchange', () => {
+    document.documentElement.classList.toggle('st-fs-hidden', !panelVisibleInFullscreen());
+    if (fit.el) restoreFit();
+    fit.cycleAt = 0;
+    positionOverlay(true);
+  });
   function applySettings() {
     if (!ui.root) return;
     const enabled = isEnabled();
@@ -870,7 +931,10 @@
     ui.toggle.classList.toggle('st-hidden', open || !state.active || !enabled);
     document.documentElement.classList.toggle('st-panel-open', open);
     document.documentElement.style.setProperty('--st-font-scale', String((settings.fontScale || 100) / 100));
-    ui.nativeStyle.textContent = settings.hideNative && state.active && enabled ? (adapter.nativeHideCss || '') : '';
+    ui.nativeStyle.textContent = nativeHideCssNow();
+    syncShadowNativeStyles();
+    if (!open && fit.el) restoreFit();
+    setTimeout(fitVideoBesidePanel, 250);
     ui.shadowSec.value = String(settings.shadowPauseSec);
     syncSettingsForm();
     updateModeUI();
@@ -992,7 +1056,20 @@
       'meta=' + JSON.stringify(state.meta) + ' status=' + state.statusText,
       'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + settings.shadowPauseSec + 's audio=' + settings.audioMode + ' rate=' + state.rate + ' clearance=' + state.clearanceCur,
       'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' clip=' + JSON.stringify(state.clip) + ' capturing=' + !!state.capturing + ' tabId=' + state.tabId,
+      'layout panel=' + !!(settings.panelOpen && state.active) + ' videoRight=' + (v ? Math.round(v.getBoundingClientRect().right) : '-') + '/' + window.innerWidth + ' fit=' + (fit.el ? describeEl(fit.el) : '-') + ' shadowRoots=' + (adapter.deep ? A.deepRoots().length - 1 : 0) + ' nativeHidden=' + nativeHiddenCount() + ' cueEl=' + (adapter.nativeCueSelector ? A.qsaDeep(adapter.nativeCueSelector).map(describeEl).slice(0, 2).join(',') : '-'),
     ].join('\n');
+  }
+
+  function describeEl(e) {
+    if (!e || !e.tagName) return '-';
+    const cls = (typeof e.className === 'string' ? e.className : '').trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.');
+    return e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + (cls ? '.' + cls : '');
+  }
+  function nativeHiddenCount() {
+    const css = adapter.nativeHideCss || '';
+    const sel = css.split('{')[0].trim();
+    if (!sel) return 0;
+    try { return A.qsaDeep(sel).length; } catch (e) { return -1; }
   }
 
   // 목록

@@ -89,6 +89,23 @@ function ensureFixtures() {
       const first = await page.$eval('.st-row .st-en', (e) => e.textContent);
       assert(first === 'Hello there, welcome to the test.', 'first row text: ' + first);
     });
+    await step('패널이 열리면 영상이 패널 왼쪽까지로 줄어든다 (CSS 규칙과 구조 탐색 보조 모두)', async () => {
+      const right = () => page.evaluate(() => ({ right: Math.round(document.querySelector('video').getBoundingClientRect().right), inner: window.innerWidth, inline: document.querySelector('.watch-video').style.width }));
+      let r = await right();
+      assert(r.right <= r.inner - 400 + 1 && r.right > r.inner - 400 - 40, 'css rule: video right ' + JSON.stringify(r));
+      assert(!r.inline, 'css path should not need inline width: ' + r.inline);
+      // 플랫폼 CSS 가 안 먹는 상황(디즈니+ 같은 미지의 DOM)을 흉내: 규칙을 지우면 구조 탐색이 바깥쪽 조상부터 너비를 줄인다
+      await page.evaluate(() => { document.getElementById('st-layout-style').textContent = ''; });
+      await waitFor(async () => { const x = await right(); return x.right > x.inner - 400 + 4; }, 2000, 'overlap after removing css');
+      await waitFor(async () => { const x = await right(); return x.right <= x.inner - 400 + 1; }, 4000, 'structural fit');
+      r = await right();
+      assert(/calc\((100vw - 400px|-400px \+ 100vw)\)/.test(r.inline), 'inline width applied to .watch-video: ' + r.inline);
+      // 패널을 닫으면 원래대로
+      await page.keyboard.press('Backquote');
+      await waitFor(async () => { const x = await right(); return !x.inline && x.right === x.inner; }, 3000, 'restored on panel close');
+      await page.keyboard.press('Backquote');
+      await waitFor(() => page.evaluate(() => document.documentElement.classList.contains('st-panel-open')), 3000, 'panel reopened');
+    });
     await step('한국어 자막 트랙이 영어 줄에 연결된다', async () => {
       const status = await page.$eval('.st-status', (e) => e.textContent);
       assert(/한국어 10줄 연결/.test(status), 'status: ' + status);
@@ -338,8 +355,8 @@ function ensureFixtures() {
       await waitFor(() => yt.$eval('.st-brand', (e) => /Mock Lecture Title/.test(e.textContent) && /Mock Channel/.test(e.textContent)), 8000, 'yt title');
       const placed = await yt.evaluate(() => { const b = document.querySelector('.st-ctl'); return b && b.nextElementSibling.classList.contains('ytp-subtitles-button'); });
       assert(placed, 'control button before CC button');
-      const margin = await yt.evaluate(() => getComputedStyle(document.querySelector('ytd-app')).marginRight);
-      assert(margin === '400px', 'ytd-app margin for panel: ' + margin);
+      const layout = await yt.evaluate(() => ({ margin: getComputedStyle(document.querySelector('ytd-app')).marginRight, top: getComputedStyle(document.getElementById('st-panel')).top, videoRight: Math.round(document.querySelector('video').getBoundingClientRect().right) }));
+      assert(layout.margin === '0px' && layout.top === '56px', 'panel overlays the page below the masthead: ' + JSON.stringify(layout));
     });
     await step('유튜브: D 키 이동과 오버레이', async () => {
       await setTime(yt, 6.3, true);
