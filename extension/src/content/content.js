@@ -144,6 +144,7 @@
       case 'seekTo': cancelModesPending(); playFrom(msg.ms, msg.play === false); sendResponse({ ok: true }); break;
       case 'togglePanel': setPanelOpen(!settings.panelOpen); sendResponse({ ok: true }); break;
       case 'setEnabled': setEnabled(!!msg.enabled); sendResponse({ ok: true }); break;
+      case 'popupOpened': onPopupOpened(); sendResponse({ ok: true, pending: false }); break;
       default: return;
     }
   });
@@ -579,33 +580,7 @@
   }
 
   // ───────────── 오디오 캡처 (별표 저장 시) ─────────────
-  const capture = { frame: null, ready: null, reqId: 0, pending: new Map(), queue: [], busy: false };
-  function ensureCaptureFrame() {
-    if (capture.ready) return capture.ready;
-    capture.ready = new Promise((resolve, reject) => {
-      const frame = el('iframe', { src: chrome.runtime.getURL('capture/capture.html'), allow: 'microphone; autoplay', style: 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;border:0;left:-9999px;top:0' });
-      capture.frame = frame;
-      const timer = setTimeout(() => reject(new Error('캡처 프레임이 응답하지 않습니다')), 8000);
-      window.addEventListener('message', (e) => {
-        if (e.source !== frame.contentWindow || !e.data || e.data.__stcap !== 'res') return;
-        const d = e.data;
-        if (d.ready) { clearTimeout(timer); resolve(frame); return; }
-        const p = capture.pending.get(d.id);
-        if (p) { clearTimeout(p.timer); capture.pending.delete(d.id); p.resolve(d); }
-      });
-      document.documentElement.append(frame);
-    });
-    capture.ready.catch(() => { capture.ready = null; });
-    return capture.ready;
-  }
-  function frameRequest(cmd, payload, timeout) {
-    return ensureCaptureFrame().then((frame) => new Promise((resolve, reject) => {
-      const id = ++capture.reqId;
-      const timer = setTimeout(() => { capture.pending.delete(id); reject(new Error('캡처 응답 시간 초과: ' + cmd)); }, timeout || 15000);
-      capture.pending.set(id, { resolve, timer });
-      frame.contentWindow.postMessage(Object.assign({ __stcap: 'req', id, cmd }, payload || {}), '*');
-    }));
-  }
+  const capture = { queue: [], busy: false, pendingGrant: null };
   function queueCapture(i, item) {
     capture.queue.push({ i, item });
     if (!capture.busy) runCaptureQueue();
@@ -646,7 +621,7 @@
     const mode = settings.audioMode;
     let result;
     if (adapter.name === 'youtube' || !chrome.runtime.getURL) result = await captureViaElement(startV, endV);
-    else result = await captureViaTab(startV, endV);
+    else result = await captureViaTab(startV, endV, item, i);
     if (!result) return;
     if (result.silent) { toast('이 영상의 오디오는 캡처가 차단되어 있습니다(보호된 재생)'); return; }
     const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, storeFormat: result.storeFormat || 'wav', storeMime: result.storeMime || 'audio/wav', storeRate: result.storeRate || 16000, download: result.download, downloadMime: result.downloadMime || 'audio/wav', fileName: fileNameFor(item, result.downloadFormat || 'wav'), durationMs: result.durationMs, leadMs: Number.isFinite(result.leadMs) ? result.leadMs : 250, stats: result.stats || null });
@@ -660,20 +635,31 @@
     }
     if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
   }
-  async function captureViaTab(startV, endV) {
-    const started = await frameRequest('start', { tabId: state.tabId, limitMs: 60000, test: settings.captureTest || undefined }, 15000);
+  // 탭 오디오 캡처: 서비스 워커가 스트림 ID 를 받아 offscreen 문서에서 녹음한다 (탭 안에서 녹음하면 되먹임이 생긴다)
+  async function captureViaTab(startV, endV, item, i) {
+    const started = await bg({ type: 'capture.start', limitMs: 60000, test: settings.captureTest || undefined });
     if (!started || !started.ok) {
       if (started && started.unavailable === 'grant') {
-        toast('오디오 저장 권한: 크롬 툴바의 SubTutor 아이콘을 한 번 누른 뒤(이 탭 허용) 다시 저장해 주세요', 4000);
+        capture.pendingGrant = { i, item };
+        toast('🎙 오디오를 녹음하려면 크롬 오른쪽 위 툴바의 SubTutor 아이콘(퍼즐 조각 안에 있을 수 있음)을 한 번 눌러 주세요. 누르면 바로 녹음이 시작됩니다', 7000);
         return null;
       }
       throw new Error((started && started.error) || '캡처 시작 실패');
     }
     const cap = await playSegmentForCapture(startV, endV);
-    if (cap.reason === 'timeout' && cap.anchors.length < 3) { await frameRequest('stop', {}, 3000).catch(() => {}); throw new Error('재생이 진행되지 않아 녹음을 중단했습니다'); }
-    const res = await frameRequest('finish', { startMs: startV, endMs: endV, anchors: cap.anchors, downloadRate: 0, storeRate: 32000 }, 20000);
+    if (cap.reason === 'timeout' && cap.anchors.length < 3) { await bg({ type: 'capture.stop' }).catch(() => {}); throw new Error('재생이 진행되지 않아 녹음을 중단했습니다'); }
+    const res = await bg({ type: 'capture.finish', startMs: startV, endMs: endV, anchors: cap.anchors, downloadRate: 0, storeRate: 32000 });
     if (!res || !res.ok) throw new Error((res && res.error) || '녹음 마무리 실패');
     return res;
+  }
+  // 팝업이 열리면(= 이 탭에 오디오 캡처가 허용되면) 기다리던 녹음을 바로 이어서 한다
+  function onPopupOpened() {
+    const p = capture.pendingGrant;
+    if (!p) return;
+    capture.pendingGrant = null;
+    if (!state.saved.has(p.item.id)) return;
+    toast('🎙 오디오 녹음을 시작합니다');
+    queueCapture(p.i, p.item);
   }
   async function captureViaElement(startV, endV) {
     const Au = globalThis.SubTutorAudio;

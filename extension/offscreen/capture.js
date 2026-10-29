@@ -1,10 +1,11 @@
 /*
- * SubTutor – 탭 오디오 캡처 프레임
- * 부모(플레이어 페이지의 콘텐츠 스크립트)가 postMessage 로 명령한다.
- *   start {tabId, limitMs}             → 이 탭의 오디오 스트림을 열고 PCM 을 벽시계에 맞춰 모은다 (들리는 소리는 그대로 스피커로 통과)
- *   finish {startMs, endMs, anchors}   → (벽시계ms, 미디어ms) 쌍으로 미디어 구간을 벽시계 구간으로 바꿔 잘라내고 WAV(base64)로 돌려준다
+ * SubTutor – 탭 오디오 캡처 (offscreen 문서)
+ * 서비스 워커가 chrome.runtime 메시지({target:'offscreen', cmd})로 명령한다.
+ *   start {streamId, limitMs, test}    → 탭 오디오 스트림을 열고 PCM 을 벽시계에 맞춰 모은다. 들리는 소리는 이 문서의 스피커 출력으로 통과시킨다
+ *   finish {startMs, endMs, anchors}   → (벽시계ms, 미디어ms) 쌍으로 미디어 구간을 벽시계 구간으로 바꿔 잘라내고 MP3(base64)로 돌려준다
  *   stop                                → 캡처 종료
- * 스트림 ID 는 요청한 컨텍스트(이 프레임)에서만 쓸 수 있어 여기서 getMediaStreamId 와 getUserMedia 를 함께 한다.
+ * 왜 offscreen 인가: 캡처한 소리를 캡처되는 탭 안(iframe)에서 다시 틀면 그 출력이 다시 캡처되어 되먹임(짧은 구간이 반복·증폭)이 생긴다.
+ * 이 문서는 탭 바깥이라 안전하게 들려줄 수 있다.
  */
 (() => {
   'use strict';
@@ -12,9 +13,6 @@
   const PAD_MS = 250;
   let session = null;
   const nowWall = () => performance.timeOrigin + performance.now();
-  const parentOrigin = (() => { try { return new URL(document.referrer).origin; } catch (e) { return ''; } })();
-
-  function post(msg) { try { window.parent.postMessage(Object.assign({ __stcap: 'res' }, msg), parentOrigin || '*'); } catch (e) { /* ignore */ } }
 
   function stop(cur) {
     if (!cur) return;
@@ -55,6 +53,7 @@
     if (sampleRate !== cur.sampleRate) return;
     const startFrame = placeFrames(cur, samples.length, sampleRate, timestampUs);
     cur.chunks.push({ startFrame, samples });
+    cur.lastChunkWall = nowWall();
     if (cur.waiter && recordedUntil(cur) >= cur.waiter.untilMs) cur.waiter.resolve();
   }
   // AudioData 한 조각을 모노 Float32 로. f32-planar 변환 복사를 먼저 시도하고, 안 되면 원래 포맷(f32/s16/s32/u8, 평면/교차)으로 읽는다
@@ -115,30 +114,17 @@
     return dest.stream;
   }
 
-  async function start({ tabId, limitMs, test }) {
+  async function start({ streamId, limitMs, test }) {
     if (session) stop(session);
-    const cur = { stream: null, reader: null, ctx: null, source: null, processor: null, chunks: [], sampleRate: 0, originMs: null, tsBaseUs: NaN, nextFrame: 0, timer: null, waiter: null, stats: { chunks: 0, frames: 0, gaps: 0, gapFrames: 0, errors: 0, format: '', source: test === 'sweep' ? 'sweep' : 'tab' } };
+    const cur = { stream: null, reader: null, ctx: null, source: null, processor: null, chunks: [], sampleRate: 0, originMs: null, tsBaseUs: NaN, nextFrame: 0, lastChunkWall: 0, timer: null, waiter: null, stats: { chunks: 0, frames: 0, gaps: 0, gapFrames: 0, errors: 0, format: '', source: test === 'sweep' ? 'sweep' : 'tab' } };
     session = cur;
     try {
       if (test === 'sweep') {
         cur.stream = sweepStream(cur);
       } else {
-        let streamId;
-        try {
-          streamId = await new Promise((resolve, reject) => {
-            const opts = Number.isInteger(tabId) ? { targetTabId: tabId } : {};
-            chrome.tabCapture.getMediaStreamId(opts, (id) => {
-              const err = chrome.runtime.lastError;
-              if (err || !id) reject(new Error(err ? err.message : 'no stream id')); else resolve(id);
-            });
-          });
-        } catch (err) {
-          stop(cur);
-          if (/not been invoked|activeTab|invoked/i.test(err.message || '')) return { ok: false, unavailable: 'grant', error: err.message };
-          throw err;
-        }
+        if (!streamId) throw new Error('탭 오디오 스트림 ID 가 없습니다');
         cur.stream = await navigator.mediaDevices.getUserMedia({ audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } }, video: false });
-        // 캡처 중에도 소리가 계속 들리도록 스피커로 통과시킨다
+        // 탭이 캡처되는 동안 크롬은 탭의 소리를 내지 않으므로, 여기(탭 바깥)서 스피커로 통과시킨다 — 되먹임 없음
         try {
           cur.ctx = new AudioContext();
           cur.source = cur.ctx.createMediaStreamSource(cur.stream);
@@ -192,7 +178,15 @@
       stop(cur);
     }
     if (offset === null) throw new Error('플레이어가 재생되지 않아 녹음하지 못했습니다');
-    const stats = Object.assign({}, cur.stats, { sampleRate: cur.sampleRate, recordedMs: Math.round((cur.nextFrame * 1000) / (cur.sampleRate || 1)) });
+    // 조각이 도착한 벽시계로 실제 샘플레이트를 재서, 스트림이 알려 준 값과 3% 넘게 다르면(예: 44.1kHz 데이터가 48kHz 로 표시) 그 값을 쓴다
+    const wallSpan = cur.lastChunkWall && cur.originMs !== null ? (cur.lastChunkWall - cur.originMs) / 1000 : 0;
+    const effRate = wallSpan > 0.8 ? Math.round(cur.nextFrame / wallSpan) : 0;
+    const standard = [8000, 16000, 22050, 24000, 32000, 44100, 48000, 96000];
+    if (effRate && Math.abs(effRate - cur.sampleRate) / cur.sampleRate > 0.03) {
+      const near = standard.reduce((a, b) => (Math.abs(b - effRate) < Math.abs(a - effRate) ? b : a), standard[0]);
+      if (Math.abs(near - effRate) / near < 0.02) { cur.stats.claimedRate = cur.sampleRate; cur.sampleRate = near; }
+    }
+    const stats = Object.assign({}, cur.stats, { sampleRate: cur.sampleRate, effRate, recordedMs: Math.round((cur.nextFrame * 1000) / (cur.sampleRate || 1)) });
     const describe = () => ' (녹음 ' + stats.recordedMs + 'ms, 조각 ' + stats.chunks + ', 오류 ' + stats.errors + (stats.lastError ? ': ' + stats.lastError : '') + (stats.readError ? ', 읽기 중단: ' + stats.readError : '') + ')';
     if (stats.recordedMs < 200) throw new Error('녹음된 오디오가 너무 짧습니다' + describe());
     const samples = A.clipSamples(cur.chunks, { originMs: cur.originMs, sampleRate: cur.sampleRate, startMs: startMs - PAD_MS + offset, endMs: endMs + PAD_MS + offset });
@@ -213,15 +207,14 @@
     return out;
   }
 
-  window.addEventListener('message', (e) => {
-    if (e.source !== window.parent || !e.data || e.data.__stcap !== 'req') return;
-    if (parentOrigin && e.origin !== parentOrigin) return;
-    const d = e.data;
-    const run = (p) => p.then((r) => post(Object.assign({ id: d.id }, r)), (err) => post({ id: d.id, ok: false, error: String((err && err.message) || err) }));
-    if (d.cmd === 'start') run(start(d));
-    else if (d.cmd === 'finish') run(finish(d));
-    else if (d.cmd === 'stop') { stop(session); post({ id: d.id, ok: true }); }
-    else if (d.cmd === 'ping') post({ id: d.id, ok: true });
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (!msg || msg.target !== 'offscreen') return false;
+    const run = (p) => p.then((r) => sendResponse(r), (err) => sendResponse({ ok: false, error: String((err && err.message) || err) }));
+    if (msg.cmd === 'start') run(start(msg));
+    else if (msg.cmd === 'finish') run(finish(msg));
+    else if (msg.cmd === 'stop') { stop(session); sendResponse({ ok: true }); }
+    else if (msg.cmd === 'ping') sendResponse({ ok: true, recording: !!session });
+    else return false;
+    return true;
   });
-  post({ ready: true });
 })();

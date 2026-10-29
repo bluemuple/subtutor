@@ -307,6 +307,50 @@ async function removeAudio(ids) {
   if (keys.length) await chrome.storage.local.remove(keys);
 }
 
+// ───────── 탭 오디오 캡처 (offscreen 문서 중계) ─────────
+let offscreenCreating = null;
+async function ensureOffscreen() {
+  if (!chrome.offscreen) throw new Error('이 크롬은 offscreen 문서를 지원하지 않습니다 (크롬 109 이상 필요)');
+  const url = chrome.runtime.getURL('offscreen/capture.html');
+  let has = false;
+  try { has = typeof chrome.offscreen.hasDocument === 'function' ? await chrome.offscreen.hasDocument() : false; } catch (e) { has = false; }
+  if (has) return;
+  if (!offscreenCreating) {
+    offscreenCreating = chrome.offscreen.createDocument({ url, reasons: ['USER_MEDIA', 'AUDIO_PLAYBACK'], justification: '탭 오디오를 녹음해 저장한 대사의 구간을 MP3 로 만들고, 녹음 중에도 소리가 들리도록 재생합니다' })
+      .catch((e) => { if (!/single offscreen|already exists|only a single/i.test(String(e && e.message || e))) throw e; })
+      .finally(() => { offscreenCreating = null; });
+  }
+  await offscreenCreating;
+}
+async function offscreenCall(msg, tries) {
+  await ensureOffscreen();
+  let lastErr = null;
+  for (let i = 0; i < (tries || 6); i++) {
+    try {
+      const r = await chrome.runtime.sendMessage(Object.assign({ target: 'offscreen' }, msg));
+      if (r !== undefined) return r;
+      lastErr = new Error('offscreen 문서가 응답하지 않습니다');
+    } catch (e) { lastErr = e; }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw lastErr || new Error('offscreen 호출 실패');
+}
+async function captureStart(msg, tabId) {
+  let streamId = null;
+  if (msg.test !== 'sweep') {
+    if (!Number.isInteger(tabId)) throw new Error('플레이어 탭을 알 수 없습니다');
+    try {
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      if (/not been invoked|activeTab|invoked|permission/i.test(m)) return { ok: false, unavailable: 'grant', error: m };
+      throw e;
+    }
+    if (!streamId) return { ok: false, unavailable: 'grant', error: 'no stream id' };
+  }
+  return offscreenCall({ cmd: 'start', streamId, limitMs: msg.limitMs, test: msg.test });
+}
+
 // ───────── 메시지 처리 ─────────
 function updateItem(items, id, patch) {
   const it = items.find((i) => i.id === id);
@@ -327,6 +371,9 @@ async function handleMessage(msg, sender) {
       return { ok: true, tabId };
     }
     case 'audio.save': return saveAudio(msg);
+    case 'capture.start': return captureStart(msg, tabId);
+    case 'capture.finish': return offscreenCall({ cmd: 'finish', startMs: msg.startMs, endMs: msg.endMs, anchors: msg.anchors, downloadRate: msg.downloadRate, storeRate: msg.storeRate }, 2);
+    case 'capture.stop': return offscreenCall({ cmd: 'stop' }, 2);
     case 'audio.get': return getAudio(msg.id);
     case 'player.event': {
       const clip = await currentClip();

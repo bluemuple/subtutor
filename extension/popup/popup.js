@@ -60,6 +60,8 @@ async function init() {
       render();
       const names = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+', youtube: '유튜브' };
       $('status').textContent = (names[res.platform] || res.platform) + (res.videoId ? ' · ' + (res.title || res.videoId) + ' · 자막 ' + res.cues + '줄' : ' · 재생 화면이 아닙니다');
+      if (res.videoId && res.platform !== 'youtube') $('audioHint').textContent = '✓ 이 탭의 오디오 녹음이 허용되었습니다 (팝업을 연 뒤에는 별표 저장 시 바로 녹음합니다). 녹음하는 동안 대사를 한 번 다시 재생합니다.';
+      chrome.tabs.sendMessage(tab.id, { type: 'popupOpened' }).catch(() => {});
     } else {
       $('status').textContent = '이 탭에서는 실행 중이 아닙니다 (넷플릭스 재생 화면에서 열어 보세요)';
     }
