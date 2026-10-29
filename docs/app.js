@@ -117,11 +117,12 @@
     if (audioCache.has(itemId)) return audioCache.get(itemId);
     try {
       const r = await B.request('audio.get', { itemId }, 20000);
-      if (r && r.wav) {
-        const bin = atob(r.wav);
+      const b64 = r && (r.data || r.wav);
+      if (b64) {
+        const bin = atob(b64);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        const blob = new Blob([bytes], { type: 'audio/wav' });
+        const blob = new Blob([bytes], { type: (r && r.mime) || 'audio/wav' });
         audioCache.set(itemId, blob);
         return blob;
       }

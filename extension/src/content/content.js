@@ -605,11 +605,11 @@
     }
     capture.busy = false;
   }
-  function fileNameFor(item) {
+  function fileNameFor(item, ext) {
     const Au = globalThis.SubTutorAudio;
     const safe = (s, n) => (Au ? Au.safeFileName(s, n) : String(s).replace(/[\\/:*?"<>|]/g, ' ').slice(0, n));
     const clock = Au ? Au.fmtClock(item.startMs) : String(Math.floor(item.startMs / 1000));
-    return 'SubTutor/' + safe(item.title + (item.episode ? ' ' + item.episode : ''), 60) + '/' + clock + ' ' + safe(item.text.replace(/\n/g, ' '), 60) + '.wav';
+    return 'SubTutor/' + safe(item.title + (item.episode ? ' ' + item.episode : ''), 60) + '/' + clock + ' ' + safe(item.text.replace(/\n/g, ' '), 60) + '.' + (ext || 'mp3');
   }
   // 대사 구간을 재생하면서 (벽시계, 영상시간) 쌍을 모은다. 끝나면 resolve.
   function playSegmentForCapture(startV, endV) {
@@ -636,8 +636,9 @@
     else result = await captureViaTab(startV, endV);
     if (!result) return;
     if (result.silent) { toast('이 영상의 오디오는 캡처가 차단되어 있습니다(보호된 재생)'); return; }
-    const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, download: result.download, fileName: fileNameFor(item), durationMs: result.durationMs });
-    toast(mode === 'download' ? '🔊 오디오 파일 저장: ' + (r && r.fileName || '다운로드 폴더/SubTutor') : (mode === 'both' ? '🔊 오디오 저장 (파일 + 웹 퀴즈용)' : '🔊 오디오를 웹 퀴즈용으로 보관했습니다'));
+    const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, storeFormat: result.storeFormat || 'wav', storeMime: result.storeMime || 'audio/wav', storeRate: result.storeRate || 16000, download: result.download, downloadMime: result.downloadMime || 'audio/wav', fileName: fileNameFor(item, result.downloadFormat || 'wav'), durationMs: result.durationMs });
+    const fmt = (result.downloadFormat || 'wav').toUpperCase();
+    toast(mode === 'download' ? '🔊 ' + fmt + ' 파일 저장: ' + ((r && r.fileName) || '다운로드 폴더/SubTutor') : (mode === 'both' ? '🔊 오디오 저장 (' + fmt + ' 파일 + 웹 퀴즈용)' : '🔊 오디오를 웹 퀴즈용으로 보관했습니다'), 2500);
     if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
   }
   async function captureViaTab(startV, endV) {
@@ -690,7 +691,9 @@
     if (!samples) throw new Error('대사 구간이 녹음되지 않았습니다');
     if (Au.isSilent(samples)) return { silent: true };
     const norm = Au.normalize(samples, 0.95);
-    return { ok: true, durationMs: Math.round((samples.length * 1000) / rate), download: Au.bytesToBase64(Au.encodeMonoWav(norm, rate)), store: Au.bytesToBase64(Au.encodeMonoWav(Au.resample(norm, rate, 16000), 16000)) };
+    const dl = Au.encodeClip(norm, rate, { kbps: 128 });
+    const st = Au.encodeClip(norm, rate, { rate: 32000, kbps: 64 });
+    return { ok: true, durationMs: Math.round((samples.length * 1000) / rate), download: Au.bytesToBase64(dl.bytes), downloadFormat: dl.format, downloadMime: dl.mime, store: Au.bytesToBase64(st.bytes), storeFormat: st.format, storeMime: st.mime, storeRate: st.rate };
   }
 
   // ───────────── 제목 ─────────────

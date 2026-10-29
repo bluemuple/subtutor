@@ -86,6 +86,47 @@
     }
     return new Uint8Array(buf);
   }
+  function floatToInt16(samples) {
+    const out = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) { const s = Math.max(-1, Math.min(1, samples[i])); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+    return out;
+  }
+  function lame() {
+    if (typeof globalThis.lamejs === 'function' && globalThis.lamejs.Mp3Encoder) return globalThis.lamejs;
+    if (typeof require === 'function') { try { return require('../../vendor/lamejs/lame.min.js'); } catch (e) { /* ignore */ } }
+    return null;
+  }
+  const hasMp3 = () => !!lame();
+  /** 모노 MP3 (lamejs). sampleRate 는 8k~48k, kbps 32~320 */
+  function encodeMonoMp3(samples, sampleRate, kbps) {
+    const L = lame();
+    if (!L) throw new Error('MP3 인코더(lamejs)를 불러오지 못했습니다');
+    const enc = new L.Mp3Encoder(1, sampleRate, kbps || 128);
+    const pcm = floatToInt16(samples);
+    const parts = [];
+    let total = 0;
+    const BLOCK = 1152;
+    for (let i = 0; i < pcm.length; i += BLOCK) {
+      const b = enc.encodeBuffer(pcm.subarray(i, i + BLOCK));
+      if (b.length) { parts.push(new Uint8Array(b.buffer, b.byteOffset, b.length)); total += b.length; }
+    }
+    const end = enc.flush();
+    if (end.length) { parts.push(new Uint8Array(end.buffer, end.byteOffset, end.length)); total += end.length; }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) { out.set(p, off); off += p.length; }
+    return out;
+  }
+  /** 클립 인코딩: 가능하면 MP3, 아니면 WAV. 반환 {bytes, format, mime, rate} */
+  function encodeClip(samples, sampleRate, opts) {
+    const o = opts || {};
+    const targetRate = o.rate && o.rate !== sampleRate ? o.rate : sampleRate;
+    const pcm = targetRate === sampleRate ? samples : resample(samples, sampleRate, targetRate);
+    if (o.format !== 'wav' && hasMp3()) {
+      try { return { bytes: encodeMonoMp3(pcm, targetRate, o.kbps || 128), format: 'mp3', mime: 'audio/mpeg', rate: targetRate }; } catch (e) { /* WAV 로 */ }
+    }
+    return { bytes: encodeMonoWav(pcm, targetRate), format: 'wav', mime: 'audio/wav', rate: targetRate };
+  }
   function parseWavHeader(bytes) {
     const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     if (bytes.length < 44) return null;
@@ -118,5 +159,5 @@
     return (h ? String(h).padStart(2, '0') + '-' : '') + String(m).padStart(2, '0') + '-' + String(sec).padStart(2, '0');
   }
 
-  return { mediaClockOffset, clipSamples, isSilent, resample, normalize, encodeMonoWav, parseWavHeader, bytesToBase64, base64ToBytes, safeFileName, fmtClock };
+  return { mediaClockOffset, clipSamples, isSilent, resample, normalize, encodeMonoWav, encodeMonoMp3, encodeClip, hasMp3, floatToInt16, parseWavHeader, bytesToBase64, base64ToBytes, safeFileName, fmtClock };
 });

@@ -4,7 +4,7 @@
   "private": true,
   "description": "넷플릭스·프라임 비디오·디즈니+ 자막으로 영어 공부하는 크롬 확장 프로그램 + 웹",
   "scripts": {
-    "test": "node --test tests/subtitles.test.js",
+    "test": "node --test tests/subtitles.test.js tests/audio.test.js",
     "sync-lib": "cp extension/src/lib/subtitles.js docs/subtitles.js",
     "e2e": "node tests/e2e/run.js"
   },

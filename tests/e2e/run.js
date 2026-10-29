@@ -305,16 +305,16 @@ function ensureFixtures() {
         throw new Error(e.message + ' toast=' + toastText);
       });
       const buf = Buffer.from(wavB64, 'base64');
-      assert(buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WAVE', 'wav header');
-      const rate = buf.readUInt32LE(24); const dataBytes = buf.readUInt32LE(40);
-      assert(rate === 16000, 'rate ' + rate);
-      const durMs = (dataBytes / 2 / rate) * 1000;
-      assert(durMs > 1800 && durMs < 3600, 'clip duration ' + durMs);
-      let nonZero = 0; for (let i = 44; i < buf.length; i += 2) if (buf.readInt16LE(i) !== 0) nonZero++;
-      assert(nonZero > 1000, 'audio should not be silent: ' + nonZero);
+      assert(buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0, 'mp3 sync bytes: ' + buf.slice(0, 4).toString('hex'));
+      const file = path.join(TMP, 'e2e-clip.mp3');
+      fs.writeFileSync(file, buf);
+      const probe = require('child_process').execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_name,sample_rate,channels', '-of', 'default=nw=1', file]).toString();
+      assert(/codec_name=mp3/.test(probe) && /sample_rate=32000/.test(probe) && /channels=1/.test(probe), 'ffprobe: ' + probe.replace(/\s+/g, ' '));
+      const durMs = parseFloat(/duration=([\d.]+)/.exec(probe)[1]) * 1000;
+      assert(durMs > 1800 && durMs < 3700, 'clip duration ' + durMs);
       const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
       const it = items.find((i) => i.platform === 'youtube');
-      assert(it && it.audio && it.audio.rate === 16000, 'item audio meta: ' + JSON.stringify(it && it.audio));
+      assert(it && it.audio && it.audio.format === 'mp3' && it.audio.rate === 32000, 'item audio meta: ' + JSON.stringify(it && it.audio));
       await yt.evaluate(() => document.querySelector('video').pause());
     });
 

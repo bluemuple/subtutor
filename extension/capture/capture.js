@@ -149,10 +149,11 @@
     if (A.isSilent(samples)) return { ok: true, silent: true };
     const norm = A.normalize(samples, 0.95);
     const out = { ok: true, silent: false, sampleRate: cur.sampleRate, durationMs: Math.round((samples.length * 1000) / cur.sampleRate) };
-    const dlRate = downloadRate || cur.sampleRate;
-    out.download = A.bytesToBase64(A.encodeMonoWav(dlRate === cur.sampleRate ? norm : A.resample(norm, cur.sampleRate, dlRate), dlRate));
-    const sRate = storeRate || 16000;
-    out.store = A.bytesToBase64(A.encodeMonoWav(A.resample(norm, cur.sampleRate, sRate), sRate));
+    // 다운로드: 원본 샘플레이트 모노 128kbps MP3 / 보관: 32kHz 모노 64kbps MP3 (MP3 인코더가 없으면 WAV)
+    const dl = A.encodeClip(norm, cur.sampleRate, { rate: downloadRate || 0, kbps: 128 });
+    const st = A.encodeClip(norm, cur.sampleRate, { rate: storeRate || 32000, kbps: 64 });
+    out.download = A.bytesToBase64(dl.bytes); out.downloadFormat = dl.format; out.downloadMime = dl.mime;
+    out.store = A.bytesToBase64(st.bytes); out.storeFormat = st.format; out.storeMime = st.mime; out.storeRate = st.rate;
     return out;
   }
 

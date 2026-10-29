@@ -243,19 +243,27 @@ async function saveAudio(msg) {
   const mode = msg.mode || 'store';
   if ((mode === 'store' || mode === 'both') && msg.store) {
     await chrome.storage.local.set({ [audioKey(msg.id)]: msg.store });
-    await withItems((items) => updateItem(items, msg.id, { audio: { rate: 16000, ms: msg.durationMs || 0, savedAt: Date.now() } }));
+    await withItems((items) => updateItem(items, msg.id, { audio: { format: msg.storeFormat || 'wav', mime: msg.storeMime || 'audio/wav', rate: msg.storeRate || 16000, ms: msg.durationMs || 0, savedAt: Date.now() } }));
     out.stored = true;
   }
   if ((mode === 'download' || mode === 'both') && msg.download) {
-    const fileName = String(msg.fileName || 'SubTutor/clip.wav').replace(/^\/+/, '');
+    const fileName = String(msg.fileName || 'SubTutor/clip.mp3').replace(/^\/+/, '');
     try {
-      out.downloadId = await chrome.downloads.download({ url: 'data:audio/wav;base64,' + msg.download, filename: fileName, conflictAction: 'uniquify', saveAs: false });
+      out.downloadId = await chrome.downloads.download({ url: 'data:' + (msg.downloadMime || 'audio/wav') + ';base64,' + msg.download, filename: fileName, conflictAction: 'uniquify', saveAs: false });
       out.fileName = fileName;
     } catch (e) {
       throw new Error('파일 다운로드 실패: ' + ((e && e.message) || e));
     }
   }
   return out;
+}
+async function getAudio(id) {
+  const r = await chrome.storage.local.get(audioKey(id));
+  const data = r[audioKey(id)] || null;
+  if (!data) return { data: null, mime: null };
+  const item = (await getItems()).find((i) => i.id === id);
+  const mime = (item && item.audio && item.audio.mime) || (data.startsWith('UklGR') ? 'audio/wav' : 'audio/mpeg'); // 'UklGR' = base64("RIFF")
+  return { data, mime, wav: mime === 'audio/wav' ? data : null };
 }
 async function removeAudio(ids) {
   const keys = ids.map(audioKey);
@@ -282,7 +290,7 @@ async function handleMessage(msg, sender) {
       return { ok: true, tabId };
     }
     case 'audio.save': return saveAudio(msg);
-    case 'audio.get': { const r = await chrome.storage.local.get(audioKey(msg.id)); return { wav: r[audioKey(msg.id)] || null }; }
+    case 'audio.get': return getAudio(msg.id);
     case 'player.event': {
       const clip = await currentClip();
       if (!clip || clip.clipId !== msg.clipId) return { ok: false };
@@ -327,7 +335,7 @@ async function handleMessage(msg, sender) {
     case 'web.items.update': return withItems((items) => updateItem(items, p.id, p.patch));
     case 'web.items.remove': await removeAudio([p.id]); return withItems((items) => ({ write: true, items: items.filter((i) => i.id !== p.id), result: { ok: true } }));
     case 'web.items.clear': { const ids = (await getItems()).map((i) => i.id); await removeAudio(ids); return withItems(() => ({ write: true, items: [], result: { ok: true } })); }
-    case 'web.audio.get': { const r = await chrome.storage.local.get(audioKey(p.itemId)); return { wav: r[audioKey(p.itemId)] || null }; }
+    case 'web.audio.get': return getAudio(p.itemId);
     case 'web.audio.remove': { await removeAudio([p.itemId]); return withItems((items) => updateItem(items, p.itemId, { audio: null })); }
     case 'web.setEnabled': {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
