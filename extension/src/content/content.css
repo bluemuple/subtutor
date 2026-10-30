@@ -139,3 +139,17 @@ u.st-kiwi { text-decoration: underline dotted #fbbf24; text-underline-offset: 3p
 .st-vocab-row { padding: 6px 0; border-bottom: 1px solid #222; }
 .st-vocab-meta { color: #8b8b9a; font-size: 11.5px; }
 .st-vocab-ex { color: #9a9aa8; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 구석 상태 아이콘 (저장·녹음 알림) — 영상 오른쪽 위, 화면을 가리지 않게 작게 */
+.st-chip { position: fixed; left: 0; top: 0; transform: translateX(-100%); width: 26px; height: 26px; border-radius: 50%; background: rgba(12,12,14,.72); color: #fff; display: flex; align-items: center; justify-content: center; font: 700 14px/1 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; z-index: 2147482500; opacity: 0; pointer-events: none; transition: opacity .25s; box-shadow: 0 1px 4px rgba(0,0,0,.45); }
+.st-chip.show { opacity: 1; pointer-events: auto; }
+.st-chip-saved { color: #fde047; }
+.st-chip-unsaved { color: #d0d0d8; }
+.st-chip-missed { color: #fbbf24; }
+.st-chip-audio { color: #34d399; }
+.st-chip-rec { color: #f87171; animation: st-chip-pulse 1s ease-in-out infinite; }
+.st-chip-wait { color: #f87171; }
+.st-chip-wait.show { opacity: .65; }
+.st-chip-info { color: #c7c7d1; font-family: Georgia, 'Times New Roman', serif; font-style: italic; }
+.st-chip-error { color: #f87171; }
+@keyframes st-chip-pulse { 50% { box-shadow: 0 0 0 5px rgba(248,113,113,.25); } }

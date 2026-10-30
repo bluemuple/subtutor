@@ -421,13 +421,26 @@ async function captureStart(msg, tabId) {
       streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
     } catch (e) {
       const m = String((e && e.message) || e);
-      if (/not been invoked|activeTab|invoked|permission/i.test(m)) return { ok: false, unavailable: 'grant', error: m };
+      if (/not been invoked|activeTab|invoked|permission/i.test(m)) return { ok: false, unavailable: 'grant', error: m, shortcut: await saveShortcut() };
       throw e;
     }
-    if (!streamId) return { ok: false, unavailable: 'grant', error: 'no stream id' };
+    if (!streamId) return { ok: false, unavailable: 'grant', error: 'no stream id', shortcut: await saveShortcut() };
   }
   return offscreenCall({ cmd: 'start', streamId, limitMs: msg.limitMs, test: msg.test });
 }
+// ───────── 호출(단축키·우클릭 메뉴) ─────────
+// 탭 오디오 캡처는 사용자가 이 탭에서 확장 프로그램을 '호출'해야 허용된다(activeTab, 크롬 규칙). 팝업(아이콘) 말고도 크롬 명령 단축키와 우클릭 메뉴가 같은 효과를 낸다
+async function saveShortcut() {
+  try { const c = (await chrome.commands.getAll()).find((x) => x.name === 'save-cue'); return (c && c.shortcut) || ''; } catch (e) { return ''; }
+}
+async function invokeOnTab(tab, source) {
+  if (!tab || !Number.isInteger(tab.id)) return { ok: false, error: '탭 없음' };
+  const shortcut = await saveShortcut();
+  try { return await chrome.tabs.sendMessage(tab.id, { type: 'invoke', source: source || 'command', shortcut }); } catch (e) { return { ok: false, error: '이 탭에서는 SubTutor가 실행 중이 아닙니다' }; }
+}
+globalThis.__subtutorInvoke = invokeOnTab; // 테스트용
+if (chrome.commands) chrome.commands.onCommand.addListener((command, tab) => { if (command === 'save-cue') invokeOnTab(tab, 'command'); });
+if (chrome.contextMenus) chrome.contextMenus.onClicked.addListener((info, tab) => { if (info.menuItemId === 'st-save-cue') invokeOnTab(tab, 'menu'); });
 
 // ───────── 메시지 처리 ─────────
 function updateItem(items, id, patch) {
@@ -596,4 +609,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 chrome.runtime.onInstalled.addListener(async () => {
   const { settings } = await chrome.storage.local.get('settings');
   if (!settings) await chrome.storage.local.set({ settings: DEFAULT_SETTINGS });
+  // 재생 화면 우클릭 메뉴: 아이콘을 누르지 않고도 저장 + 이 탭의 녹음 허용
+  if (chrome.contextMenus) {
+    chrome.contextMenus.removeAll(() => {
+      void chrome.runtime.lastError;
+      chrome.contextMenus.create({ id: 'st-save-cue', title: 'SubTutor: 지금 자막 저장 (오디오 녹음 허용)', contexts: ['page', 'video', 'frame'], documentUrlPatterns: Object.values(PLATFORM_URL_PATTERNS).flat() }, () => void chrome.runtime.lastError);
+    });
+  }
 });

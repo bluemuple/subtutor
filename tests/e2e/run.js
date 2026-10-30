@@ -283,10 +283,34 @@ function ensureFixtures() {
       await waitFor(() => page.$$eval('.st-row.saved', (r) => r.length === 1), 4000, 'saved row');
       const star = await page.$eval('.st-row.saved .st-star', (e) => e.textContent);
       assert(star === '★', 'star glyph');
+      // 저장 알림은 토스트가 아니라 영상 오른쪽 위의 작은 아이콘으로만
+      const chipInfo = await waitFor(() => page.evaluate(() => { const c = document.querySelector('.st-chip'); if (!c || !c.classList.contains('show')) return null; const r = c.getBoundingClientRect(), v = document.querySelector('video').getBoundingClientRect(); return { cls: c.className, text: c.textContent, title: c.title, w: r.width, right: Math.round(v.right - r.right), top: Math.round(r.top - v.top) }; }), 3000, 'corner chip');
+      assert(/st-chip-saved/.test(chipInfo.cls) && chipInfo.text === '★' && /저장했습니다/.test(chipInfo.title) && chipInfo.w <= 30 && chipInfo.right >= 8 && chipInfo.right <= 30 && chipInfo.top >= 8 && chipInfo.top <= 30, 'small ★ chip at the video top-right: ' + JSON.stringify(chipInfo));
+      assert(!(await page.evaluate(() => { const t = document.querySelector('.st-toast'); return t && t.classList.contains('show') && /저장/.test(t.textContent); })), 'no save toast over the video');
       const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
       assert(items && items.length === 1 && items[0].text.includes('frisbee'), 'storage items: ' + JSON.stringify(items));
       assert(items[0].translation.includes('프리스비'), 'translation saved: ' + items[0].translation);
       assert(items[0].title === 'Mock Show' && items[0].episode === 'S1:E2 The Test', 'title/episode: ' + items[0].title + '/' + items[0].episode);
+      await page.evaluate(() => document.querySelector('video').pause());
+    });
+    await step('크롬 명령(Alt+E)·우클릭 메뉴 호출: 아이콘 없이 지금 자막을 저장하고, 이미 저장된 줄이면 중복 없이 표시한다', async () => {
+      const tabId = await sw.evaluate(async () => (await chrome.tabs.query({ url: 'https://www.netflix.com/*' }))[0].id);
+      // 이미 저장된 줄(frisbee)에서 호출 → 중복 저장 없이 '이미 저장' 아이콘
+      let r = await sw.evaluate((id) => globalThis.__subtutorInvoke({ id }, 'command'), tabId);
+      assert(r && r.ok && r.did === 'already', 'invoke on a saved line: ' + JSON.stringify(r));
+      await waitFor(() => page.evaluate(() => { const c = document.querySelector('.st-chip'); return c.classList.contains('show') && c.classList.contains('st-chip-saved') && /이미 저장/.test(c.title); }), 3000, 'already-saved chip');
+      assert((await sw.evaluate(async () => (await chrome.storage.local.get('items')).items.length)) === 1, 'no duplicate item');
+      // 다른 줄로 옮겨 우클릭 메뉴로 호출 → 그 줄이 저장된다
+      await setTime(page, 26.4, true);
+      await sleep(400);
+      r = await sw.evaluate((id) => globalThis.__subtutorInvoke({ id }, 'menu'), tabId);
+      assert(r && r.ok && r.did === 'save', 'invoke saves the shown line: ' + JSON.stringify(r));
+      const it = await waitFor(async () => { const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); return (items || []).find((i) => i.id === 'netflix:12345:26000') || null; }, 5000, 'saved via invoke');
+      assert(it.text && it.text.length > 3, 'saved item text: ' + it.text);
+      await waitFor(() => page.$$eval('.st-row.saved', (r) => r.length === 2), 3000, 'two saved rows');
+      // 정리: 호출로 저장한 줄은 지운다
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'items.remove', id: 'netflix:12345:26000' }, {}));
+      await waitFor(() => page.$$eval('.st-row.saved', (r) => r.length === 1), 5000, 'cleanup');
       await page.evaluate(() => document.querySelector('video').pause());
     });
     await step('패널에서 줄을 누르면 그 위치로 이동하고 별표를 누르면 저장된다', async () => {
@@ -539,8 +563,9 @@ function ensureFixtures() {
       assert(files[0].size === buf.length, 'web copy is byte-identical to the file: ' + files[0].size + ' vs ' + buf.length);
       const dls = await sw.evaluate(() => new Promise((r) => chrome.downloads.search({}, r)));
       assert(dls.length === 0, 'no chrome download when folder works: ' + dls.length);
-      const toastText = await yt.$eval('.st-toast', (t) => t.textContent).catch(() => '');
-      assert(/e2e-docs\/SubTutor/.test(toastText), 'toast names folder: ' + toastText);
+      const chipTitle = await yt.$eval('.st-chip', (c) => c.className + '|' + c.textContent + '|' + c.title).catch(() => '');
+      assert(/st-chip-audio/.test(chipTitle) && /\|♪\|/.test(chipTitle) && /e2e-docs\/SubTutor/.test(chipTitle) && /웹에서도 바로 재생/.test(chipTitle), 'corner ♪ chip names the folder (no toast): ' + chipTitle);
+      assert(!(await yt.evaluate(() => { const t = document.querySelector('.st-toast'); return t && t.classList.contains('show'); })), 'no toast after saving the MP3');
     });
 
     console.log('▶ 웹사이트');

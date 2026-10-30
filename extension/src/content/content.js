@@ -159,6 +159,7 @@
       case 'togglePanel': setPanelOpen(!settings.panelOpen); sendResponse({ ok: true }); break;
       case 'setEnabled': setEnabled(!!msg.enabled); sendResponse({ ok: true }); break;
       case 'popupOpened': onPopupOpened(); sendResponse({ ok: true, pending: false }); break;
+      case 'invoke': sendResponse(onInvoke(msg)); break;
       default: return;
     }
   });
@@ -566,13 +567,13 @@
         state.saved.delete(id);
         refreshSavedMarks(); renderOverlay(true);
         await bg({ type: 'items.remove', id });
-        toast('저장 취소');
+        chip('unsaved', '저장 취소');
       } else {
         const item = buildItem(c, i);
         state.saved.set(id, item);
         refreshSavedMarks(); renderOverlay(true);
         await bg({ type: 'items.save', item });
-        toast('★ 저장했습니다' + (settings.audioMode !== 'off' ? ' · 오디오 녹음 준비' : ''));
+        chip('saved', '저장했습니다' + (settings.audioMode !== 'off' ? ' · 오디오 녹음 준비' : ''));
         if (!item.translation) {
           bg({ type: 'translate', texts: [c.text.replace(/\n/g, ' ')], from: 'en', to: 'ko' }).then((res) => {
             const t = res && res.translations && res.translations[0];
@@ -607,7 +608,7 @@
     capture.busy = true;
     while (capture.queue.length) {
       const job = capture.queue.shift();
-      try { await captureCue(job.i, job.item); } catch (e) { toast('오디오 저장 실패: ' + (e && e.message)); }
+      try { await captureCue(job.i, job.item); } catch (e) { chipHide(); toast('오디오 저장 실패: ' + (e && e.message)); }
     }
     capture.busy = false;
   }
@@ -638,18 +639,21 @@
     const startV = cueVideoMs(c), endV = cueVideoEndMs(c);
     const mode = settings.audioMode;
     let result;
+    chip('rec', '대사 오디오 녹음 중…', 0);
     if (adapter.name === 'youtube' || !chrome.runtime.getURL) result = await captureViaElement(startV, endV);
     else result = await captureViaTab(startV, endV, item, i);
-    if (!result) return;
-    if (result.silent) { toast('이 영상의 오디오는 캡처가 차단되어 있습니다(보호된 재생)'); return; }
+    if (!result) { if (!capture.pendingGrant) chipHide(); return; }
+    if (result.silent) { chipHide(); toast('이 영상의 오디오는 캡처가 차단되어 있습니다(보호된 재생)'); return; }
     const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, storeFormat: result.storeFormat || 'wav', storeMime: result.storeMime || 'audio/wav', storeRate: result.storeRate || 16000, download: result.download, downloadMime: result.downloadMime || 'audio/wav', downloadRate: result.downloadRate || 0, fileName: fileNameFor(item, result.downloadFormat || 'wav'), durationMs: result.durationMs, leadMs: Number.isFinite(result.leadMs) ? result.leadMs : 250, stats: result.stats || null });
     const fmt = (result.downloadFormat || 'wav').toUpperCase();
-    if (mode === 'store') toast('🔊 오디오를 웹 재생용으로 보관했습니다', 2500);
+    // 성공 알림은 화면을 가리지 않게 구석 아이콘으로만 (마우스를 올리면 저장 위치). 폴더 권한 문제처럼 손이 필요한 일만 토스트로
+    if (mode === 'store') chip('audio', '오디오를 웹 재생용으로 보관했습니다', 3000);
     else {
       const where = r && r.location === 'folder' ? (r.fileName || '') : '다운로드 폴더/' + ((r && r.fileName) || 'SubTutor');
-      const extra = r && r.folderIssue === 'prompt' ? ' · 지정한 폴더의 권한이 풀려 다운로드 폴더에 저장했습니다. 툴바의 SubTutor 아이콘 → "폴더 권한 허용"'
-        : (r && r.folderIssue === 'error' ? ' · 지정한 폴더에 쓰지 못해 다운로드 폴더에 저장했습니다 (' + (r.folderError || '') + ')' : '');
-      toast('🔊 ' + fmt + ' 파일 저장: ' + where + ' (웹에서도 바로 재생)' + extra, extra ? 6000 : 2500);
+      const extra = r && r.folderIssue === 'prompt' ? '지정한 폴더의 권한이 풀려 다운로드 폴더에 저장했습니다. 툴바의 SubTutor 아이콘 → "폴더 권한 허용"'
+        : (r && r.folderIssue === 'error' ? '지정한 폴더에 쓰지 못해 다운로드 폴더에 저장했습니다 (' + (r.folderError || '') + ')' : '');
+      chip('audio', fmt + ' 파일 저장: ' + where + ' (웹에서도 바로 재생)' + (extra ? ' · ' + extra : ''), extra ? 7000 : 3000);
+      if (extra) toast('⚠ ' + extra, 6000);
     }
     if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
   }
@@ -659,7 +663,9 @@
     if (!started || !started.ok) {
       if (started && started.unavailable === 'grant') {
         capture.pendingGrant = { i, item };
-        toast('🎙 오디오를 녹음하려면 크롬 오른쪽 위 툴바의 SubTutor 아이콘(퍼즐 조각 안에 있을 수 있음)을 한 번 눌러 주세요. 누르면 바로 녹음이 시작됩니다', 7000);
+        const hint = grantHint(started.shortcut);
+        chip('wait', '오디오 녹음 허용 대기 — ' + hint, 0);
+        toast('🎙 ' + hint, 8000);
         return null;
       }
       throw new Error((started && started.error) || '캡처 시작 실패');
@@ -670,14 +676,37 @@
     if (!res || !res.ok) throw new Error((res && res.error) || '녹음 마무리 실패');
     return res;
   }
-  // 팝업이 열리면(= 이 탭에 오디오 캡처가 허용되면) 기다리던 녹음을 바로 이어서 한다
-  function onPopupOpened() {
+  // 크롬 규칙: 탭 오디오 녹음은 사용자가 이 탭에서 확장 프로그램을 호출(단축키·우클릭 메뉴·툴바 아이콘)해야 허용된다. 탭마다 한 번이면 된다
+  function grantHint(shortcut) {
+    const ways = [];
+    if (shortcut) ways.push(shortcut + ' (저장 단축키)');
+    ways.push('영상 우클릭 → "SubTutor: 지금 자막 저장"', '툴바의 SubTutor 아이콘');
+    return '오디오 녹음은 크롬 규칙상 이 탭에서 한 번 허용해야 합니다: ' + ways.join(' · ') + (shortcut ? '' : ' (단축키는 chrome://extensions/shortcuts 에서 지정)') + '. 허용되면 바로 녹음합니다';
+  }
+  // 호출(단축키·메뉴·팝업)로 이 탭의 녹음이 허용되면 기다리던 녹음을 바로 이어서 한다 → true 면 처리함
+  function resumePendingCapture() {
     const p = capture.pendingGrant;
-    if (!p) return;
+    if (!p) return false;
     capture.pendingGrant = null;
-    if (!state.saved.has(p.item.id)) return;
-    toast('🎙 오디오 녹음을 시작합니다');
+    if (!state.saved.has(p.item.id)) { chipHide(); return true; }
+    chip('rec', '오디오 녹음 허용됨 · 녹음 중…', 0);
     queueCapture(p.i, p.item);
+    return true;
+  }
+  function onPopupOpened() { resumePendingCapture(); }
+  // 단축키(Alt+E 등 크롬 명령)·우클릭 메뉴: 기다리던 녹음이 있으면 잇고, 아니면 지금 자막을 저장한다(저장된 줄인데 오디오가 없으면 녹음만 다시)
+  function onInvoke(msg) {
+    if (resumePendingCapture()) return { ok: true, did: 'resume' };
+    if (!state.active || !isEnabled()) return { ok: false, error: '재생 화면이 아닙니다' };
+    const shown = displayIndex();
+    const i = shown >= 0 ? shown : anchorIndex();
+    if (i < 0) { chip('info', '저장할 자막이 없습니다'); return { ok: true, did: 'none' }; }
+    const id = itemIdFor(state.cues[i]);
+    if (!state.saved.has(id)) { toggleSave(i); return { ok: true, did: 'save' }; }
+    const it = state.saved.get(id);
+    if (settings.audioMode && settings.audioMode !== 'off' && !(it && it.audio)) { queueCapture(i, it); return { ok: true, did: 'capture' }; }
+    chip('saved', '이미 저장된 대사');
+    return { ok: true, did: 'already' };
   }
   async function captureViaElement(startV, endV) {
     const Au = globalThis.SubTutorAudio;
@@ -800,6 +829,7 @@
     ui.ovModes = el('div', { class: 'st-ov-modes' });
     ui.overlay.append(ui.ovBox, ui.ovShadow, ui.ovModes);
     ui.toast = el('div', { class: 'st-toast' });
+    ui.chip = el('div', { class: 'st-chip', 'aria-live': 'polite' });
     ensureOverlayMounted();
 
     document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -818,7 +848,7 @@
   function ensureOverlayMounted() {
     if (!ui.overlay) return;
     const host = overlayHost();
-    if (ui.overlay.parentElement !== host) { host.append(ui.overlay, ui.toast); positionOverlay(true); }
+    if (ui.overlay.parentElement !== host) { host.append(ui.overlay, ui.toast, ui.chip); positionOverlay(true); }
   }
   function onFullscreenChange() {
     const host = overlayHost();
@@ -872,6 +902,7 @@
     s.setProperty('--st-unit', (r.width / 100) + 'px');
     s.setProperty('--st-clearance', clearance + 'px');
     if (ui.toast) { ui.toast.style.left = (r.left + r.width / 2) + 'px'; ui.toast.style.top = (r.top + r.height * 0.1) + 'px'; }
+    if (ui.chip) { ui.chip.style.left = (r.left + r.width - 14) + 'px'; ui.chip.style.top = (r.top + 14) + 'px'; }
   }
   function setPanelOpen(open) { saveSettings({ panelOpen: !!open }); }
   // 디즈니+처럼 자막을 열린 shadow DOM 안에 그리는 플레이어는 문서의 <style> 이 닿지 않으므로, 각 shadow root 에도 같은 스타일을 넣는다
@@ -1018,6 +1049,18 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => ui.toast.classList.remove('show'), ms || 1400);
   }
+  // 구석 상태 아이콘: 저장·녹음처럼 자주 뜨는 알림은 화면을 가리는 토스트 대신 영상 오른쪽 위에 작은 아이콘으로만 (마우스를 올리면 설명). ms 0 = 다음 알림까지 유지
+  const CHIP_ICON = { saved: '★', unsaved: '☆', missed: 'Q', rec: '●', wait: '●', audio: '♪', info: 'i', error: '!' };
+  let chipTimer;
+  function chip(kind, title, ms) {
+    if (!ui.chip) return;
+    ui.chip.textContent = CHIP_ICON[kind] || '•';
+    ui.chip.title = title || '';
+    ui.chip.className = 'st-chip show st-chip-' + kind;
+    clearTimeout(chipTimer);
+    if (ms !== 0) chipTimer = setTimeout(chipHide, ms || 2200);
+  }
+  function chipHide() { clearTimeout(chipTimer); if (ui.chip) ui.chip.classList.remove('show'); }
 
   // 플레이어 컨트롤 바의 켜기/끄기 버튼 (Language Reactor 식)
   // 플랫폼 아이콘과 비슷한 흰색 선 아이콘. 꺼짐 상태는 반투명 + 사선
@@ -1352,7 +1395,7 @@
   async function toggleMissed() {
     const shown = displayIndex();
     const i = shown >= 0 ? shown : anchorIndex();
-    if (i < 0) { toast('표시할 자막이 없습니다'); return; }
+    if (i < 0) { chip('info', '표시할 자막이 없습니다'); return; }
     const c = state.cues[i];
     const id = itemIdFor(c);
     const tag = settings.missedTag || '못 알아들음';
@@ -1363,7 +1406,7 @@
         const tags = ((it && it.tags) || []).filter((t) => t !== tag);
         if (it) { it.missed = false; it.tags = tags; }
         await bg({ type: 'items.update', id, patch: { missed: false, tags } });
-        toast('못 알아들음 표시 해제');
+        chip('unsaved', '못 알아들음 표시 해제');
       } else {
         if (!state.saved.has(id)) {
           const item = buildItem(c, i);
@@ -1381,7 +1424,7 @@
         state.missed.add(id);
         const names = Array.isArray(settings.tagNames) ? settings.tagNames : [];
         if (!names.includes(tag)) bg({ type: 'settings.set', patch: { tagNames: names.concat(tag) } }).catch(() => {});
-        toast('❓ 못 알아들음 · 저장했습니다 (태그 "' + tag + '")');
+        chip('missed', '못 알아들음 · 저장했습니다 (태그 "' + tag + '")');
       }
       refreshSavedMarks();
       if (ui.rows && ui.rows[i]) ui.rows[i].classList.toggle('st-missed', settings.secondPass && state.missed.has(id));
@@ -1719,7 +1762,7 @@
   function saveShownCue() {
     const shown = displayIndex();
     const i = shown >= 0 ? shown : anchorIndex();
-    if (i >= 0) toggleSave(i); else toast('저장할 자막이 없습니다');
+    if (i >= 0) toggleSave(i); else chip('info', '저장할 자막이 없습니다');
   }
   const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: saveShownCue, Enter: saveShownCue, KeyQ: toggleMissed, KeyV: () => { state.clozeRevealIdx = displayIndex(); renderOverlay(true); }, KeyT: () => { if (!state.koHold) { state.koHold = true; renderOverlay(true); } }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
   function shouldHandleKey(e) {
