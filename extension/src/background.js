@@ -263,21 +263,26 @@ async function saveAudio(msg) {
   const fileName = String(msg.fileName || 'SubTutor/clip.mp3').replace(/^\/+/, '');
   const ext = (fileName.split('.').pop() || 'mp3').toLowerCase();
   const leadMs = Number.isFinite(msg.leadMs) ? msg.leadMs : 250;
-  // 웹 재생용 복사본: '보관'은 작은 MP3(32kHz 64kbps), 'PC 파일'은 파일과 똑같은 MP3 — 어느 쪽이든 웹에서 플레이어 탭 없이 바로 재생된다
-  const copy = mode === 'download' && msg.download
-    ? { data: msg.download, format: ext, mime: msg.downloadMime || 'audio/mpeg', rate: msg.downloadRate || 0, sameAsFile: true }
-    : ((mode === 'store' || mode === 'download') && msg.store ? { data: msg.store, format: msg.storeFormat || 'wav', mime: msg.storeMime || 'audio/wav', rate: msg.storeRate || 16000, sameAsFile: false } : null);
-  if (copy) {
-    await chrome.storage.local.set({ [audioKey(msg.id)]: copy.data });
-    await withItems((items) => updateItem(items, msg.id, { audio: { format: copy.format, mime: copy.mime, rate: copy.rate, ms: msg.durationMs || 0, leadMs, savedAt: Date.now(), stats: msg.stats || null, sameAsFile: copy.sameAsFile } }));
+  // MP3 는 하나만 만든다.
+  //  - '보관': 확장 프로그램 안에 작은 MP3(32kHz 64kbps) 하나. 폴더 권한이 필요 없다
+  //  - 'PC 파일': 지정 폴더에 MP3 하나. 웹은 재생할 때 그 파일을 읽으므로 복사본을 따로 두지 않는다
+  //    (크롬 다운로드 폴더로 떨어진 경우에만 예외: 확장 프로그램이 그 폴더를 읽을 수 없어 웹 재생용 복사본을 함께 둔다)
+  const storeCopy = async (data, meta) => {
+    await chrome.storage.local.set({ [audioKey(msg.id)]: data });
+    await withItems((items) => updateItem(items, msg.id, { audio: Object.assign({ ms: msg.durationMs || 0, leadMs, savedAt: Date.now(), stats: msg.stats || null }, meta) }));
     out.stored = true;
+  };
+  if (mode === 'store' && msg.store) {
+    await storeCopy(msg.store, { format: msg.storeFormat || 'wav', mime: msg.storeMime || 'audio/wav', rate: msg.storeRate || 16000, sameAsFile: false });
+    await withItems((items) => updateItem(items, msg.id, { file: null }));
   }
   if (mode === 'download' && msg.download) {
-    // 1) 사용자가 고른 폴더가 있고 권한이 살아 있으면 그 폴더 안에 바로 쓴다
+    // 1) 사용자가 고른 폴더가 있고 권한이 살아 있으면 그 폴더 안에 바로 쓴다 — 파일 하나로 끝
     const folder = await saveToFolder(fileName, msg.download);
     if (folder.ok) {
       out.fileName = folder.path; out.location = 'folder';
-      await withItems((items) => updateItem(items, msg.id, { file: { format: ext, location: 'folder', path: folder.path, leadMs, savedAt: Date.now() } }));
+      await removeAudio([msg.id]); // 예전에 두었던 복사본이 있으면 지운다
+      await withItems((items) => updateItem(items, msg.id, { audio: null, file: { format: ext, location: 'folder', path: folder.path, leadMs, savedAt: Date.now() } }));
       return out;
     }
     if (folder.reason && folder.reason !== 'none') { out.folderIssue = folder.reason === 'error' ? 'error' : 'prompt'; out.folderError = folder.error || ''; out.folderName = folder.name || ''; }
@@ -286,6 +291,8 @@ async function saveAudio(msg) {
       out.downloadId = await chrome.downloads.download({ url: 'data:' + (msg.downloadMime || 'audio/wav') + ';base64,' + msg.download, filename: fileName, conflictAction: 'uniquify', saveAs: false });
       out.fileName = fileName; out.location = 'downloads';
       await withItems((items) => updateItem(items, msg.id, { file: { format: ext, location: 'downloads', path: '다운로드/' + fileName, downloadId: out.downloadId, leadMs, savedAt: Date.now() } }));
+      // 다운로드 폴더는 확장 프로그램이 다시 읽을 수 없으므로, 웹에서 재생할 수 있도록 복사본을 함께 둔다
+      if (msg.store) { await storeCopy(msg.store, { format: msg.storeFormat || 'wav', mime: msg.storeMime || 'audio/wav', rate: msg.storeRate || 16000, sameAsFile: false, source: 'downloads-fallback' }); out.webCopy = true; }
     } catch (e) {
       throw new Error('파일 다운로드 실패: ' + ((e && e.message) || e));
     }
@@ -346,10 +353,8 @@ async function audioFromFile(id) {
   let r;
   try { r = await FS.readFile(item.file.path); } catch (e) { r = { ok: false, reason: 'error', error: String((e && e.message) || e) }; }
   if (!r.ok) return { data: null, reason: r.reason || 'error', error: r.error || '', path: item.file.path, folder: r.name || '' };
-  const mime = item.file.format === 'wav' ? 'audio/wav' : 'audio/mpeg';
-  const data = bytesToBase64(r.bytes);
-  await putAudio({ itemId: id, data, mime, format: item.file.format || 'mp3', leadMs: Number.isFinite(item.file.leadMs) ? item.file.leadMs : 250, source: 'folder' });
-  return { data, mime, path: r.path };
+  // 복사본을 만들지 않고 바이트만 돌려준다 (MP3 는 폴더의 파일 하나뿐). 웹이 이번 세션 동안만 기억해 두고 쓴다
+  return { data: bytesToBase64(r.bytes), mime: item.file.format === 'wav' ? 'audio/wav' : 'audio/mpeg', path: r.path, leadMs: Number.isFinite(item.file.leadMs) ? item.file.leadMs : 250, cache: 'memory' };
 }
 // 다운로드 폴더에 저장한 파일: 크롬 다운로드 기록에서 찾아 지운다 (기록이 지워졌으면 못 찾는다)
 async function removeDownload(file) {

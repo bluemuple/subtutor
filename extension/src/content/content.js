@@ -652,7 +652,7 @@
       const where = r && r.location === 'folder' ? (r.fileName || '') : '다운로드 폴더/' + ((r && r.fileName) || 'SubTutor');
       const extra = r && r.folderIssue === 'prompt' ? '지정한 폴더의 권한이 풀려 다운로드 폴더에 저장했습니다. 툴바의 SubTutor 아이콘 → "폴더 권한 허용"'
         : (r && r.folderIssue === 'error' ? '지정한 폴더에 쓰지 못해 다운로드 폴더에 저장했습니다 (' + (r.folderError || '') + ')' : '');
-      chip('audio', fmt + ' 파일 저장: ' + where + ' (웹에서도 바로 재생)' + (extra ? ' · ' + extra : ''), extra ? 7000 : 3000);
+      chip('audio', fmt + ' 파일 저장: ' + where + (r && r.webCopy ? ' · 다운로드 폴더는 확장 프로그램이 읽을 수 없어 웹 재생용 복사본도 함께 보관했습니다' : ' · 웹에서 이 파일을 읽어 재생합니다 (MP3 는 이 파일 하나)') + (extra ? ' · ' + extra : ''), extra ? 7000 : 3000);
       if (extra) toast('⚠ ' + extra, 6000);
     }
     if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
@@ -1192,7 +1192,7 @@
     f.translationSource = el('select', { onchange: (e) => { saveSettings({ translationSource: e.target.value }); refreshAllKo(); if (state.current >= 0) ensureTranslations(state.current); } });
     [['auto', '자동 (플랫폼 한국어 자막 → 없으면 기계번역)'], ['track', '플랫폼 한국어 자막만'], ['mt', '기계 번역만'], ['off', '끄기']].forEach(([v, t]) => f.translationSource.append(el('option', { value: v }, t)));
     f.audioMode = el('select', { onchange: (e) => saveSettings({ audioMode: e.target.value }) });
-    [['off', '저장 안 함'], ['store', '웹 재생용으로 보관 (확장 프로그램 안)'], ['download', 'PC에 MP3 파일로 저장 (+ 웹 재생용 복사본)']].forEach(([v, t]) => f.audioMode.append(el('option', { value: v }, t)));
+    [['off', '저장 안 함'], ['store', '웹 재생용으로 보관 (확장 프로그램 안)'], ['download', 'PC에 MP3 파일로 저장 (웹은 그 파일로 재생)']].forEach(([v, t]) => f.audioMode.append(el('option', { value: v }, t)));
     f.koMode = el('select', { onchange: (e) => saveSettings({ koMode: e.target.value }) });
     [['always', '항상 보임'], ['hold', 'T 키를 누르는 동안만'], ['afterRepeat', '같은 줄 3회 반복 뒤']].forEach(([v, t]) => f.koMode.append(el('option', { value: v }, t)));
     f.cloze = el('select', { onchange: (e) => saveSettings({ cloze: e.target.value }) });

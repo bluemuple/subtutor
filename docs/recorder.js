@@ -79,6 +79,12 @@ window.SubTutorRecorder = (() => {
     stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     return stream;
   }
+  // 녹음을 멈추면 마이크를 놓는다. 스트림을 열어 두면 크롬 탭에 녹음 중 표시(빨간 점)가 계속 남는다
+  function releaseMic() {
+    if (!stream) return;
+    try { stream.getTracks().forEach((t) => t.stop()); } catch (e) { /* ignore */ }
+    stream = null;
+  }
   async function start() {
     const s = await getStream();
     const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'].find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
@@ -92,6 +98,7 @@ window.SubTutorRecorder = (() => {
       stop: async () => {
         if (rec.state !== 'inactive') rec.stop();
         const blob = await done;
+        releaseMic();
         return { blob, durationMs: Date.now() - t0 };
       },
       get state() { return rec.state; },
@@ -115,5 +122,5 @@ window.SubTutorRecorder = (() => {
       a.play().catch(finish);
     });
   }
-  return { list, listAll, add, remove, clearItem, clearAll, start, play, stop, MAX };
+  return { list, listAll, add, remove, clearItem, clearAll, start, play, stop, releaseMic, micOpen: () => !!(stream && stream.active), MAX };
 })();

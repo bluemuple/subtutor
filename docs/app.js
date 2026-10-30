@@ -27,6 +27,7 @@
     stats: null, shadow: null, ladderFor: null,
     clip: { itemId: null, state: null, message: '', loop: false }, clipLocal: false,
     repeat: false,                        // 🔁 반복: ▶ 로 재생한 대사를 계속 반복
+    theme: loadPref('subtutor.theme', 'dark'),
     hide: loadHide(), reveal: new Map(),  // 자막/뜻 감추기: 전체 기본값 + 항목별 예외
     recordings: new Map(), recording: null, playingRec: null,
     edit: { on: false, sel: new Set() },  // 편집 모드: 선택 상자로 골라 한꺼번에 삭제
@@ -109,13 +110,21 @@
   const known = () => state.items.filter((i) => i.box === 'known');
   const fmtDate = (ms) => { const d = new Date(ms); return d.getFullYear() + '.' + String(d.getMonth() + 1).padStart(2, '0') + '.' + String(d.getDate()).padStart(2, '0'); };
   function loadPref(key, def) { try { const v = localStorage.getItem(key); return v === null ? def : v; } catch (e) { return def; } }
+  // 화면 테마: 다크(기본) · 화이트 · 시스템 설정. 이 브라우저에만 저장한다(localStorage) — 페이지가 뜰 때 바로 입혀 깜빡임이 없다
+  const THEMES = [['dark', '다크'], ['light', '화이트'], ['auto', '시스템 설정']];
+  function applyTheme() {
+    const t = THEMES.some(([v]) => v === state.theme) ? state.theme : 'dark';
+    const dark = t === 'dark' || (t === 'auto' && !window.matchMedia('(prefers-color-scheme: light)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  }
+  function setTheme(t) { state.theme = t; savePref('subtutor.theme', t); applyTheme(); }
   function savePref(key, v) { try { localStorage.setItem(key, v); } catch (e) { /* ignore */ } }
   function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
   function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
 
   // ───────── 데이터 ─────────
   // 화면에 영향을 주는 필드만으로 서명을 만들어, 실제로 바뀐 경우에만 다시 그린다 (입력 중인 내용 보호)
-  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.comment, i.translation, i.reviews, i.forgot, i.savedAt, i.audio ? 1 : 0, i.file ? 1 : 0, (i.tags || []).join(','), i.trim ? i.trim.startMs + '-' + i.trim.endMs : '', i.review ? i.review.due : '', i.missed ? 1 : 0].join('\u0001')).sort().join('\u0002');
+  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.comment, i.translation, i.reviews, i.forgot, i.savedAt, i.audio ? 1 : 0, i.file ? (i.file.location || '1') : 0, (i.tags || []).join(','), i.trim ? i.trim.startMs + '-' + i.trim.endMs : '', i.review ? i.review.due : '', i.missed ? 1 : 0].join('\u0001')).sort().join('\u0002');
   async function loadItems(force) {
     if (!state.extOk) { render(); return; }
     let changed = !!force;
@@ -159,14 +168,14 @@
   const editButton = () => el('button', { class: 'btn edit-toggle' + (state.edit.on ? ' on' : ''), title: state.edit.on ? '편집 모드 끝내기 (Esc)' : '편집: 대사를 골라 한꺼번에 삭제', onclick: () => setEdit(!state.edit.on) }, state.edit.on ? '✎ 편집 중' : '✎ 편집');
   // 편집 막대: 보이는 대사 모두 선택 · 선택 삭제 · 작품/에피소드 전체 삭제 · 완료
   function buildEditUi(items, body, getVisible) {
-    const bar = el('div', { class: 'edit-bar' + (state.edit.on ? '' : ' hidden') });
+    const bar = el('span', { class: 'edit-bar' + (state.edit.on ? '' : ' hidden') });
     const selCount = el('b', null, '0');
     const delBtn = el('button', { class: 'btn danger del-selected', disabled: true, onclick: () => bulkDelete(Array.from(state.edit.sel), '선택한 대사') }, ['선택 ', selCount, '개 삭제']);
     const allBox = el('input', { type: 'checkbox', class: 'pick-all', onchange: (e) => { getVisible().forEach((it) => { if (e.target.checked) state.edit.sel.add(it.id); else state.edit.sel.delete(it.id); }); sync(); } });
     const scopes = []; // 드롭다운 항목: { label, ids }
     const byTitle = new Map();
     for (const it of items) { if (!byTitle.has(it.title)) byTitle.set(it.title, new Map()); const eps = byTitle.get(it.title); const ep = it.episode || ''; if (!eps.has(ep)) eps.set(ep, []); eps.get(ep).push(it.id); }
-    const scopeSel = el('select', { class: 'bulk-scope', title: '작품 또는 에피소드의 대사를 모두 삭제', onchange: (e) => { const v = e.target.value; e.target.value = ''; const sc = v === '' ? null : scopes[+v]; if (sc) bulkDelete(sc.ids, sc.label); } }, [el('option', { value: '' }, '작품·에피소드 전체 삭제…')]);
+    const scopeSel = el('select', { class: 'bulk-scope', title: '작품 또는 에피소드의 대사를 모두 삭제', onchange: (e) => { const v = e.target.value; e.target.value = ''; const sc = v === '' ? null : scopes[+v]; if (sc) bulkDelete(sc.ids, sc.label); } }, [el('option', { value: '' }, '작품·에피소드 삭제…')]);
     Array.from(byTitle.keys()).sort((a, b) => a.localeCompare(b, 'ko')).forEach((t) => {
       const eps = byTitle.get(t);
       const all = Array.from(eps.values()).flat();
@@ -176,7 +185,7 @@
       if (eps.size > 1 || !eps.has('')) Array.from(eps.keys()).filter(Boolean).sort((a, b) => a.localeCompare(b, 'ko', { numeric: true })).forEach((ep) => { scopes.push({ label: '"' + t + ' ' + ep + '"의 대사', ids: eps.get(ep) }); g.append(el('option', { value: String(scopes.length - 1) }, ep + ' · ' + eps.get(ep).length + '개')); });
       scopeSel.append(g);
     });
-    bar.append(el('label', { class: 'pick-all-label' }, [allBox, ' 보이는 대사 모두 선택']), delBtn, scopeSel, el('span', { class: 'spacer' }), el('button', { class: 'btn primary edit-done', onclick: () => setEdit(false) }, '완료'));
+    bar.append(infoBtn('edit'), el('label', { class: 'pick-all-label' }, [allBox, ' 보이는 대사 모두 선택']), delBtn, scopeSel, el('button', { class: 'btn primary edit-done', onclick: () => setEdit(false) }, '완료'));
     function sync() {
       const n = state.edit.sel.size;
       selCount.textContent = String(n);
@@ -208,7 +217,9 @@
     const failed = f.failed || [];
     toast('대사 ' + ((r && r.removed) || ids.length) + '개 삭제' + (f.deleted ? ' · MP3 파일 ' + f.deleted + '개 삭제' : '') + (failed.length ? ' · 파일 ' + failed.length + '개는 지우지 못했습니다 (' + (FAIL_REASON[failed[0].reason] || failed[0].reason) + ')' : ''), failed.length ? 8000 : 3000);
   }
-  // PC 파일(⬇ MP3)만 있는 예전 대사: MP3 가 있는 폴더를 한 번 고르면 파일 이름이 같은 대사에 웹 재생용 복사본을 넣는다 (다운로드 폴더도 가능)
+  // 확장 프로그램이 읽을 수 없는 곳(다운로드 폴더 등)에 MP3 가 있는 대사
+  const needsImport = (it) => !!(it.file && !it.audio && it.file.location !== 'folder');
+  // 그런 대사: MP3 가 있는 폴더를 한 번 고르면 파일 이름이 같은 대사에 웹 재생용 복사본을 넣는다
   async function importMp3Folder() {
     if (!state.extOk) { toast('확장 프로그램이 필요합니다'); return; }
     const key = (n) => String(n).replace(/ \(\d+\)(\.[^.]+)$/, '$1').toLowerCase(); // 크롬이 같은 이름에 붙이는 " (1)" 무시
@@ -305,7 +316,7 @@
     if (it && it.file && !it.audio) {
       try {
         const r = await B.request('audio.file', { itemId }, 30000);
-        if (r && r.data) { fileIssue.delete(itemId); const blob = b64ToBlob(r.data, r.mime); audioCache.set(itemId, blob); loadItems(); return blob; }
+        if (r && r.data) { fileIssue.delete(itemId); const blob = b64ToBlob(r.data, r.mime); audioCache.set(itemId, blob); return blob; }
         fileIssue.set(itemId, (r && r.reason) || 'error');
       } catch (e) { fileIssue.set(itemId, 'error'); }
       return null; // 권한을 허용하면 바로 다시 시도할 수 있게 캐시하지 않는다
@@ -322,7 +333,7 @@
     if (t && Number.isFinite(t.startMs) && Number.isFinite(t.endMs) && t.endMs > t.startMs) return { startMs: t.startMs, endMs: t.endMs, trimmed: true };
     return { startMs: it.startMs, endMs: it.endMs, trimmed: false };
   }
-  const clipLeadMs = (it) => (it.audio && Number.isFinite(it.audio.leadMs)) ? it.audio.leadMs : 250; // 보관 클립은 자막 시작보다 이만큼 앞에서 시작
+  const clipLeadMs = (it) => { const a = it.audio && it.audio.leadMs, f = it.file && it.file.leadMs; return Number.isFinite(a) ? a : (Number.isFinite(f) ? f : 250); }; // 클립은 자막 시작보다 이만큼 앞에서 시작
   const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));
   function fmtMs(ms) {
     ms = Math.max(0, Math.round(ms));
@@ -898,8 +909,9 @@
         if (sort === 'group-new-top') g.items.sort(bySaved(-1));
         else if (sort === 'group-new-bottom') g.items.sort(bySaved(1));
         else g.items.sort((a, b) => a.startMs - b.startMs);
+        const plat = g.items.every((i) => i.platform === g.items[0].platform) ? (PLATFORM_NAMES[g.items[0].platform] || g.items[0].platform) : '';
         const gEl = el('div', { class: 'group' }, [
-          el('h3', { class: 'group-title' }, [g.title, g.episode ? el('small', null, g.episode) : null, el('small', null, g.items.length + '개'), state.edit.on ? el('button', { class: 'btn mini group-pick', title: '이 묶음의 대사를 모두 선택/해제', onclick: () => togglePickMany(g.items.map((i) => i.id)) }, '묶음 선택') : null]),
+          el('h3', { class: 'group-title' }, [g.title + (plat ? ' (' + plat + ')' : ''), g.episode ? el('small', null, g.episode) : null, el('small', null, g.items.length + '개'), state.edit.on ? el('button', { class: 'btn mini group-pick', title: '이 묶음의 대사를 모두 선택/해제', onclick: () => togglePickMany(g.items.map((i) => i.id)) }, '묶음 선택') : null]),
         ]);
         g.items.forEach((it) => gEl.append(itemEl(it, kind)));
         body.append(gEl);
@@ -916,7 +928,8 @@
     const editUi = buildEditUi(items, body, () => lastFiltered);
     editSync = editUi.sync;
     wrap.classList.toggle('editing', state.edit.on);
-    wrap.append(buildTagBar(renderBody), el('div', { class: 'toolbar' }, [sel, search, sort, infoBtn('sort'), hideBtn('text'), hideBtn('ko'), infoBtn('veil'), repeatButton(), infoBtn('repeat'), countEl, el('span', { class: 'spacer' }), editButton(), infoBtn('edit')]), editUi.bar, body);
+    const viewCtl = state.edit.on ? [] : [infoBtn('sort'), hideBtn('text'), hideBtn('ko'), infoBtn('veil'), repeatButton(), infoBtn('repeat')]; // 편집 중에는 자리를 비워 한 줄에 들어가게
+    wrap.append(buildTagBar(renderBody), el('div', { class: 'toolbar' }, [sel, search, sort].concat(viewCtl, [countEl, el('span', { class: 'spacer' }), editButton(), editUi.bar])), body);
     renderBody();
     syncVeils();
     return wrap;
@@ -941,17 +954,15 @@
       el('div', { class: 'ko', text: it.translation || '' }),
       el('button', { class: 'veil veil-ko-btn', title: '뜻 보기', onclick: () => setItemVeil(it.id, 'ko', false) }, '뜻 감춤 · 눌러서 보기'),
       el('div', { class: 'meta' }, [
-        opts.showWork ? el('span', { class: 'work' }, it.title + (it.episode ? ' · ' + it.episode : '')) : null,
+        opts.showWork ? el('span', { class: 'work' }, it.title + ' (' + (PLATFORM_NAMES[it.platform] || it.platform) + ')' + (it.episode ? ' · ' + it.episode : '')) : null,
         el('span', { class: 'span' }, timeText(it)),
-        el('span', null, PLATFORM_NAMES[it.platform] || it.platform),
         fmtBadge(it),
         el('span', null, '저장 ' + fmtDate(it.savedAt || Date.now())),
         it.reviews ? el('span', null, '복습 ' + it.reviews + '회' + (it.forgot ? ' · 잊음 ' + it.forgot : '')) : null,
         el('button', { class: 'link', onclick: () => B.request('item.open', { itemId: it.id }, 60000).catch((e) => toast(e.message)) }, '플레이어에서 열기 ↗'),
         el('span', { class: 'state' }),
       ]),
-      buildTagRow(it),
-      buildRecRow(it.id),
+      el('div', { class: 'item-actions' }, [buildTagRow(it), buildRecRow(it.id)]), // + 태그 · 녹음 · 1 · 같이 듣기 · ⓘ 를 한 줄에
       buildTrimBox(it),
     ]);
     const comment = el('textarea', { class: 'comment', placeholder: '코멘트 (뜻, 메모, 예문…)' });
@@ -975,11 +986,11 @@
     const up = (s, d) => String(s || d).toUpperCase();
     const khz = (a) => (a && a.rate ? ' · ' + Math.round(a.rate / 1000) + 'kHz' : '');
     if (it.file) {
-      const copy = !!it.audio;
-      const title = 'PC 파일 ' + up(it.file.format, 'mp3') + ': ' + (it.file.path || '') + (copy
-        ? ' · 웹 재생용 복사본 있음' + khz(it.audio) + ' — 플레이어 탭 없이 바로 재생'
-        : ' · 웹 재생용 복사본 없음 — ▶ 를 누르면 지정 폴더에서 읽어 옵니다. 다운로드 폴더라면 여기를 눌러 MP3 폴더에서 불러오세요');
-      return el(copy ? 'span' : 'button', { class: 'fmt file' + (copy ? ' stored' : ' only'), title, onclick: copy ? null : () => importMp3Folder() }, '⬇ ' + up(it.file.format, 'mp3'));
+      const readable = it.file.location === 'folder' || !!it.audio; // 지정 폴더면 재생할 때 읽어 오고, 복사본이 있으면 그것으로 재생
+      const title = 'PC 파일 ' + up(it.file.format, 'mp3') + ': ' + (it.file.path || '') + (it.audio
+        ? ' · 웹 재생용 복사본도 있음' + khz(it.audio)
+        : (readable ? ' — 재생할 때 이 파일을 읽습니다 (MP3 는 이 파일 하나)' : ' · 확장 프로그램이 읽을 수 없는 곳입니다 — 여기를 눌러 MP3 폴더에서 불러오세요'));
+      return el(readable ? 'span' : 'button', { class: 'fmt file' + (readable ? ' stored' : ' only'), title, onclick: readable ? null : () => importMp3Folder() }, '⬇ ' + up(it.file.format, 'mp3'));
     }
     if (it.audio) return el('span', { class: 'fmt stored', title: '보관 오디오 ' + up(it.audio.format, 'wav') + khz(it.audio) + (it.audio.ms ? ' · ' + (it.audio.ms / 1000).toFixed(1) + '초' : '') + ' — 플레이어 탭 없이 바로 재생' }, '♪ ' + up(it.audio.format, 'wav'));
     return null;
@@ -1173,7 +1184,7 @@
     const wrap = el('div', { class: 'settings' });
     const total = state.items.length;
     const reviews = state.items.reduce((a, i) => a + (i.reviews || 0), 0);
-    const fileOnly = state.items.filter((i) => i.file && !i.audio).length; // PC 파일만 있고 웹 재생용 복사본이 없는 예전 대사
+    const fileOnly = state.items.filter(needsImport).length; // 확장 프로그램이 읽을 수 없는 곳(다운로드 폴더 등)에 MP3 만 있는 대사
     const fileCount = state.items.filter((i) => i.file).length;
     const recCount = el('b', null, '…');
     R.listAll().then((all) => { recCount.textContent = String(all.length); }).catch(() => { recCount.textContent = '0'; });
@@ -1200,6 +1211,10 @@
       state.web.dashboard ? renderDashboard() : null,
       state.web.weakWords ? renderWeakWords() : null,
       state.web.recommend ? renderRecommend() : null,
+      el('section', null, [
+        el('h3', null, '화면'),
+        el('div', { class: 'row' }, [el('label', null, ['테마 ', el('select', { class: 'theme-sel', onchange: (e) => setTheme(e.target.value) }, THEMES.map(([v, t]) => el('option', { value: v, selected: state.theme === v }, t)))])]),
+      ]),
       el('section', null, [
         el('h3', null, '통계'),
         el('div', { class: 'stats' }, [
@@ -1462,6 +1477,8 @@
   // ───────── 시작 ─────────
   window.__subtutorDebug = { get state() { return state; }, log: [] }; // 테스트·진단용
   async function init() {
+    applyTheme();
+    try { window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (state.theme === 'auto') applyTheme(); }); } catch (e) { /* ignore */ }
     route();
     await B.waitReady(2000);
     state.extOk = B.detect();
