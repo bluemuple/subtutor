@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SubTutor - 자막 튜터",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "넷플릭스·유튜브·프라임 비디오·디즈니+ 자막으로 영어 공부: 자막 목록, 한국어 번역, A/S/D 반복 단축키, 자동 일시정지, 쉐도잉, 자막·오디오 저장, 받아쓰기 퀴즈",
   "icons": {
     "16": "icons/icon16.png",

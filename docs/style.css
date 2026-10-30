@@ -265,3 +265,15 @@ input.pick, input.pick-all { width: 22px; height: 22px; accent-color: var(--acce
 .meta .fmt.file.stored { color: #7fb59a; border-color: rgba(52,211,153,.25); }
 .meta button.fmt.only { cursor: pointer; background: none; color: var(--orange); border-color: rgba(251,191,36,.4); font: inherit; font-size: 10.5px; line-height: 1.4; }
 .meta button.fmt.only:hover { background: rgba(251,191,36,.12); }
+
+/* 속도 사다리 세부 설정 */
+.ladder-cfg { margin: 8px 0 2px; padding: 10px 12px; background: var(--card2); border: 1px solid var(--line); border-radius: 10px; }
+.ladder-cfg .row { margin-top: 0; }
+.ladder-cfg select { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; font-size: 14px; }
+.switch-inline { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); cursor: pointer; margin-left: 12px; }
+.rates { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.rate-cell { display: inline-flex; align-items: center; gap: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
+.rate-cell .rate-n { color: var(--dim); font-size: 11px; min-width: 9px; text-align: center; }
+.rate-cell .rate-x { color: var(--dim); font-size: 12px; }
+input.rate { width: 58px; background: none; border: none; color: var(--text); font: inherit; font-size: 14px; font-variant-numeric: tabular-nums; text-align: right; padding: 0; }
+input.rate:focus { outline: none; color: var(--accent2); }

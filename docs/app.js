@@ -6,9 +6,14 @@
   const R = window.SubTutorRecorder;
   const Ex = window.SubTutorExplain;
   const Sp = window.SubTutorSpeech;
+  const St = window.SubTutorStretch;
   const KIWI = window.SubTutorKiwi || [];
   const DAY = 86400000;
-  const WEB_DEFAULTS = { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28' };
+  const WEB_DEFAULTS = { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true };
+  // 사다리 단계 수를 바꿀 때 채워 넣는 기본값 (마지막은 1배속)
+  const LADDER_PRESETS = { 1: [1], 2: [0.7, 1], 3: [0.7, 0.85, 1], 4: [0.8, 0.9, 1, 1.15], 5: [0.7, 0.8, 0.9, 1, 1.15], 6: [0.6, 0.7, 0.8, 0.9, 1, 1.15] };
+  const RATE_MIN = 0.3, RATE_MAX = 2, LADDER_MAX_STEPS = 6;
+  const fmtRate = (r) => String(Math.round(r * 100) / 100);
   const $ = (sel, root) => (root || document).querySelector(sel);
   const PLATFORM_NAMES = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+', youtube: '유튜브' };
   const README_URL = 'https://github.com/bluemuple/subtutor#readme';
@@ -118,7 +123,7 @@
       const r = await B.request('items.list');
       const items = (r && r.items) || [];
       if (itemsSignature(items) !== itemsSignature(state.items)) changed = true;
-      for (const it of items) if (!it.audio) { audioCache.delete(it.id); bufferCache.delete(it.id); } // 복사본이 없어진 항목은 다음 재생 때 다시 읽는다
+      for (const it of items) if (!it.audio) dropAudioCaches(it.id); // 복사본이 없어진 항목은 다음 재생 때 다시 읽는다
       state.items = items;
       mergeTagNames(items.flatMap((i) => i.tags || []));
     } catch (e) { toast(e.message); }
@@ -143,7 +148,7 @@
     render();
     try { await B.request('items.remove', { id }); } catch (e) { toast(e.message); }
     try { await R.clearItem(id); state.recordings.delete(id); } catch (e) { /* ignore */ }
-    audioCache.delete(id); bufferCache.delete(id);
+    dropAudioCaches(id);
   }
 
   // ───────── 편집 모드 (선택해서 삭제) ─────────
@@ -193,7 +198,7 @@
     const set = new Set(ids);
     if (set.has(state.clip.itemId) && ['playing', 'opening', 'loading'].includes(state.clip.state)) { stopLocalAudio(); if (!state.clipLocal) B.request('clip.stop').catch(() => {}); setClip(state.clip.itemId, 'stopped'); }
     state.items = state.items.filter((i) => !set.has(i.id));
-    ids.forEach((id) => { state.edit.sel.delete(id); audioCache.delete(id); bufferCache.delete(id); fileIssue.delete(id); });
+    ids.forEach((id) => { state.edit.sel.delete(id); dropAudioCaches(id); fileIssue.delete(id); });
     updateCounts();
     render();
     let r = null;
@@ -236,7 +241,7 @@
           const format = (name.split('.').pop() || 'mp3').toLowerCase();
           for (const it of targets) {
             await B.request('audio.put', { itemId: it.id, data, mime: format === 'wav' ? 'audio/wav' : 'audio/mpeg', format, leadMs: it.file.leadMs, source: 'import' }, 30000);
-            found++; audioCache.delete(it.id); bufferCache.delete(it.id); fileIssue.delete(it.id);
+            found++; dropAudioCaches(it.id); fileIssue.delete(it.id);
           }
           if (targets === all) done.add(k);
         } catch (e) { /* 다음 파일 */ }
@@ -281,6 +286,12 @@
   }
   const audioCache = new Map(); // itemId -> Blob
   const fileIssue = new Map();  // itemId -> PC 파일에서 읽지 못한 이유
+  const stretchCache = new Map(); // itemId\0from\0to\0rate -> AudioBuffer
+  // 항목의 오디오가 바뀌거나 지워지면 디코딩·배속 변환 결과도 버린다
+  function dropAudioCaches(id) {
+    audioCache.delete(id); bufferCache.delete(id);
+    for (const k of Array.from(stretchCache.keys())) if (k.startsWith(id + '\u0000')) stretchCache.delete(k);
+  }
   function b64ToBlob(b64, mime) { const bin = atob(b64); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return new Blob([bytes], { type: mime || 'audio/wav' }); }
   async function localAudioBlob(itemId) {
     if (audioCache.has(itemId)) return audioCache.get(itemId);
@@ -335,13 +346,32 @@
     if (buf || audioCache.has(itemId)) bufferCache.set(itemId, buf);
     return buf;
   }
-  function playLocal(it, buf, range, loop, rate) {
+  // 배속 재생 준비: "음높이 유지"가 켜져 있으면 구간을 미리 WSOLA 로 늘이거나 줄여 두고 1배속으로 재생한다
+  // (WebAudio 의 playbackRate 만 쓰면 느릴 때 목소리가 굵어지고 빠를 때 가늘어진다)
+  function prepareClip(it, buf, range, rate) {
+    const clipStart = it.startMs - clipLeadMs(it);
+    const from = clampNum((range.startMs - clipStart) / 1000, 0, Math.max(0, buf.duration - 0.05));
+    const to = clampNum((range.endMs - clipStart) / 1000, from + 0.05, buf.duration);
+    const speed = rate && rate > 0 ? rate : 1;
+    const plain = { buffer: buf, from, to, speed };
+    if (Math.abs(speed - 1) < 0.005 || !St || state.web.ladderPitch === false) return plain;
+    const key = [it.id, Math.round(from * 1000), Math.round(to * 1000), speed].join('\u0000');
+    let b = stretchCache.get(key);
+    if (!b) {
+      try { b = St.stretchBuffer(getCtx(), buf, from, to, speed); } catch (e) { return plain; }
+      if (stretchCache.size > 24) stretchCache.clear();
+      stretchCache.set(key, b);
+    }
+    return { buffer: b, from: 0, to: b.duration, speed: 1, pitched: true };
+  }
+  function noteClip(clip) {
+    state.lastClip = { pitched: !!clip.pitched, speed: Math.round(clip.speed * 100) / 100, sec: Math.round((clip.to - clip.from) * 1000) / 1000 };
+    return clip;
+  }
+  function playLocal(clip, loop) {
     return new Promise((resolve) => {
       const ctx = getCtx();
-      const speed = rate && rate > 0 ? rate : 1;
-      const clipStart = it.startMs - clipLeadMs(it);
-      const from = clampNum((range.startMs - clipStart) / 1000, 0, Math.max(0, buf.duration - 0.05));
-      const to = clampNum((range.endMs - clipStart) / 1000, from + 0.05, buf.duration);
+      const buf = clip.buffer, from = clip.from, to = clip.to, speed = clip.speed;
       const len = to - from;
       let src = null, startedAt = 0, startPos = from, timer = null, finished = false, looping = !!loop;
       const finish = () => { if (finished) return; finished = true; clearTimeout(timer); if (localAudio === handle) localAudio = null; resolve(); };
@@ -396,7 +426,7 @@
       if (buf) {
         state.clipLocal = true;
         setClip(itemId, 'playing', '', loop);
-        await playLocal(it, buf, effRange(it), loop, opts.rate);
+        await playLocal(noteClip(prepareClip(it, buf, effRange(it), opts.rate)), loop);
         if (state.clip.itemId === itemId && state.clip.state === 'playing') setClip(itemId, 'ended');
         return;
       }
@@ -411,12 +441,17 @@
       setClip(itemId, 'error', e.message);
     }
   }
-  // 속도 사다리: 0.8 → 0.9 → 1.0 → 1.15배로 네 번 (중간에 멈추면 중단)
-  const LADDER = [0.8, 0.9, 1, 1.15];
+  // 속도 사다리: 설정한 단계대로 이어서 재생 (중간에 멈추면 중단)
+  function ladderRates() {
+    const raw = Array.isArray(state.web.ladderRates) ? state.web.ladderRates : [];
+    const out = raw.map((x) => Math.round(clampNum(+x, RATE_MIN, RATE_MAX) * 100) / 100).filter((x) => Number.isFinite(x) && x > 0).slice(0, LADDER_MAX_STEPS);
+    return out.length ? out : LADDER_PRESETS[4];
+  }
+  const ladderTitle = () => '속도 사다리 ' + ladderRates().map(fmtRate).join(' → ') + '×' + (state.web.ladderPitch === false ? '' : ' (음높이 유지)');
   async function playLadder(itemId) {
     if (state.ladderFor) { state.ladderFor = null; await playItem(itemId); return; }
     state.ladderFor = itemId;
-    for (const rate of LADDER) {
+    for (const rate of ladderRates()) {
       if (state.ladderFor !== itemId) break;
       toast('⤴ ' + rate + '×', 900);
       await playItem(itemId, { loop: false, rate });
@@ -895,7 +930,7 @@
       node.classList.toggle('selected', state.edit.sel.has(it.id));
       node.addEventListener('click', (e) => { if (e.target.closest('button, input, textarea, select, a, label, .trim-box, .rec-row, .tags-row')) return; setPick(it.id, !state.edit.sel.has(it.id)); });
     }
-    const playCol = el('div', { class: 'play-col' }, [pick, play, state.web.ladder ? el('button', { class: 'ladder', title: '속도 사다리 0.8→0.9→1.0→1.15×', onclick: () => playLadder(it.id) }, '⤴') : null]);
+    const playCol = el('div', { class: 'play-col' }, [pick, play, state.web.ladder ? el('button', { class: 'ladder', title: ladderTitle(), onclick: () => playLadder(it.id) }, '⤴') : null]);
     const body = el('div', { class: 'body' }, [
       el('div', { class: 'vis-btns' }, [
         el('button', { class: 'btn mini vis-text', title: '이 대사의 자막 보기/감추기', onclick: () => setItemVeil(it.id, 'text', !isVeiled(it.id, 'text')) }, '자막'),
@@ -1159,6 +1194,7 @@
       el('section', null, [
         el('h3', null, ['학습 기능', infoBtn('twoPass')]),
         el('div', { class: 'switches' }, [toggle('srs', '간격 반복 복습'), toggle('weakWords', '약점 단어'), toggle('dashboard', '진행 상황'), toggle('recommend', '추천 콘텐츠'), toggle('shadow', '쉐도잉 세션', 'shadowSession'), toggle('ladder', '속도 사다리 ⤴', 'ladder')]),
+        state.web.ladder ? renderLadderCfg() : null,
         el('div', { class: 'row' }, [el('label', null, ['근무 시작일 ', goal]), infoBtn('dashboard')]),
       ]),
       state.web.dashboard ? renderDashboard() : null,
@@ -1191,7 +1227,7 @@
             if (!confirm('저장한 자막 ' + total + '개를 모두 삭제할까요? 보관 오디오' + (fileCount ? '와 PC 에 저장한 MP3 파일 ' + fileCount + '개' : '') + '도 함께 지워집니다. 되돌릴 수 없습니다.')) return;
             const r = await B.request('items.clear', {}, 120000).catch((e) => { toast(e.message); return null; });
             if (r && r.files && r.files.failed && r.files.failed.length) toast('자막은 모두 지웠지만 MP3 파일 ' + r.files.failed.length + '개는 지우지 못했습니다 (' + (FAIL_REASON[r.files.failed[0].reason] || r.files.failed[0].reason) + ')', 8000);
-            audioCache.clear(); bufferCache.clear(); fileIssue.clear();
+            audioCache.clear(); bufferCache.clear(); stretchCache.clear(); fileIssue.clear();
             loadItems();
           } }, '자막 모두 삭제'),
           el('button', { class: 'btn danger', onclick: async () => {
@@ -1206,6 +1242,37 @@
       ]),
     );
     return wrap;
+  }
+  // 속도 사다리 세부 설정: 단계 수 · 단계별 배속(0.3~2.0) · 음높이 유지
+  function renderLadderCfg() {
+    const rates = ladderRates();
+    const box = el('div', { class: 'ladder-cfg' });
+    const steps = el('select', { class: 'ladder-steps', title: '사다리 단계 수', onchange: (e) => {
+      // 단계 수를 바꾸면 그 단계의 기본값으로 채운다 (단순히 잘라내면 마지막이 1배속에 닿지 않는 사다리가 된다). 값은 아래에서 하나씩 고친다
+      const n = +e.target.value;
+      saveWebPrefs({ ladderRates: (LADDER_PRESETS[n] || LADDER_PRESETS[4]).slice() }).then(render);
+    } }, Array.from({ length: LADDER_MAX_STEPS }, (_, k) => el('option', { value: k + 1, selected: rates.length === k + 1 }, (k + 1) + '단계')));
+    const inputs = rates.map((r, k) => el('label', { class: 'rate-cell' }, [
+      el('span', { class: 'rate-n' }, String(k + 1)),
+      el('input', { type: 'number', class: 'rate', 'data-step': k, min: RATE_MIN, max: RATE_MAX, step: 0.05, value: fmtRate(r), onchange: (e) => {
+        const v = Math.round(clampNum(parseFloat(e.target.value), RATE_MIN, RATE_MAX) * 100) / 100;
+        const next = ladderRates().slice();
+        next[k] = Number.isFinite(v) ? v : 1;
+        e.target.value = fmtRate(next[k]);
+        saveWebPrefs({ ladderRates: next }).then(render);
+      } }),
+      el('span', { class: 'rate-x' }, '×'),
+    ]));
+    box.append(
+      el('div', { class: 'row' }, [
+        el('label', null, ['단계 수 ', steps]),
+        el('label', { class: 'switch-inline' }, ['음높이 유지 ', el('input', { type: 'checkbox', class: 'switch', 'data-pref': 'ladderPitch', checked: state.web.ladderPitch !== false, onchange: (e) => saveWebPrefs({ ladderPitch: e.target.checked }).then(render) })]),
+        infoBtn('ladder'),
+      ]),
+      el('div', { class: 'rates' }, inputs),
+      el('div', { class: 'row' }, [el('button', { class: 'btn mini ladder-reset', onclick: () => saveWebPrefs({ ladderRates: LADDER_PRESETS[4].slice(), ladderPitch: true }).then(render) }, '기본값 (0.8 → 0.9 → 1 → 1.15)')]),
+    );
+    return box;
   }
   // 진행 상황: 목표일까지 남은 날, 주별 저장·복습, 에피소드별 1회차 이해율·말 속도·어휘 난도
   function renderDashboard() {

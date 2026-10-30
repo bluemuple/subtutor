@@ -402,14 +402,21 @@ function ensureFixtures() {
       await page.keyboard.press('Backslash');
       await sleep(200);
     });
-    await step('반복 속도 사다리: S 반복마다 0.8→0.9→… 올라가고 끄면 원래 속도', async () => {
+    await step('반복 속도 사다리: 웹 설정의 단계대로 S 반복마다 올라가고, 끄면 원래 속도 (음높이 유지)', async () => {
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { loopLadder: true } }, {}));
       await sleep(300);
       await setTime(page, 2.3, true);
       await sleep(300);
       await page.keyboard.press('KeyS');
       await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.8) < 0.01), 3000, 'ladder starts at 0.8');
+      // 플레이어 재생도 음높이를 유지한다 (크롬 기본값이지만 직접 켜 둔다)
+      assert(await page.evaluate(() => { const v = document.querySelector('video'); return !('preservesPitch' in v) || v.preservesPitch === true; }), 'preservesPitch on the video element');
       await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.9) < 0.01), 8000, 'second pass at 0.9');
+      // 웹에서 정한 단계를 따른다: 0.55 → 1.3 으로 바꾸면 다음 반복부터 그 값으로
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.55, 1.3], ladderPitch: true } } }, {}));
+      await sleep(300);
+      await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1.3) < 0.01), 10000, 'follows the web ladder settings (1.3)');
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true } } }, {}));
       await page.keyboard.press('KeyS');
       await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 3000, 'rate restored');
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { loopLadder: false } }, {}));
@@ -679,13 +686,61 @@ function ensureFixtures() {
       await waitFor(() => web.$$eval('.item', (r) => r.length === 3), 8000, 'back to list');
       await waitFor(() => web.$eval('#count-due', (e) => e.textContent === '3'), 5000, 'due badge');
     });
-    await step('속도 사다리 ⤴: 0.8→0.9→1.0→1.15배로 네 번 재생', async () => {
+    await step('속도 사다리 ⤴: 기본 4단계(0.8→0.9→1.0→1.15배)를 음높이를 유지한 채 재생', async () => {
       const yt = '[data-id^="youtube:"]';
+      assert(/0\.8 → 0\.9 → 1 → 1\.15×/.test(await web.$eval(yt + ' .ladder', (b) => b.title)) && /음높이 유지/.test(await web.$eval(yt + ' .ladder', (b) => b.title)), 'ladder button title: ' + await web.$eval(yt + ' .ladder', (b) => b.title));
       await web.click(yt + ' .ladder');
       const seen = new Set();
       await waitFor(async () => { const t = await web.$eval('#toast', (e) => e.textContent); const m = /⤴ ([\d.]+)×/.exec(t); if (m) seen.add(m[1]); return seen.has('1.15'); }, 25000, 'ladder reached 1.15×').catch(async (e) => { const dbg = await web.evaluate(() => JSON.stringify(window.__subtutorDebug ? { clip: window.__subtutorDebug.state.clip, ladderFor: window.__subtutorDebug.state.ladderFor, local: window.__subtutorDebug.state.clipLocal, toast: document.getElementById('toast').textContent, shadow: !!window.__subtutorDebug.state.shadow, log: window.__subtutorDebug.log.slice(-8) } : null)); throw new Error(e.message + ' seen=' + [...seen].join(',') + ' dbg=' + dbg); });
+      // 음높이 유지: 배속마다 미리 늘인/줄인 소리를 1배속으로 재생한다 (playbackRate 를 바꾸면 목소리가 굵어지거나 가늘어진다)
+      const lastClip = await web.evaluate(() => window.__subtutorDebug.state.lastClip);
+      assert(lastClip && lastClip.pitched === true && lastClip.speed === 1, 'pitch-preserved playback: ' + JSON.stringify(lastClip));
       await waitFor(() => web.$eval(yt, (e) => !e.classList.contains('playing')), 6000, 'ladder finished');
       assert(seen.has('0.8') && seen.has('1'), 'rates seen ' + [...seen].join(','));
+    });
+    await step('속도 사다리 설정: 단계 수·단계별 배속(0.3~2.0)·음높이 유지를 바꾸면 그대로 재생된다', async () => {
+      const yt = '[data-id^="youtube:"]';
+      try {
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await waitFor(() => web.$('.ladder-cfg'), 8000, 'ladder settings block');
+      assert(await web.$$eval('.ladder-cfg input.rate', (e) => e.length) === 4, 'four rate inputs by default');
+      // 2단계로 줄이면 기본값(0.7 → 1)이 채워진다
+      await web.select('.ladder-cfg .ladder-steps', '2');
+      await waitFor(() => web.$$eval('.ladder-cfg input.rate', (e) => e.map((x) => x.value)).then((v) => (v.length === 2 ? v : null)), 5000, 'two steps');
+      assert((await web.$$eval('.ladder-cfg input.rate', (e) => e.map((x) => x.value))).join(',') === '0.7,1', 'preset for two steps');
+      // 사용자 지정 배속: 0.45 → 1.0 (범위 밖 값은 0.3~2.0 으로 맞춘다)
+      await web.evaluate(() => { const i = document.querySelector('.ladder-cfg input.rate[data-step="0"]'); i.value = '0.05'; i.dispatchEvent(new Event('change', { bubbles: true })); });
+      await waitFor(() => web.$eval('.ladder-cfg input.rate[data-step="0"]', (i) => i.value === '0.3'), 5000, 'clamped to 0.3');
+      await web.evaluate(() => { const i = document.querySelector('.ladder-cfg input.rate[data-step="0"]'); i.value = '0.45'; i.dispatchEvent(new Event('change', { bubbles: true })); });
+      const saved = await waitFor(async () => { const w = await sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings || {}).web); return w && Array.isArray(w.ladderRates) && w.ladderRates[0] === 0.45 ? w : null; }, 5000, 'rates saved to the extension');
+      assert(saved.ladderRates.length === 2 && saved.ladderRates[1] === 1 && saved.ladderPitch === true, 'saved ladder: ' + JSON.stringify(saved.ladderRates) + ' pitch=' + saved.ladderPitch);
+      // 음높이 유지를 끄면 playbackRate 로 재생한다
+      await web.click('.ladder-cfg .switch[data-pref="ladderPitch"]');
+      await waitFor(async () => { const w = await sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings || {}).web); return w && w.ladderPitch === false; }, 5000, 'pitch off saved');
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await trackClipEvents();
+      await waitFor(() => web.$(yt + ' .ladder'), 8000, 'list back');
+      assert(/0\.45 → 1×/.test(await web.$eval(yt + ' .ladder', (b) => b.title)) && !/음높이 유지/.test(await web.$eval(yt + ' .ladder', (b) => b.title)), 'title follows the settings: ' + await web.$eval(yt + ' .ladder', (b) => b.title));
+      await web.click(yt + ' .ladder');
+      const seen = [];
+      await waitFor(async () => { const t = await web.$eval('#toast', (e) => e.textContent); const m = /⤴ ([\d.]+)×/.exec(t); if (m && seen[seen.length - 1] !== m[1]) seen.push(m[1]); return seen.length >= 2 && seen[seen.length - 1] === '1'; }, 30000, 'custom ladder 0.45 → 1').catch((e) => { throw new Error(e.message + ' seen=' + seen.join(',')); });
+      assert(seen.join(',') === '0.45,1', 'exactly the two configured steps: ' + seen.join(','));
+      const plain = await web.evaluate(() => window.__subtutorDebug.state.lastClip);
+      assert(plain && plain.pitched === false && plain.speed === 1, 'last step is 1× (no stretching needed): ' + JSON.stringify(plain));
+      await waitFor(() => web.$eval(yt, (e) => !e.classList.contains('playing')), 8000, 'custom ladder finished');
+      // 원래대로
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await waitFor(() => web.$('.ladder-cfg .ladder-reset'), 8000, 'reset button');
+      await web.click('.ladder-cfg .ladder-reset');
+      const back = await waitFor(async () => { const w = await sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings || {}).web); return w && w.ladderRates && w.ladderRates.length === 4 && w.ladderPitch === true ? w : null; }, 5000, 'defaults restored');
+      assert(back.ladderRates.join(',') === '0.8,0.9,1,1.15', 'default rates: ' + back.ladderRates.join(','));
+      } finally {
+        // 검사가 실패해도 기본 설정과 목록 화면으로 되돌린다 (안 그러면 뒤 단계가 줄줄이 실패한다)
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true } } }, {})).catch(() => {});
+        await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' }).catch(() => {});
+        await trackClipEvents();
+        await waitFor(() => web.$(yt + ' .ladder'), 8000, 'list back again');
+      }
     });
     await step('오디오 구간 조정: ms 단위 버튼·드래그, 보관 오디오는 그 안에서 자르고 플레이어 재생은 조정 구간으로', async () => {
       const items = () => sw.evaluate(async () => (await chrome.storage.local.get('items')).items);

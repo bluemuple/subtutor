@@ -10,7 +10,7 @@ const DEFAULT_SETTINGS = {
   fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {},
   audioDirName: '', // 사용자가 고른 오디오 저장 폴더 이름 (핸들은 IndexedDB). 비어 있으면 다운로드 폴더
   koMode: 'hold', koRepeats: 3, secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false, missedTag: '못 알아들음',
-  web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28' },
+  web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true },
 };
 // ───────── 학습 통계 (에피소드별 이해율·말 속도, 시리즈 어휘 재출현, 받아쓰기 약점 단어, 복습 기록) ─────────
 async function getStats() {

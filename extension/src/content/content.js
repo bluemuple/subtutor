@@ -1501,7 +1501,11 @@
     const v = adapter.video();
     const r = state.rate;
     if (typeof adapter.setRate === 'function') adapter.setRate(r);
-    if (v) { try { if (Math.abs(v.playbackRate - r) > 0.01) v.playbackRate = r; } catch (e) { /* ignore */ } }
+    if (v) {
+      // 속도를 바꿔도 목소리 높이는 그대로 (크롬 기본값이지만 플레이어가 꺼 두는 경우가 있어 직접 켠다)
+      try { for (const k of ['preservesPitch', 'webkitPreservesPitch', 'mozPreservesPitch']) if (k in v && v[k] !== true) v[k] = true; } catch (e) { /* ignore */ }
+      try { if (Math.abs(v.playbackRate - r) > 0.01) v.playbackRate = r; } catch (e) { /* ignore */ }
+    }
     state.rateReapplyUntil = now() + 2500;
     if (!quiet) toast('⏩ 재생 속도 ' + r.toFixed(2).replace(/\.?0+$/, '') + '×');
     updateModeUI();
@@ -1545,7 +1549,7 @@
     if (state.clip) stopClip('user');
     cancelModesPending();
     state.lastShown = i; state.prevIdx = -1;
-    if (state.loop) { if (state.loopIdx !== i) { state.loopCount = 0; if (settings.loopLadder) { state.rate = LADDER[0]; applyRate(true); } } state.loopIdx = i; }
+    if (state.loop) { if (state.loopIdx !== i) { state.loopCount = 0; if (settings.loopLadder) { state.rate = ladderRates()[0]; applyRate(true); } } state.loopIdx = i; }
     state.clozeRevealIdx = -1;
     playFrom(cueVideoMs(c) - settings.leadMs, !!(opts && opts.play === false));
     highlightRow(i, true);
@@ -1572,7 +1576,14 @@
     const i = anchorIndex();
     if (i >= 0) goToCue(i);
   }
-  const LADDER = [0.8, 0.9, 1, 1.15];
+  // 반복 속도 사다리: 웹 설정(속도 사다리)의 단계를 그대로 쓴다
+  const LADDER_FALLBACK = [0.8, 0.9, 1, 1.15];
+  function ladderRates() {
+    const raw = settings.web && Array.isArray(settings.web.ladderRates) ? settings.web.ladderRates : [];
+    const out = raw.map((x) => Math.round(clamp(+x, 0.3, 2) * 100) / 100).filter((x) => Number.isFinite(x) && x > 0).slice(0, 6);
+    return out.length ? out : LADDER_FALLBACK;
+  }
+  const rateText = (r) => r.toFixed(2).replace(/0$/, '').replace(/\.$/, '');
   function toggleLoop() {
     if (state.loop) {
       state.loop = false; state.loopIdx = -1; toast('반복 끔');
@@ -1581,7 +1592,7 @@
       const i = anchorIndex();
       if (i < 0) return;
       state.loop = true; state.loopIdx = i; state.loopCount = 0; state.loopBaseRate = state.rate;
-      if (settings.loopLadder) { state.rate = LADDER[0]; applyRate(true); toast('🔁 반복 · 속도 사다리 0.8→1.15×'); } else toast('🔁 이 자막 반복');
+      if (settings.loopLadder) { const L = ladderRates(); state.rate = L[0]; applyRate(true); toast('🔁 반복 · 속도 사다리 ' + L.map(rateText).join('→') + '×'); } else toast('🔁 이 자막 반복');
       goToCue(i);
     }
     updateModeUI();
@@ -1738,7 +1749,7 @@
         if ((t >= c.end + settings.tailMs - 20 || t < c.start - settings.leadMs - 2500) && now() - state.lastLoopSeekAt > 500) {
           state.lastLoopSeekAt = now();
           state.loopCount++;
-          if (settings.loopLadder) { const r = LADDER[Math.min(LADDER.length - 1, state.loopCount)]; if (Math.abs(r - state.rate) > 0.01) { state.rate = r; applyRate(true); } }
+          if (settings.loopLadder) { const L = ladderRates(); const r = L[Math.min(L.length - 1, state.loopCount)]; if (Math.abs(r - state.rate) > 0.01) { state.rate = r; applyRate(true); } }
           seekTo(cueVideoMs(c) - settings.leadMs);
           if (settings.koMode === 'afterRepeat') renderOverlay(true);
         }
