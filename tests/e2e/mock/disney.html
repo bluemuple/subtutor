@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Mock Moana | Disney+</title>
+<style>
+  body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
+  .video_view--theater { position: absolute; inset: 0; }
+  video { width: 100%; height: 100%; background: #111; }
+  .controls__footer { position: absolute; left: 0; right: 0; bottom: 0; height: 60px; background: rgba(255,255,255,.06); }
+  .experience-controls { position: absolute; right: 20px; bottom: 10px; display: flex; gap: 8px; height: 40px; }
+  .experience-controls button { height: 40px; }
+</style>
+</head>
+<body>
+<!-- 모의 디즈니+: 실제처럼 React fiber 안의 플레이어 객체로 제어하고, 재생 위치(playheadPositionMs)는 0.5초 계단으로만 알려 준다 -->
+<!-- 실제처럼 컨트롤이 영상 영역 위에 겹쳐 있어, 패널을 열면 영상과 함께 패널 왼쪽으로 줄어든다 -->
+<div class="video_view--theater"><video id="v" muted playsinline preload="auto" src="/media/test.webm"></video>
+<div class="controls__footer"><div class="experience-controls"><button aria-label="Mute">음소거</button><button aria-label="Settings">설정</button><button aria-label="Full screen">전체 화면</button></div></div></div>
+<script>
+(() => {
+  const v = document.getElementById('v');
+  const STEP = 500;
+  const handlers = {};
+  const fire = (ev) => (handlers[ev] || []).forEach((f) => { try { f(); } catch (e) { /* ignore */ } });
+  window.__seeks = [];
+  const player = {
+    timeline: { info: { get playheadPositionMs() { return Math.floor((v.currentTime * 1000) / STEP) * STEP; } } },
+    seek(ms) { window.__seeks.push(ms); fire('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEKING'); v.currentTime = ms / 1000; return Promise.resolve(); },
+    scrub() {},
+    play() { const p = v.play(); if (p && p.catch) p.catch(() => {}); },
+    pause() { v.pause(); },
+    on(ev, f) { (handlers[ev] = handlers[ev] || []).push(f); },
+  };
+  v.addEventListener('play', () => fire('@EVENT/PLAYER/PLAYBACK/MEDIA_RESUMED'));
+  v.addEventListener('pause', () => fire('@EVENT/PLAYER/PLAYBACK/MEDIA_PAUSED'));
+  v.addEventListener('seeked', () => fire('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEK_COMPLETE'));
+  setInterval(() => { if (!v.paused) fire('@EVENT/PLAYER/TIMECODE'); }, 330);
+  // React 가 DOM 요소에 붙이는 fiber 흉내: 페이지 스크립트(disney-page.js)가 video 의 조상에서 플레이어를 찾는다
+  v.parentElement['__reactFiber$mock'] = { memoizedProps: { player }, memoizedState: null, return: null };
+  // 재생 정보 응답 흉내: 페이지 스크립트가 JSON.parse 를 가로채 자막 목록(HLS)과 제목을 얻는다
+  JSON.parse('{"stream":{"sources":[{"complete":{"url":"https://www.disneyplus.com/mock/disney/master.m3u8"}}]}}');
+  JSON.parse('{"data":{"playerExperience":{"title":"Mock Moana","subtitle":""}}}');
+})();
+</script>
+</body>
+</html>

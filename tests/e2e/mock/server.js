@@ -31,6 +31,20 @@ function mockHandler(root) {
     const url = new URL(req.url, 'https://x');
     const p = url.pathname;
     if (p === '/favicon.ico') { res.writeHead(204); res.end(); return; }
+    // 디즈니+ 모의: /play/<id> 플레이어 페이지와 HLS 자막 목록 (자막 본문은 /tracks/*.vtt 를 그대로 쓴다)
+    if (/^\/play\/[^/]+$/.test(p)) return sendFile(req, res, path.join(root, 'disney.html'));
+    if (p.startsWith('/mock/disney/')) {
+      const name = path.basename(p);
+      const m3u8 = {
+        'master.m3u8': '#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub-main",NAME="English",LANGUAGE="en",AUTOSELECT=YES,URI="en.m3u8"\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub-main",NAME="한국어",LANGUAGE="ko",AUTOSELECT=YES,URI="ko.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=100000,SUBTITLES="sub-main"\nvideo.m3u8\n',
+        'en.m3u8': '#EXTM3U\n#EXT-X-TARGETDURATION:60\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:60.000,\n/tracks/en.vtt\n#EXT-X-ENDLIST\n',
+        'ko.m3u8': '#EXTM3U\n#EXT-X-TARGETDURATION:60\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:60.000,\n/tracks/ko.vtt\n#EXT-X-ENDLIST\n',
+      }[name];
+      if (!m3u8) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+      res.end(m3u8);
+      return;
+    }
     // 유튜브 모의: /watch?v=... 페이지와 json3 자막
     if (p === '/watch' && url.searchParams.get('v')) return sendFile(req, res, path.join(root, 'youtube.html'));
     if (p === '/api/timedtext') {

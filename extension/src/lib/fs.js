@@ -71,8 +71,8 @@ globalThis.SubTutorFS = (() => {
       for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part, { create: true });
       const fh = await dir.getFileHandle(parts[parts.length - 1], { create: true });
       const w = await fh.createWritable();
-      await w.write(bytes);
-      await w.close();
+      // 쓰다 실패하면 abort 로 임시 파일(.crswap)을 치운다 — 남으면 나중에 그 폴더를 지우지 못한다
+      try { await w.write(bytes); await w.close(); } catch (e) { try { await w.abort(); } catch (x) { /* ignore */ } throw e; }
       return { ok: true, name: st.name, path: st.name + '/' + parts.join('/') };
     } catch (e) {
       const name = e && e.name;
@@ -120,8 +120,11 @@ globalThis.SubTutorFS = (() => {
       for (const part of parts.slice(0, -1)) dirs.push(await dirs[dirs.length - 1].getDirectoryHandle(part));
       await dirs[dirs.length - 1].removeEntry(parts[parts.length - 1]);
       for (let i = dirs.length - 1; i >= 2; i--) {
-        const first = await dirs[i].entries().next();
-        if (!first.done) break;
+        // 크롬이 쓰다 남긴 임시 파일(.crswap)만 남은 폴더는 빈 폴더로 보고 함께 치운다
+        const left = [];
+        for await (const [name] of dirs[i].entries()) left.push(name);
+        if (left.some((n) => !/\.crswap$/i.test(n))) break;
+        for (const n of left) { try { await dirs[i].removeEntry(n); } catch (e) { /* ignore */ } }
         await dirs[i - 1].removeEntry(parts[i - 1]);
       }
       return { ok: true, name: st.name };

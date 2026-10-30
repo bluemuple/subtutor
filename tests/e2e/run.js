@@ -43,9 +43,111 @@ function ensureFixtures() {
     console.log('▶ 모의 영상 생성 (ffmpeg)');
     execSync('ffmpeg -y -loglevel error -f lavfi -i testsrc=size=320x180:rate=10 -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 48 -c:v libvpx-vp9 -b:v 150k -deadline realtime -cpu-used 8 -c:a libopus -b:a 48k "' + media + '"', { stdio: 'inherit' });
   }
+  // 디즈니+ 더빙 검사에서 마이크 대신 넣는 올라가는 음 (300Hz 에서 초당 200Hz 씩) — 녹음에 반복·끊김이 있으면 음높이가 뒤로 튄다
+  const sweep = path.join(TMP, 'mic-sweep.wav');
+  if (!fs.existsSync(sweep)) {
+    console.log('▶ 마이크 대신 쓸 올라가는 음 생성 (ffmpeg)');
+    execSync('ffmpeg -y -loglevel error -f lavfi -i "aevalsrc=0.5*sin(2*PI*(300*t+100*t*t)):s=48000:d=30" -ac 1 "' + sweep + '"', { stdio: 'inherit' });
+  }
   if (!fs.existsSync(path.join(TMP, 'key.pem')) || !fs.existsSync(path.join(TMP, 'cert.pem'))) {
     console.log('▶ 자체 서명 인증서 생성 (openssl)');
     execSync('openssl req -x509 -newkey rsa:2048 -nodes -keyout "' + path.join(TMP, 'key.pem') + '" -out "' + path.join(TMP, 'cert.pem') + '" -days 60 -subj "/CN=www.netflix.com" -addext "subjectAltName=DNS:www.netflix.com,DNS:translate.googleapis.com,DNS:clients5.google.com"', { stdio: 'inherit' });
+  }
+}
+
+// ── 디즈니+(모의): 따로 띄운 크롬. 플레이어가 재생 위치를 0.5초 계단으로 알려 주는 실제 디즈니+ 를 흉내 내고,
+//    마이크 대신 올라가는 음을 넣어 더빙 녹음이 끊기거나 반복되지 않는지, 재생이 되감기지 않는지까지 본다.
+async function runDisney() {
+  const userDataDir = path.join(TMP, 'profile-disney-' + Date.now());
+  const browser = await puppeteer.launch({
+    headless: HEADLESS,
+    userDataDir,
+    args: [
+      '--disable-extensions-except=' + EXT, '--load-extension=' + EXT,
+      '--host-resolver-rules=MAP www.disneyplus.com 127.0.0.1:8443, MAP translate.googleapis.com 127.0.0.1:8443, MAP clients5.google.com 127.0.0.1:8443',
+      '--ignore-certificate-errors', '--autoplay-policy=no-user-gesture-required', '--mute-audio',
+      '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
+      '--use-file-for-fake-audio-capture=' + path.join(TMP, 'mic-sweep.wav'),
+      '--disable-features=AudioServiceOutOfProcess,AudioServiceSandbox', // 샌드박스된 오디오 서비스는 이 파일을 읽지 못한다
+      '--no-first-run', '--window-size=1400,900',
+    ],
+    acceptInsecureCerts: true,
+    defaultViewport: { width: 1400, height: 900 },
+    protocolTimeout: Number(process.env.E2E_PROTOCOL_TIMEOUT) || 60000,
+  });
+  try {
+    console.log('▶ 모의 디즈니+ (0.5초 계단 재생 위치 · 마이크 대신 올라가는 음)');
+    const swTarget = await browser.waitForTarget((t) => t.type() === 'service_worker' && t.url().includes('background.js'), { timeout: 15000 });
+    const sw = await swTarget.worker();
+    await waitFor(() => sw.evaluate(() => typeof globalThis.__subtutorHandle === 'function' && !!(globalThis.chrome && chrome.storage)), 15000, 'service worker (disney)');
+    await sw.evaluate(() => chrome.storage.local.clear());
+    await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { koMode: 'always' } }, {}));
+    const dp = await browser.newPage();
+    await dp.goto('https://www.disneyplus.com/play/mockdisney1', { waitUntil: 'domcontentloaded' });
+    await step('디즈니+(모의): HLS 자막 10줄과 한국어가 연결되고 제목을 읽는다', async () => {
+      await dp.waitForSelector('#st-panel', { timeout: 20000 });
+      await waitFor(() => dp.$$eval('.st-row', (r) => r.length === 10), 20000, 'disney rows');
+      const status = await dp.$eval('.st-status', (e) => e.textContent);
+      assert(/영어 10줄/.test(status) && /한국어 10줄 연결/.test(status), 'status: ' + status);
+      await waitFor(() => dp.$eval('.st-brand', (e) => /Mock Moana/.test(e.textContent)), 8000, 'disney title');
+    });
+    await step('디즈니+(모의): 오른쪽 컨트롤 묶음 맨 앞에 배속 버튼, 바로 오른쪽에 ST 버튼', async () => {
+      await waitFor(() => dp.$('.st-rate'), 8000, 'rate control (disney)');
+      const order = await dp.$$eval('.experience-controls > *', (xs) => xs.map((x) => (x.classList.contains('st-rate') ? 'rate' : (x.classList.contains('st-ctl') || x.classList.contains('st-ctl-wrap') ? 'ST' : x.getAttribute('aria-label')))));
+      assert(order.join(',') === 'rate,ST,Mute,Settings,Full screen', 'order: ' + order.join(','));
+      await dp.evaluate(() => { const v = document.querySelector('video'); v.muted = false; v.play(); });
+      await sleep(500);
+      await dp.click('.st-rate-up');
+      await waitFor(() => dp.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1.15) < 0.01), 3000, 'disney rate up');
+      await dp.click('.st-rate-now');
+      await waitFor(() => dp.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 3000, 'disney rate reset');
+    });
+    await step('디즈니+(모의) 더빙 녹음: 끊기거나 반복되는 곳 없이 이어진다 (마이크 대신 올라가는 음)', async () => {
+      await dp.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 6.3; });
+      await sleep(800);
+      await dp.keyboard.press('KeyR');
+      await waitFor(() => dp.$eval('.st-dubbox', (b) => !b.classList.contains('st-hidden')), 3000, 'disney dub box');
+      await dp.click('.st-dub-rec');
+      await waitFor(async () => (await dp.$$('.st-dub-take')).length === 1 && !(await dp.$('.st-dub-rec.on')), 25000, 'disney take saved')
+        .catch(async (e) => { throw new Error(e.message + ' toast=' + await dp.$eval('.st-toast', (t) => t.textContent).catch(() => '')); });
+      const t = await sw.evaluate(async () => { const o = await chrome.storage.local.get(null); const seg = o['dubs:disney:mockdisney1'].segs[0]; return { take: seg.takes[0], b64: o['dubaudio:' + seg.takes[0].id].b64 }; });
+      const file = path.join(TMP, 'disney-take.mp3');
+      fs.writeFileSync(file, Buffer.from(t.b64, 'base64'));
+      const pcm = require('child_process').execFileSync('ffmpeg', ['-v', 'error', '-i', file, '-f', 'f32le', '-ac', '1', '-ar', '32000', '-']);
+      const x = new Float32Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.length / 4));
+      const win = 2560; // 80ms 마다 영교차로 음높이를 잰다
+      const hz = [];
+      for (let i = 0; i + win <= x.length; i += win) { let zc = 0; for (let k = i + 1; k < i + win; k++) if ((x[k - 1] < 0) !== (x[k] < 0)) zc++; hz.push(zc / 2 / 0.08); }
+      const body = hz.slice(1); // 첫 80ms 는 MP3 인코더의 시작 지연(무음)
+      const back = body.filter((h, k) => k && h < body[k - 1] - 30);
+      assert(body.length >= 25 && back.length === 0, '음높이가 끝까지 올라간다 (반복·끊김 없음): ' + hz.map((h) => Math.round(h)).join(' '));
+      const slope = (body[body.length - 1] - body[0]) / ((body.length - 1) * 0.08);
+      assert(slope > 160 && slope < 240, '오르는 속도 ≈ 200Hz/초 (빠지거나 겹친 조각 없음): ' + slope.toFixed(0) + 'Hz/초');
+      assert(Math.abs(t.take.ms - 2500) < 150, 'take covers the line ±250ms: ' + t.take.ms);
+    });
+    await step('디즈니+(모의) 더빙 재생: 재생 위치가 0.5초 계단으로 와도 녹음을 되감지 않는다 (말머리 반복 없음)', async () => {
+      await dp.click('.st-dub-take .st-dub-star');
+      await waitFor(() => dp.$('.st-dub-take.chosen'), 3000, 'disney take starred');
+      await dp.evaluate(() => { const v = document.querySelector('video'); v.muted = false; v.currentTime = 4.6; v.play(); });
+      const tl = [];
+      const t0 = Date.now();
+      while (Date.now() - t0 < 4800) {
+        tl.push(await dp.evaluate(() => [document.querySelector('video').currentTime, document.querySelector('video').muted, document.querySelector('.st-ov-dub').classList.contains('on'), document.querySelector('.st-ov-dub').dataset.restarts || '']));
+        await sleep(80);
+      }
+      await dp.evaluate(() => document.querySelector('video').pause());
+      const on = tl.filter((x) => x[2]);
+      assert(on.length > 15, 'dub played: ' + on.length + ' samples');
+      assert(on.every((x) => x[3] === '0'), '녹음을 한 번도 되감지 않았다: ' + JSON.stringify([...new Set(on.map((x) => x[3]))]));
+      const flips = tl.filter((x, k) => k && x[2] !== tl[k - 1][2]).length;
+      assert(flips === 2, '더빙이 한 번 켜지고 한 번 꺼진다 (탐색 직후 예전 위치로 잘못 시작하지 않는다): 바뀐 횟수 ' + flips);
+      const mutedAt = tl.filter((x) => x[1]).map((x) => x[0]);
+      assert(Math.min(...mutedAt) > 5.5 && Math.max(...mutedAt) < 8.8, 'muted only around the line: ' + Math.min(...mutedAt).toFixed(2) + '–' + Math.max(...mutedAt).toFixed(2));
+      assert(tl.some((x) => x[0] > 8.9 && !x[1]) && tl.some((x) => x[0] < 5.4 && !x[1]), 'original sound before and after');
+    });
+  } finally {
+    await browser.close().catch(() => {});
+    fs.rmSync(userDataDir, { recursive: true, force: true });
   }
 }
 
@@ -1168,8 +1270,9 @@ function ensureFixtures() {
       assert(left.length === 0, 'no stored audio left: ' + left);
       // 삭제하면 지정 폴더의 MP3 파일과 비게 된 작품 폴더도 지워지고, 확인 창이 그 사실을 알린다
       assert(logs.some((l) => /\[web dialog\] 이 대사 1개를 삭제할까요\? PC 에 저장한 MP3 파일 1개도 함께 지웁니다/.test(l)), 'delete confirm names the MP3 file: ' + logs.filter((l) => /web dialog/.test(l)).slice(-1).join(''));
-      const folders = await opt.evaluate(async () => { const sub = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [n] of sub.entries()) out.push(n); return out; });
-      assert(!folders.some((n) => /Mock Lecture/.test(n)), 'MP3 file and its emptied folder removed with the item: ' + JSON.stringify(folders));
+      // 실패하면 남은 폴더 안에 무엇이 있는지까지 보여 준다 (예전에 가끔 실패했지만 원인을 볼 수 없었다)
+      const folders = await opt.evaluate(async () => { const sub = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [n, h] of sub.entries()) { if (h.kind === 'directory') { const inner = []; for await (const [m] of h.entries()) inner.push(m); out.push(n + '/[' + inner.join(', ') + ']'); } else out.push(n); } return out; });
+      assert(!folders.some((n) => /Mock Lecture/.test(n)), 'MP3 file and its emptied folder removed with the item: ' + JSON.stringify(folders) + ' toast=' + await web.$eval('#toast', (t) => t.textContent).catch(() => ''));
     });
     await step('코멘트를 쓰면 저장되고 새로고침 후에도 남는다', async () => {
       const ta = await web.$('[data-id="netflix:12345:22000"] .comment');
@@ -1387,6 +1490,7 @@ function ensureFixtures() {
 
     const errors = logs.filter((l) => /error/i.test(l) && !/favicon|ERR_|net::/i.test(l));
     if (errors.length) console.log('  콘솔 오류:\n   ' + errors.slice(0, 10).join('\n   '));
+    await runDisney();
   } catch (e) {
     failed = true;
     console.log('✖ 치명적 오류: ' + (e && e.stack || e));

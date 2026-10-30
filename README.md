@@ -132,7 +132,7 @@ npm run sync-lib              # extension/src/lib/subtitles.js → docs/subtitle
 # E2E: Chrome for Testing(puppeteer) + 실제 확장 프로그램 + 모의 넷플릭스(https://www.netflix.com → 127.0.0.1:8443) + 웹사이트(localhost:8766)
 npm i -D puppeteer            # 최초 1회 (Chrome for Testing 내려받음)
 openssl req -x509 -newkey rsa:2048 -nodes -keyout tests/e2e/.tmp/key.pem -out tests/e2e/.tmp/cert.pem -days 60 -subj "/CN=www.netflix.com"
-npm run e2e                   # 68개 시나리오: 패널/오버레이/단축키/AP/쉐도잉/저장/켜기끄기/시간보정/유튜브/오디오 캡처·폴더 저장/웹 재생·정지·반복·대사별 배속 버튼/PC 파일 읽기·MP3 폴더 불러오기/편집 모드 삭제/감추기/코멘트/녹음/퀴즈
+npm run e2e                   # 72개 시나리오: 모의 디즈니+(계단식 재생 위치·더빙 녹음 연속성·되감기 없음)·패널/오버레이/단축키/AP/쉐도잉/저장/켜기끄기/시간보정/유튜브/오디오 캡처·폴더 저장/웹 재생·정지·반복·대사별 배속 버튼/PC 파일 읽기·MP3 폴더 불러오기/편집 모드 삭제/감추기/코멘트/녹음/퀴즈
 ```
 
 E2E는 헤드리스로 돌며 `tests/e2e/.tmp/shots/`에 스크린샷을 남깁니다. 모의 영상은 ffmpeg로 생성됩니다.

@@ -24,6 +24,31 @@
    * 녹음 조각(chunks: {startFrame, samples(Float32Array)})에서 벽시계 [startMs, endMs] 구간을 잘라낸다.
    * originMs = 프레임 0 의 벽시계 시각. 빠진 구간은 무음으로 채우고, 녹음 범위 밖은 잘라낸다.
    */
+  /**
+   * 들쭉날쭉한 재생 위치를 매끈한 시계로 바꾼다.
+   * 디즈니+ 는 재생 위치를 0.5초쯤 간격으로 끊어서(그리고 조금 늦게) 알려 주므로, 그 사이를 이어 붙인 시각은 톱니처럼 뒤로 튄다.
+   * 최근 windowMs 동안의 (위치 − 시각×배속) 중앙값을 쓴다. 멈춤·배속 변경·jumpMs 넘는 점프(탐색)면 새로 잰다.
+   * update(위치ms, 지금ms, 멈춤?, 배속) → 고른 위치ms
+   */
+  function mediaClock(opts) {
+    const o = opts || {};
+    const windowMs = o.windowMs || 1500, jumpMs = o.jumpMs || 1200, minSamples = o.minSamples || 3;
+    let samples = [], rate = 1;
+    const median = () => { const a = samples.map((x) => x[1]).sort((p, q) => p - q); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
+    return {
+      reset() { samples = []; },
+      update(mediaMs, nowMs, paused, playbackRate) {
+        const r = playbackRate > 0 ? playbackRate : 1;
+        if (!Number.isFinite(mediaMs) || !Number.isFinite(nowMs)) return mediaMs;
+        if (paused || Math.abs(r - rate) > 1e-3) { samples = []; rate = r; return mediaMs; }
+        const off = mediaMs - nowMs * r;
+        if (samples.length && Math.abs(off - median()) > jumpMs) samples = [];
+        samples.push([nowMs, off]);
+        while (samples.length > 1 && nowMs - samples[0][0] > windowMs) samples.shift();
+        return samples.length < minSamples ? mediaMs : nowMs * r + median();
+      },
+    };
+  }
   function clipSamples(chunks, { originMs, sampleRate, startMs, endMs }) {
     if (![originMs, sampleRate, startMs, endMs].every(Number.isFinite) || sampleRate <= 0 || endMs <= startMs || !chunks.length) return null;
     let recStart = Infinity, recEnd = -Infinity;
@@ -159,5 +184,5 @@
     return (h ? String(h).padStart(2, '0') + '-' : '') + String(m).padStart(2, '0') + '-' + String(sec).padStart(2, '0');
   }
 
-  return { mediaClockOffset, clipSamples, isSilent, resample, normalize, encodeMonoWav, encodeMonoMp3, encodeClip, hasMp3, floatToInt16, parseWavHeader, bytesToBase64, base64ToBytes, safeFileName, fmtClock };
+  return { mediaClockOffset, mediaClock, clipSamples, isSilent, resample, normalize, encodeMonoWav, encodeMonoMp3, encodeClip, hasMp3, floatToInt16, parseWavHeader, bytesToBase64, base64ToBytes, safeFileName, fmtClock };
 });

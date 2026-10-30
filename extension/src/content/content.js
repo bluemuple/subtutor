@@ -1343,7 +1343,7 @@
       'offset=' + state.offsetMs + ' (' + state.offsetSource + ') samples=' + JSON.stringify(state.alignSamples),
       'meta=' + JSON.stringify(state.meta) + ' status=' + state.statusText,
       'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + shadowPauseValue() + ' audio=' + settings.audioMode + ' rate=' + state.rate + ' clearance=' + state.clearanceCur,
-      'dub segs=' + state.dubSegs.length + ' chosen=' + state.dubSegs.filter((s) => chosenTake(s)).length + ' playback=' + (settings.dubPlayback !== false) + ' play=' + (state.dubPlay ? state.dubPlay.take.id + '@' + state.dubPlay.offset.toFixed(2) : '-') + ' rec=' + (state.dubRec ? state.dubRec.phase : '-') + ' ladder=' + (state.dubLadder ? state.dubLadder.step : '-') + ' mic=' + (state.dubMic ? 'open' : 'closed') + ' ctx=' + (dubCtx ? dubCtx.state : '-'),
+      'dub segs=' + state.dubSegs.length + ' chosen=' + state.dubSegs.filter((s) => chosenTake(s)).length + ' playback=' + (settings.dubPlayback !== false) + ' play=' + (state.dubPlay ? state.dubPlay.take.id + '@' + state.dubPlay.offset.toFixed(2) : '-') + ' rec=' + (state.dubRec ? state.dubRec.phase : '-') + ' ladder=' + (state.dubLadder ? state.dubLadder.step : '-') + ' mic=' + (state.dubMic ? 'open' : 'closed') + ' ctx=' + (dubCtx ? dubCtx.state : '-') + ' resyncs=' + dubRestartsTotal,
       'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' clip=' + JSON.stringify(state.clip) + ' capturing=' + !!state.capturing + ' tabId=' + state.tabId,
       'layout panel=' + !!(settings.panelOpen && state.active) + ' videoRight=' + (v ? Math.round(v.getBoundingClientRect().right) : '-') + '/' + window.innerWidth + ' fit=' + (fit.el ? describeEl(fit.el) : '-') + ' shadowRoots=' + (adapter.deep ? A.deepRoots().length - 1 : 0) + ' nativeHidden=' + nativeHiddenCount() + ' cueEl=' + (adapter.nativeCueSelector ? A.qsaDeep(adapter.nativeCueSelector).map(describeEl).slice(0, 2).join(',') : '-'),
     ].join('\n');
@@ -1836,6 +1836,9 @@
   const dubReady = new Map();     // takeId -> AudioBuffer (디코딩이 끝난 것)
   const dubBroken = new Set();    // 읽지 못한 녹음
   let dubCtx = null;
+  const dubClock = globalThis.SubTutorAudio && globalThis.SubTutorAudio.mediaClock ? globalThis.SubTutorAudio.mediaClock() : null;
+  const dubGuarded = new WeakSet(); // volumechange 감시를 붙인 video
+  let dubRestartsTotal = 0;
   const fmtT = (ms) => { const s = Math.max(0, ms) / 1000; const m = Math.floor(s / 60); return m + ':' + (s - m * 60).toFixed(1).padStart(4, '0'); };
   const dubBusy = () => !!(state.dubRec || state.dubLadder || state.dubPreview);
   const chosenTake = (seg) => (seg && seg.chosen ? seg.takes.find((t) => t.id === seg.chosen) || null : null);
@@ -2163,22 +2166,34 @@
     }
     return null;
   }
+  let dubLastRaw = NaN, dubStall = 0;
   function dubTick(raw, paused) {
-    const tgt = paused ? null : dubTarget(raw);
-    const cur = state.dubPlay;
-    if (!tgt) { if (cur) stopDubPlay(); return; }
     const v = adapter.video();
     const rate = (v && v.playbackRate) || 1;
-    const want = (raw - tgt.take.clipStartMs) / 1000; // 녹음 안에서 지금 나와야 할 위치(초)
+    // 재생 중인데 위치가 그대로면 멈춘 것으로 본다: 디즈니+ 는 탐색 직후 새 위치를 조금 늦게 알려 주고(그사이 예전 위치가 남는다), 버퍼링 때도 그렇다
+    dubStall = !paused && raw === dubLastRaw ? dubStall + 1 : 0;
+    dubLastRaw = raw;
+    // 디즈니+ 는 재생 위치를 0.5초쯤 간격으로 끊어서 알려 줘, 그대로 쓰면 시각이 톱니처럼 뒤로 튄다.
+    // 예전에는 그때마다 녹음을 되감아 "Na-naice to-to" 처럼 말머리가 반복됐다 → 최근 1.5초의 중앙값으로 고른 시계를 쓴다
+    const t = dubClock ? dubClock.update(raw, now(), paused || dubStall >= 3, rate) : raw;
+    const tgt = paused || dubStall >= 6 ? null : dubTarget(t); // 0.24초 넘게 멈춰 있으면 더빙도 멈춘다 (영상이 다시 흐르면 그 자리부터)
+    const cur = state.dubPlay;
+    if (!tgt) { if (cur) stopDubPlay(); return; }
+    const want = (t - tgt.take.clipStartMs) / 1000; // 녹음 안에서 지금 나와야 할 위치(초)
     if (cur && cur.take.id === tgt.take.id && dubCtx) {
+      if (dubStall > 0) return; // 위치가 멈춰 있는 동안에는 맞추지 않는다 (낡은 값으로 되감지 않게)
       const pos = cur.offset + (dubCtx.currentTime - cur.ctxAt) * cur.rate;
-      if (Math.abs(pos - want) > 0.2 || Math.abs(cur.rate - rate) > 0.01) startDubSource(tgt, want, rate); // 탐색·버퍼링으로 어긋나면 다시 맞춘다
+      const d = want - pos;
+      // 정말 어긋났을 때만(탐색·버퍼링) 다시 맞춘다: 큰 점프는 바로, 0.45초 넘는 어긋남은 세 번 연달아일 때. 작은 흔들림에 되감으면 같은 소리가 반복된다
+      cur.off = Math.abs(d) > 0.45 ? (cur.off || 0) + 1 : 0;
+      if (Math.abs(d) > 1.5 || cur.off >= 3 || Math.abs(cur.rate - rate) > 0.01) { dubRestartsTotal++; startDubSource(tgt, want, rate, true); }
       else if (cur.videoEl && !cur.videoEl.muted) cur.videoEl.muted = true; // 플레이어가 소리를 되살리면 다시 끈다
       return;
     }
-    startDubSource(tgt, want, rate);
+    if (dubStall > 0) return; // 새 더빙은 위치가 실제로 흐를 때만 시작한다 (탐색 직후 예전 위치로 잘못 시작하지 않게)
+    startDubSource(tgt, want, rate, false);
   }
-  function startDubSource(tgt, offsetSec, rate) {
+  function startDubSource(tgt, offsetSec, rate, isRestart) {
     const buf = dubReady.get(tgt.take.id);
     if (!buf) { dubBuffer(tgt.take.id); return; } // 디코딩이 끝나면 다음 틱에 시작한다
     if (offsetSec >= buf.duration - 0.04) return;
@@ -2194,9 +2209,14 @@
     src.connect(ctx.destination);
     const at = Math.max(0, offsetSec);
     src.start(0, at);
-    if (v) v.muted = true;
-    state.dubPlay = { seg: tgt.seg, take: tgt.take, src, ctxAt: ctx.currentTime, offset: at, rate, restoreMuted, videoEl: v };
-    if (ui.ovDub) { ui.ovDub.classList.add('on'); ui.ovDub.dataset.take = tgt.take.id; }
+    if (v) {
+      v.muted = true;
+      // 플레이어가 음소거를 풀면(volumechange) 그 자리에서 다시 끈다 — 틱(40ms)을 기다리면 원래 소리가 잠깐 새어 나온다
+      if (!dubGuarded.has(v)) { dubGuarded.add(v); v.addEventListener('volumechange', () => { const p = state.dubPlay; if (p && p.videoEl === v && !v.muted) v.muted = true; }); }
+    }
+    const restarts = isRestart && prev ? (prev.restarts || 0) + 1 : 0;
+    state.dubPlay = { seg: tgt.seg, take: tgt.take, src, ctxAt: ctx.currentTime, offset: at, rate, restoreMuted, videoEl: v, restarts, off: 0 };
+    if (ui.ovDub) { ui.ovDub.classList.add('on'); ui.ovDub.dataset.take = tgt.take.id; ui.ovDub.dataset.restarts = String(restarts); }
   }
   function stopDubPlay() {
     const p = state.dubPlay;
