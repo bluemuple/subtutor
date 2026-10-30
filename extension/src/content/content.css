@@ -142,35 +142,33 @@ u.st-kiwi { text-decoration: underline dotted #fbbf24; text-underline-offset: 3p
 .st-chip-error { color: #f87171; }
 @keyframes st-chip-pulse { 50% { box-shadow: 0 0 0 5px rgba(248,113,113,.25); } }
 
-/* 더빙 상자 (패널 안) · 목록의 🎙 표시 · 영상 위 "내 더빙" 표시 */
-.st-dubbox { position: absolute; top: 46px; right: 8px; left: 8px; max-height: calc(100% - 60px); overflow-y: auto; background: #1b1b1b; border: 1px solid #3a3320; border-radius: 10px; padding: 10px 12px 12px; z-index: 3; box-shadow: 0 10px 30px rgba(0,0,0,.6); font-size: 13px; color: #ddd; }
+/* 더빙 칸: 팝업이 아니라 패널 목록 안, 그 자막 바로 아래 (높이 최소) · 목록의 🎙 표시 · 영상 위 "내 더빙" 표시 */
+.st-dubbox { margin: 0 8px 8px 13px; padding: 5px 7px 6px; background: #1f1b10; border: 1px solid #4a3f1c; border-radius: 8px; font-size: 12.5px; color: #ddd; cursor: default; }
 .st-dubbox.st-hidden { display: none; }
-.st-dub-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
-.st-dub-head b { color: #fbbf24; font-size: 14px; flex: 1; }
-.st-dub-span { color: #8a8a8a; font-size: 12px; }
-.st-dub-text { color: #fff; font-size: 14px; line-height: 1.4; margin: 3px 0 8px; }
-.st-dub-nav { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 4px; }
-.st-dub-step { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid #2a2a2a; flex-wrap: wrap; }
-.st-dub-n { flex: 0 0 18px; height: 18px; border-radius: 50%; background: #2c2c2c; color: #bbb; font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
-.st-dub-rates { color: #8a8a8a; font-size: 12px; display: inline-flex; gap: 4px; flex-wrap: wrap; }
-.st-dub-rates .now { color: #fbbf24; font-weight: 700; }
-.st-dub-hint { color: #8a8a8a; font-size: 11.5px; flex: 1; min-width: 120px; }
+.st-row.st-dub-on { background: #2a2618; border-left-color: #fbbf24; }
+.st-dub-nav { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.st-dub-sp { flex: 1; }
+.st-dub-nav .st-icon { font-size: 14px; padding: 0 4px; }
+.st-dub-step { display: flex; align-items: center; gap: 4px; padding-top: 5px; flex-wrap: wrap; }
+.st-dub-n { flex: 0 0 16px; height: 16px; border-radius: 50%; background: #2c2c2c; color: #bbb; font-size: 10.5px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.st-dub-rate { background: #2b2b2b; color: #ccc; border: 1px solid #444; border-radius: 6px; padding: 1px 6px; font-size: 12px; min-width: 30px; cursor: pointer; font-variant-numeric: tabular-nums; }
+.st-dub-rate:hover { color: #fff; border-color: #666; }
+.st-dub-rate.on { background: #fbbf24; border-color: #fbbf24; color: #111; font-weight: 700; }
+.st-dub-rate:disabled { opacity: .45; cursor: default; }
 .st-btn.st-dub-ladder.on { background: #3a3320; border-color: #fbbf24; color: #fbbf24; }
-.st-btn.st-dub-rec { background: #3b1d1d; border-color: #7f2a2a; color: #fca5a5; min-width: 64px; }
+.st-btn.st-dub-rec { background: #3b1d1d; border-color: #7f2a2a; color: #fca5a5; min-width: 58px; }
 .st-btn.st-dub-rec.on { background: #dc2626; border-color: #dc2626; color: #fff; }
 .st-btn:disabled { opacity: .45; cursor: default; }
-.st-dub-takes { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 200px; }
-.st-dub-take { display: flex; align-items: center; gap: 6px; background: #222; border: 1px solid #333; border-radius: 8px; padding: 4px 6px; }
+.st-dub-takes { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 200px; }
+.st-dub-take { display: flex; align-items: center; gap: 5px; background: #242424; border: 1px solid #333; border-radius: 7px; padding: 2px 5px; }
 .st-dub-take.chosen { border-color: #fbbf24; background: #2a2618; }
-.st-dub-k { color: #888; font-size: 11px; width: 12px; text-align: center; }
-.st-dub-len { color: #bbb; font-size: 12px; flex: 1; }
+.st-dub-k { color: #888; font-size: 11px; width: 10px; text-align: center; }
+.st-dub-len { color: #bbb; font-size: 11.5px; flex: 1; }
 .st-btn.st-dub-play.on { border-color: #93c5fd; color: #93c5fd; }
-.st-dub-star, .st-dub-del { background: none; border: none; cursor: pointer; padding: 0 4px; line-height: 1.2; }
-.st-dub-star { color: #fbbf24; font-size: 18px; }
-.st-dub-del { color: #888; font-size: 13px; }
+.st-dub-star, .st-dub-del { background: none; border: none; cursor: pointer; padding: 0 3px; line-height: 1.2; }
+.st-dub-star { color: #fbbf24; font-size: 17px; }
+.st-dub-del { color: #888; font-size: 12px; }
 .st-dub-del:hover { color: #f87171; }
-.st-dub-onoff { display: flex; align-items: center; gap: 8px; color: #ddd; cursor: pointer; flex: 1; }
-.st-btn.st-dub-clear.st-armed { border-color: #f87171; color: #f87171; }
 .st-dub-mark { background: none; border: none; cursor: pointer; font-size: 13px; opacity: .45; padding: 0 2px; line-height: 1.4; flex: none; }
 .st-dub-mark.on { opacity: 1; }
 .st-row.st-dubbed { border-left-color: #fbbf24; }

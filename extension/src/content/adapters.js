@@ -199,7 +199,11 @@ globalThis.SubTutorAdapters = (() => {
     timeMs() {
       const p = shared.pageTime;
       if (!p.at) return NaN;
-      return p.ms + (p.advancing ? performance.now() - p.at : 0);
+      if (!p.advancing) return p.ms;
+      // 보고 사이를 이어 붙일 때 배속을 곱한다 — 0.5배로 재생하면 위치도 0.5배로 흐른다 (예전에는 1배로 가정해 앞서 갔다가 되돌아왔다)
+      const v = pickVideo();
+      const rate = v && v.playbackRate > 0 ? v.playbackRate : 1;
+      return p.ms + (performance.now() - p.at) * rate;
     },
     isPaused() { const v = this.video(); return v ? v.paused : !shared.pageTime.advancing; },
     seek(ms) { page.send({ type: 'seek', ms: Math.max(0, Math.round(ms)) }); },

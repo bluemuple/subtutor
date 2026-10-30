@@ -316,9 +316,9 @@ input.pick, input.pick-all { width: 19px; height: 19px; accent-color: var(--acce
 .meta button.fmt.only:hover { background: rgba(251,191,36,.12); }
 
 /* 속도 사다리 세부 설정 */
-.ladder-cfg { margin: 8px 0 2px; padding: 10px 12px; background: var(--card2); border: 1px solid var(--line); border-radius: 10px; }
-.ladder-cfg .row { margin-top: 0; }
-.ladder-cfg select { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; font-size: 14px; }
+.ladder-cfg, .dub-rec-cfg { margin: 8px 0 2px; padding: 10px 12px; background: var(--card2); border: 1px solid var(--line); border-radius: 10px; }
+.ladder-cfg .row, .dub-rec-cfg .row { margin-top: 0; }
+.ladder-cfg select, .dub-rec-cfg select { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; font-size: 14px; }
 .switch-inline { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); cursor: pointer; margin-left: 12px; }
 .rates { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .rate-cell { display: inline-flex; align-items: center; gap: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }

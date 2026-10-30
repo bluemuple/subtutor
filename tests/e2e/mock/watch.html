@@ -28,6 +28,8 @@
     { trackId: 'T:1:en', bcp47: 'en', displayName: 'English', rawTrackType: 'SUBTITLES', isNoneTrack: false, isForcedNarrative: false },
     { trackId: 'T:1:ko', bcp47: 'ko', displayName: '한국어', rawTrackType: 'SUBTITLES', isNoneTrack: false, isForcedNarrative: false },
   ];
+  // 에피소드 바꾸기 흉내: 주소의 숫자가 영상 ID (window.__mockEpisode(id) 로 다른 에피소드로 넘어간다)
+  let movieId = +(location.pathname.split('/').pop()) || 12345;
   const player = {
     getCurrentTime: () => Math.round(video.currentTime * 1000),
     seek: (ms) => { window.__seeks.push(ms); video.currentTime = ms / 1000; },
@@ -37,7 +39,7 @@
     isPlaying: () => !video.paused,
     isReady: () => video.readyState >= 1,
     getDuration: () => Math.round((video.duration || 0) * 1000),
-    getMovieId: () => 12345,
+    getMovieId: () => movieId,
     getPlaybackRate: () => video.playbackRate,
     setPlaybackRate: (r) => { video.playbackRate = r; },
     getTimedTextTrackList: () => tracks,
@@ -54,12 +56,13 @@
   window.__patchedRequest = JSON.parse(JSON.stringify({ url: 'manifest', params: { profiles: ['heaac-2-dash'], viewableId: 12345, supportsPartialHydration: true } }));
 
   // 플레이어가 manifest 응답을 파싱하는 상황을 흉내낸다
-  const manifest = { result: { movieId: 12345, padding: 'x'.repeat(600), textTracks: [
+  const manifestFor = (id) => ({ result: { movieId: id, padding: 'x'.repeat(600), textTracks: [
     { id: 'T:1:en', language: 'en', languageDescription: 'English', rawTrackType: 'subtitles', isNoneTrack: false, isForcedNarrative: false, hydrated: true, downloadables: { 'webvtt-lssdh-ios8': { urls: [{ url: location.origin + '/tracks/en.vtt', cdnId: 1 }] } } },
     { id: 'T:1:ko', language: 'ko', languageDescription: '한국어', rawTrackType: 'subtitles', isNoneTrack: false, isForcedNarrative: false, hydrated: true, downloadables: { 'webvtt-lssdh-ios8': { urls: [{ url: location.origin + '/tracks/ko.vtt', cdnId: 1 }] } } },
     { id: 'T:1:none', language: 'none', isNoneTrack: true },
-  ] } };
-  setTimeout(() => { JSON.parse(JSON.stringify(manifest)); }, 300);
+  ] } });
+  setTimeout(() => { JSON.parse(JSON.stringify(manifestFor(movieId))); }, 300);
+  window.__mockEpisode = (id) => { movieId = id; JSON.parse(JSON.stringify(manifestFor(id))); history.pushState({}, '', '/watch/' + id); };
 
   video.src = '/media/test.webm';
   video.addEventListener('canplay', () => { if (!window.__started) { window.__started = true; video.play().catch(() => {}); } }, { once: true });

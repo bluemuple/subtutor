@@ -1,4 +1,4 @@
-const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '', koMode: 'hold', secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false };
+const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '', koMode: 'hold', secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false };
 // 따라하기 쉬는 시간: 자막 길이 × 배율(r…) 또는 고정 초(s…) — content.js 와 같은 규칙
 const SHADOW_RATIOS = [0.8, 1, 1.1, 1.2, 1.3, 1.5, 2];
 const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));

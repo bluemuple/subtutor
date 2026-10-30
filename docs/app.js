@@ -9,7 +9,7 @@
   const St = window.SubTutorStretch;
   const KIWI = window.SubTutorKiwi || [];
   const DAY = 86400000;
-  const WEB_DEFAULTS = { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true };
+  const WEB_DEFAULTS = { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1] };
   // 사다리 단계 수를 바꿀 때 채워 넣는 기본값 (마지막은 1배속)
   const LADDER_PRESETS = { 1: [1], 2: [0.7, 1], 3: [0.7, 0.85, 1], 4: [0.8, 0.9, 1, 1.15], 5: [0.7, 0.8, 0.9, 1, 1.15], 6: [0.6, 0.7, 0.8, 0.9, 1, 1.15] };
   const RATE_MIN = 0.3, RATE_MAX = 2, LADDER_MAX_STEPS = 6;
@@ -1235,6 +1235,7 @@
         el('h3', null, ['학습 기능', infoBtn('twoPass')]),
         el('div', { class: 'switches' }, [toggle('srs', '간격 반복 복습'), toggle('weakWords', '약점 단어'), toggle('dashboard', '진행 상황'), toggle('recommend', '추천 콘텐츠'), toggle('shadow', '쉐도잉 세션', 'shadowSession'), toggle('ladder', '속도 사다리 ⤴', 'ladder')]),
         state.web.ladder ? renderLadderCfg() : null,
+        renderDubRecCfg(),
         el('div', { class: 'row' }, [el('label', null, ['근무 시작일 ', goal]), infoBtn('dashboard')]),
       ]),
       state.web.dashboard ? renderDashboard() : null,
@@ -1317,6 +1318,33 @@
       el('div', { class: 'row' }, [el('button', { class: 'btn mini ladder-reset', onclick: () => saveWebPrefs({ ladderRates: LADDER_PRESETS[4].slice(), ladderPitch: true }).then(render) }, '기본값 (0.8 → 0.9 → 1 → 1.15)')]),
     );
     return box;
+  }
+  // 더빙 녹음 배속: 플레이어 더빙 칸 ② 의 배속 버튼 (0.5~1배, 1~3개). 0.5배로 녹음하면 영상도 0.5배로 흐르고, 저장할 때 원래 속도로 맞춘다
+  const DUB_REC_PRESETS = { 1: [1], 2: [0.5, 1], 3: [0.5, 0.7, 1] };
+  function dubRecRates() {
+    const raw = Array.isArray(state.web.dubRecRates) ? state.web.dubRecRates : [];
+    const out = raw.map((x) => Math.round(clampNum(+x, 0.5, 1) * 100) / 100).filter((x) => Number.isFinite(x) && x > 0).slice(0, 3);
+    return out.length ? out : DUB_REC_PRESETS[3].slice();
+  }
+  function renderDubRecCfg() {
+    const rates = dubRecRates();
+    const steps = el('select', { class: 'dub-rec-steps', title: '버튼 수', onchange: (e) => saveWebPrefs({ dubRecRates: (DUB_REC_PRESETS[+e.target.value] || DUB_REC_PRESETS[3]).slice() }).then(render) },
+      [1, 2, 3].map((n) => el('option', { value: n, selected: rates.length === n }, n + '개')));
+    const inputs = rates.map((r, k) => el('label', { class: 'rate-cell' }, [
+      el('span', { class: 'rate-n' }, String(k + 1)),
+      el('input', { type: 'number', class: 'rate dub-rec-rate', 'data-step': k, min: 0.5, max: 1, step: 0.05, value: fmtRate(r), onchange: (e) => {
+        const v = Math.round(clampNum(parseFloat(e.target.value), 0.5, 1) * 100) / 100;
+        const next = dubRecRates().slice();
+        next[k] = Number.isFinite(v) ? v : 1;
+        e.target.value = fmtRate(next[k]);
+        saveWebPrefs({ dubRecRates: next }).then(render);
+      } }),
+      el('span', { class: 'rate-x' }, '×'),
+    ]));
+    return el('div', { class: 'dub-rec-cfg' }, [
+      el('div', { class: 'row' }, [el('label', null, ['더빙 녹음 배속 ', steps]), infoBtn('dub')]),
+      el('div', { class: 'rates' }, inputs),
+    ]);
   }
   // 진행 상황: 목표일까지 남은 날, 주별 저장·복습, 에피소드별 1회차 이해율·말 속도·어휘 난도
   function renderDashboard() {
