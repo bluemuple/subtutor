@@ -487,6 +487,95 @@ function ensureFixtures() {
         await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 3000, 'rate reset').catch(() => {});
       }
     });
+    const WEB_PREFS = { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true };
+    const dubTakes = () => page.$$eval('.st-dub-take', (x) => x.map((e) => e.dataset.take));
+    let dubFour = [];
+    await step('더빙 ①: R 로 지금 자막의 더빙 상자를 열고, 배속 연습은 설정한 단계(0.5 → 0.5 → 0.7 → 1배)대로 구간을 한 번씩 재생한다', async () => {
+      await sw.evaluate((w) => globalThis.__subtutorHandle({ type: 'settings.set', patch: { web: Object.assign({}, w, { ladderRates: [0.5, 0.5, 0.7, 1] }) } }, {}), WEB_PREFS);
+      await page.evaluate(() => { const v = document.querySelector('video'); v.muted = false; v.pause(); v.currentTime = 6.3; });
+      await sleep(500);
+      await page.keyboard.press('KeyR');
+      await waitFor(() => page.$eval('.st-dubbox', (b) => !b.classList.contains('st-hidden')), 3000, 'dub box open');
+      const head = await page.$eval('.st-dubbox', (b) => ({ span: b.querySelector('.st-dub-span').textContent, text: b.querySelector('.st-dub-text').textContent, rates: b.querySelector('.st-dub-rates').textContent }));
+      assert(/0:06\.0 – 0:08\.0/.test(head.span) && /Raffie/.test(head.text) && head.rates.replace(/\s/g, '') === '0.5×→0.5×→0.7×→1×', 'box shows the line and the configured steps: ' + JSON.stringify(head));
+      await page.click('.st-dub-ladder');
+      const steps = {};
+      await waitFor(async () => {
+        const s = await page.evaluate(() => ({ k: [...document.querySelectorAll('.st-dub-rates span')].findIndex((x) => x.classList.contains('now')), r: document.querySelector('video').playbackRate, t: document.querySelector('video').currentTime, on: !!document.querySelector('.st-dub-ladder.on') }));
+        if (s.k >= 0) { const o = steps[s.k] || (steps[s.k] = { rate: s.r, minT: 99 }); o.minT = Math.min(o.minT, s.t); }
+        return !s.on && Object.keys(steps).length > 0;
+      }, 30000, 'ladder finished');
+      assert([0, 1, 2, 3].map((k) => steps[k] && steps[k].rate).join(',') === '0.5,0.5,0.7,1', 'rates in order: ' + JSON.stringify(steps));
+      assert([1, 2, 3].every((k) => steps[k].minT < 6.2), 'every step starts again at the segment: ' + JSON.stringify(steps));
+      const after = await page.evaluate(() => ({ r: document.querySelector('video').playbackRate, p: document.querySelector('video').paused, t: document.querySelector('video').currentTime }));
+      assert(Math.abs(after.r - 1) < 0.01 && after.p && after.t >= 7.9 && after.t < 8.9, 'stops after the segment at normal speed: ' + JSON.stringify(after));
+    });
+    await step('더빙 ②③: 원래 소리를 끄고 녹음해 3개까지 남기고, 4번째는 ☆ 고른 것을 빼고 가장 오래된 것을 지운다', async () => {
+      for (let k = 1; k <= 3; k++) {
+        await page.click('.st-dub-rec');
+        await waitFor(() => page.evaluate(() => /녹음 중/.test(document.querySelector('.st-dub-rec').textContent) && document.querySelector('video').muted), 8000, 'recording ' + k + ' with the original sound off');
+        await waitFor(async () => (await dubTakes()).length === k && !(await page.$('.st-dub-rec.on')), 20000, 'take ' + k + ' saved');
+        assert(!(await page.evaluate(() => document.querySelector('video').muted)), 'original sound back after take ' + k);
+        assert(await page.$eval('.st-dubbox', (b) => b.dataset.mic === 'closed'), 'microphone released after take ' + k);
+      }
+      const store = await sw.evaluate(async () => { const o = await chrome.storage.local.get(null); const seg = o['dubs:netflix:12345'].segs[0]; return { seg, a: o['dubaudio:' + seg.takes[0].id] }; });
+      const bytes = Buffer.from(store.a.b64, 'base64');
+      assert(bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0 && store.a.mime === 'audio/mpeg', 'take saved as MP3');
+      assert(store.seg.startMs === 6000 && store.seg.endMs === 8000 && store.seg.takes.every((t) => Math.abs(t.ms - 2500) < 150 && Math.abs(t.clipStartMs - 5750) < 80), 'takes cover the segment with 250ms either side: ' + JSON.stringify(store.seg.takes));
+      const three = await dubTakes();
+      await page.click('.st-dub-take[data-take="' + three[0] + '"] .st-dub-star');
+      await waitFor(() => page.$eval('.st-dub-take[data-take="' + three[0] + '"]', (e) => e.classList.contains('chosen')), 3000, 'first take starred');
+      await page.click('.st-dub-rec');
+      await waitFor(async () => { const t = await dubTakes(); return t.length === 3 && !t.includes(three[1]) && !(await page.$('.st-dub-rec.on')); }, 20000, '4th take saved');
+      dubFour = await dubTakes();
+      assert(dubFour[0] === three[0] && dubFour[1] === three[2], 'starred first take kept, second (oldest unstarred) removed: ' + JSON.stringify({ three, four: dubFour }));
+      const audioKeys = await sw.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith('dubaudio:')));
+      assert(audioKeys.length === 3 && !audioKeys.includes('dubaudio:' + three[1]), 'removed take audio deleted too: ' + JSON.stringify(audioKeys));
+      assert(await page.$eval('.st-row[data-i="1"]', (r) => r.classList.contains('st-dubbed') && r.querySelector('.st-dub-mark.on') !== null), 'panel row marked as dubbed');
+    });
+    await step('더빙 ④: ☆ 녹음이 있는 구간에서만 원래 소리 대신 내 녹음 · 끄면 원래 소리 · 들어보기 · 모두 지우기', async () => {
+      try {
+        await page.evaluate(() => { const v = document.querySelector('video'); v.muted = false; v.currentTime = 4.6; v.play(); });
+        const tl = [];
+        const t0 = Date.now();
+        while (Date.now() - t0 < 5200) { tl.push(await page.evaluate(() => [document.querySelector('video').currentTime, document.querySelector('video').muted, document.querySelector('.st-ov-dub').classList.contains('on'), document.querySelector('.st-ov-dub').dataset.take || ''])); await sleep(100); }
+        await page.evaluate(() => document.querySelector('video').pause());
+        const mutedAt = tl.filter((x) => x[1]).map((x) => x[0]);
+        assert(mutedAt.length > 8, 'original muted inside the dubbed segment: ' + JSON.stringify(tl.map((x) => [+x[0].toFixed(2), +x[1]])));
+        assert(Math.min(...mutedAt) >= 5.6 && Math.max(...mutedAt) <= 8.35, 'muted only in the segment (5.75–8.25s): ' + Math.min(...mutedAt).toFixed(2) + '–' + Math.max(...mutedAt).toFixed(2));
+        assert(tl.some((x) => x[0] < 5.6 && !x[1]) && tl.some((x) => x[0] > 8.5 && !x[1]), 'original sound before and after the segment');
+        assert(tl.filter((x) => x[1]).every((x) => x[2] && x[3] === dubFour[0]), 'plays the starred take (🎙 내 더빙 shown)');
+        // 더빙 재생을 끄면 같은 구간도 원래 소리
+        await page.click('.st-dub-switch');
+        await waitFor(async () => (await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings.dubPlayback)) === false, 3000, 'dub playback off saved');
+        await page.evaluate(() => { const v = document.querySelector('video'); v.currentTime = 5.4; v.play(); });
+        let mutedOff = false;
+        const t1 = Date.now();
+        while (Date.now() - t1 < 2600) { if (await page.evaluate(() => document.querySelector('video').muted)) mutedOff = true; await sleep(100); }
+        await page.evaluate(() => document.querySelector('video').pause());
+        assert(!mutedOff, 'with 더빙 재생 off the original sound plays through');
+        // 들어보기: 꺼져 있어도 그 녹음으로 확인할 수 있다
+        await page.click('.st-dub-take[data-take="' + dubFour[2] + '"] .st-dub-play');
+        const pv = [];
+        const t2 = Date.now();
+        while (Date.now() - t2 < 4800) { pv.push(await page.evaluate(() => [document.querySelector('video').muted, document.querySelector('.st-ov-dub').dataset.take || ''])); await sleep(100); }
+        assert(pv.some((x) => x[0] && x[1] === dubFour[2]), 'preview plays that take with the original muted');
+        await waitFor(() => page.evaluate(() => document.querySelector('video').paused && !document.querySelector('video').muted), 5000, 'preview ends paused with sound back');
+        // 모두 지우기 (한 번 더 눌러야 지운다)
+        await page.click('.st-dub-clear');
+        assert(await page.$eval('.st-dub-clear', (b) => b.classList.contains('st-armed') && /한 번 더/.test(b.textContent)), 'first press only arms');
+        await page.click('.st-dub-clear');
+        await waitFor(async () => (await sw.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith('dub')).length)) === 0, 4000, 'all dub data removed');
+        assert(!(await page.$('.st-dub-mark')) && (await dubTakes()).length === 0, 'row mark and takes gone');
+        await page.keyboard.press('KeyR');
+        await waitFor(() => page.$eval('.st-dubbox', (b) => b.classList.contains('st-hidden')), 3000, 'R closes the box');
+      } finally {
+        await sw.evaluate((w) => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubPlayback: true, web: w } }, {}), WEB_PREFS).catch(() => {});
+        await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.muted = true; }).catch(() => {});
+        await page.evaluate(() => { const b = document.querySelector('.st-dubbox:not(.st-hidden) .st-dub-close'); if (b) b.click(); }).catch(() => {});
+        await sleep(200);
+      }
+    });
     await step('반복 속도 사다리: 웹 설정의 단계대로 S 반복마다 올라가고, 끄면 원래 속도 (음높이 유지)', async () => {
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { loopLadder: true } }, {}));
       await sleep(300);
