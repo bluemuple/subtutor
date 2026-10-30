@@ -24,6 +24,7 @@
     repeat: false,                        // 🔁 반복: ▶ 로 재생한 대사를 계속 반복
     hide: loadHide(), reveal: new Map(),  // 자막/뜻 감추기: 전체 기본값 + 항목별 예외
     recordings: new Map(), recording: null, playingRec: null,
+    edit: { on: false, sel: new Set() },  // 편집 모드: 선택 상자로 골라 한꺼번에 삭제
     quiz: null, quizPrefs: { title: '', tag: '', order: 'due', dueOnly: true, autoplay: true },
   };
   const clipWaiters = [];
@@ -56,7 +57,21 @@
   // 보관된 오디오가 없어 플레이어 탭으로 가는 첫 재생에 한 번만 안내한다
   function hintStoredAudio() {
     try { if (sessionStorage.getItem('subtutor.hint.audio')) return; sessionStorage.setItem('subtutor.hint.audio', '1'); } catch (e) { /* ignore */ }
-    toast('보관된 오디오가 없어 플레이어 탭에서 재생합니다. 확장 프로그램 설정의 "별표 저장 시 오디오"를 "웹 퀴즈용으로 보관"으로 켜 두면 이후 저장하는 대사는 탭 없이 바로 재생됩니다.', 7000);
+    toast('보관된 오디오가 없어 플레이어 탭에서 재생합니다. 확장 프로그램 설정의 "별표 저장 시 오디오"를 "웹 재생용으로 보관" 또는 "PC에 MP3 파일로 저장"으로 켜 두면 이후 저장하는 대사는 탭 없이 바로 재생됩니다.', 7000);
+  }
+  // PC 파일(⬇ MP3)만 있는 예전 항목을 폴더에서 읽지 못했을 때: 이유별 안내 (다운로드 폴더는 확장 프로그램이 읽을 수 없다)
+  const FILE_HINT = {
+    downloads: '이 MP3 는 다운로드 폴더에 있어 확장 프로그램이 다시 읽을 수 없습니다. 주황 ⬇ MP3 배지나 설정의 "MP3 폴더에서 불러오기"에서 다운로드 폴더 안의 SubTutor 폴더를 한 번 고르면 웹에서 바로 재생됩니다. 지금은 플레이어 탭에서 재생합니다.',
+    prompt: 'MP3 폴더의 권한이 풀려 있어 플레이어 탭에서 재생합니다. 툴바의 SubTutor 아이콘 → "폴더 권한 허용"을 누른 뒤 다시 ▶ 를 누르세요.',
+    denied: 'MP3 폴더 접근이 거부되어 플레이어 탭에서 재생합니다. 확장 프로그램 설정 페이지에서 폴더를 다시 고르세요.',
+    none: 'MP3 를 저장했던 폴더가 지정되어 있지 않아 플레이어 탭에서 재생합니다. 설정의 "MP3 폴더에서 불러오기"로 가져올 수 있습니다.',
+    'other-folder': '지금 지정된 폴더가 이 MP3 를 저장한 폴더와 달라 플레이어 탭에서 재생합니다. 설정의 "MP3 폴더에서 불러오기"로 가져올 수 있습니다.',
+    missing: '지정 폴더에서 이 MP3 파일을 찾지 못해 플레이어 탭에서 재생합니다. 옮겼거나 지웠다면 "MP3 폴더에서 불러오기"로 다시 연결할 수 있습니다.',
+  };
+  function hintNoLocalAudio(it) {
+    if (!it.file) { hintStoredAudio(); return; }
+    const reason = fileIssue.get(it.id) || 'error';
+    toast(FILE_HINT[reason] || ('MP3 파일을 읽지 못해 플레이어 탭에서 재생합니다 (' + reason + ')'), 8000);
   }
   const isEditable = (t) => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
   // ⓘ: 설명과 학문적 근거는 화면에 늘어놓지 않고 누르면 보여 준다
@@ -103,6 +118,7 @@
       const r = await B.request('items.list');
       const items = (r && r.items) || [];
       if (itemsSignature(items) !== itemsSignature(state.items)) changed = true;
+      for (const it of items) if (!it.audio) { audioCache.delete(it.id); bufferCache.delete(it.id); } // 복사본이 없어진 항목은 다음 재생 때 다시 읽는다
       state.items = items;
       mergeTagNames(items.flatMap((i) => i.tags || []));
     } catch (e) { toast(e.message); }
@@ -130,6 +146,107 @@
     audioCache.delete(id); bufferCache.delete(id);
   }
 
+  // ───────── 편집 모드 (선택해서 삭제) ─────────
+  let editSync = null; // 지금 그려진 목록의 선택 상태를 편집 막대와 카드에 반영 (renderList 가 넣는다)
+  function setEdit(on) { state.edit.on = !!on; if (!on) state.edit.sel.clear(); render(); }
+  function setPick(id, on) { if (on) state.edit.sel.add(id); else state.edit.sel.delete(id); if (editSync) editSync(); }
+  function togglePickMany(ids) { const all = ids.every((id) => state.edit.sel.has(id)); ids.forEach((id) => { if (all) state.edit.sel.delete(id); else state.edit.sel.add(id); }); if (editSync) editSync(); }
+  const editButton = () => el('button', { class: 'btn edit-toggle' + (state.edit.on ? ' on' : ''), title: state.edit.on ? '편집 모드 끝내기 (Esc)' : '편집: 대사를 골라 한꺼번에 삭제', onclick: () => setEdit(!state.edit.on) }, state.edit.on ? '✎ 편집 중' : '✎ 편집');
+  // 편집 막대: 보이는 대사 모두 선택 · 선택 삭제 · 작품/에피소드 전체 삭제 · 완료
+  function buildEditUi(items, body, getVisible) {
+    const bar = el('div', { class: 'edit-bar' + (state.edit.on ? '' : ' hidden') });
+    const selCount = el('b', null, '0');
+    const delBtn = el('button', { class: 'btn danger del-selected', disabled: true, onclick: () => bulkDelete(Array.from(state.edit.sel), '선택한 대사') }, ['선택 ', selCount, '개 삭제']);
+    const allBox = el('input', { type: 'checkbox', class: 'pick-all', onchange: (e) => { getVisible().forEach((it) => { if (e.target.checked) state.edit.sel.add(it.id); else state.edit.sel.delete(it.id); }); sync(); } });
+    const scopes = []; // 드롭다운 항목: { label, ids }
+    const byTitle = new Map();
+    for (const it of items) { if (!byTitle.has(it.title)) byTitle.set(it.title, new Map()); const eps = byTitle.get(it.title); const ep = it.episode || ''; if (!eps.has(ep)) eps.set(ep, []); eps.get(ep).push(it.id); }
+    const scopeSel = el('select', { class: 'bulk-scope', title: '작품 또는 에피소드의 대사를 모두 삭제', onchange: (e) => { const v = e.target.value; e.target.value = ''; const sc = v === '' ? null : scopes[+v]; if (sc) bulkDelete(sc.ids, sc.label); } }, [el('option', { value: '' }, '작품·에피소드 전체 삭제…')]);
+    Array.from(byTitle.keys()).sort((a, b) => a.localeCompare(b, 'ko')).forEach((t) => {
+      const eps = byTitle.get(t);
+      const all = Array.from(eps.values()).flat();
+      const g = el('optgroup', { label: t });
+      scopes.push({ label: '작품 "' + t + '"의 대사', ids: all });
+      g.append(el('option', { value: String(scopes.length - 1) }, '작품 전체 · ' + all.length + '개'));
+      if (eps.size > 1 || !eps.has('')) Array.from(eps.keys()).filter(Boolean).sort((a, b) => a.localeCompare(b, 'ko', { numeric: true })).forEach((ep) => { scopes.push({ label: '"' + t + ' ' + ep + '"의 대사', ids: eps.get(ep) }); g.append(el('option', { value: String(scopes.length - 1) }, ep + ' · ' + eps.get(ep).length + '개')); });
+      scopeSel.append(g);
+    });
+    bar.append(el('label', { class: 'pick-all-label' }, [allBox, ' 보이는 대사 모두 선택']), delBtn, scopeSel, el('span', { class: 'spacer' }), el('button', { class: 'btn primary edit-done', onclick: () => setEdit(false) }, '완료'));
+    function sync() {
+      const n = state.edit.sel.size;
+      selCount.textContent = String(n);
+      delBtn.disabled = !n;
+      const vis = getVisible();
+      allBox.checked = vis.length > 0 && vis.every((it) => state.edit.sel.has(it.id));
+      body.querySelectorAll('.item').forEach((node) => { const on = state.edit.sel.has(node.dataset.id); node.classList.toggle('selected', on); const cb = node.querySelector('.pick'); if (cb) cb.checked = on; });
+    }
+    return { bar, sync };
+  }
+  const FAIL_REASON = { 'not-found': '크롬 다운로드 기록에 없어 직접 지워야 함', 'file-gone': '이미 없는 파일', missing: '폴더에 없는 파일', prompt: '폴더 권한 필요', denied: '폴더 권한 거부됨', none: '폴더 미지정', 'other-folder': '다른 폴더에 저장된 파일', error: '오류' };
+  // 대사 삭제(여러 개): 보관 오디오 · PC 의 MP3 파일 · 내 녹음도 함께 지운다. 확인 창에 무엇이 지워지는지 알린다
+  async function bulkDelete(ids, label) {
+    ids = Array.from(new Set(ids)).filter((id) => state.items.some((i) => i.id === id));
+    if (!ids.length) { toast('선택한 대사가 없습니다'); return; }
+    const files = ids.filter((id) => { const it = state.items.find((i) => i.id === id); return it && it.file; }).length;
+    const recs = ids.reduce((a, id) => { const r = state.recordings.get(id); return a + (Array.isArray(r) ? r.length : 0); }, 0);
+    if (!confirm(label + ' ' + ids.length + '개를 삭제할까요?' + (files ? ' PC 에 저장한 MP3 파일 ' + files + '개도 함께 지웁니다.' : '') + (recs ? ' 내 녹음 ' + recs + '개도 지워집니다.' : '') + ' 되돌릴 수 없습니다.')) return;
+    const set = new Set(ids);
+    if (set.has(state.clip.itemId) && ['playing', 'opening', 'loading'].includes(state.clip.state)) { stopLocalAudio(); if (!state.clipLocal) B.request('clip.stop').catch(() => {}); setClip(state.clip.itemId, 'stopped'); }
+    state.items = state.items.filter((i) => !set.has(i.id));
+    ids.forEach((id) => { state.edit.sel.delete(id); audioCache.delete(id); bufferCache.delete(id); fileIssue.delete(id); });
+    updateCounts();
+    render();
+    let r = null;
+    try { r = await B.request('items.removeMany', { ids }, 120000); } catch (e) { toast('삭제 실패: ' + e.message); loadItems(true); return; }
+    for (const id of ids) { try { await R.clearItem(id); state.recordings.delete(id); } catch (e) { /* ignore */ } }
+    const f = (r && r.files) || { deleted: 0, failed: [] };
+    const failed = f.failed || [];
+    toast('대사 ' + ((r && r.removed) || ids.length) + '개 삭제' + (f.deleted ? ' · MP3 파일 ' + f.deleted + '개 삭제' : '') + (failed.length ? ' · 파일 ' + failed.length + '개는 지우지 못했습니다 (' + (FAIL_REASON[failed[0].reason] || failed[0].reason) + ')' : ''), failed.length ? 8000 : 3000);
+  }
+  // PC 파일(⬇ MP3)만 있는 예전 대사: MP3 가 있는 폴더를 한 번 고르면 파일 이름이 같은 대사에 웹 재생용 복사본을 넣는다 (다운로드 폴더도 가능)
+  async function importMp3Folder() {
+    if (!state.extOk) { toast('확장 프로그램이 필요합니다'); return; }
+    const key = (n) => String(n).replace(/ \(\d+\)(\.[^.]+)$/, '$1').toLowerCase(); // 크롬이 같은 이름에 붙이는 " (1)" 무시
+    const want = new Map(); // 파일 이름 → 항목들
+    for (const it of state.items) if (it.file && it.file.path && !it.audio) { const k = key(it.file.path.split('/').pop()); if (!want.has(k)) want.set(k, []); want.get(k).push(it); }
+    if (!want.size) { toast('불러올 MP3 가 없습니다. PC 파일만 있는 대사가 없거나 이미 복사본이 있습니다.', 4000); return; }
+    if (typeof window.showDirectoryPicker !== 'function') { toast('이 브라우저는 폴더 선택을 지원하지 않습니다 (크롬 86 이상)'); return; }
+    let dir;
+    try { dir = await window.showDirectoryPicker({ id: 'subtutor-mp3', mode: 'read', startIn: 'downloads' }); } catch (e) { if (e && e.name !== 'AbortError') toast('폴더를 열지 못했습니다: ' + e.message); return; }
+    toast('MP3 파일을 찾는 중…', 60000);
+    let found = 0, scanned = 0;
+    const done = new Set();
+    const parentOf = (it) => { const p = it.file.path.split('/'); return p.length > 1 ? p[p.length - 2] : ''; };
+    async function walk(d, depth) {
+      for await (const [name, h] of d.entries()) {
+        if (h.kind === 'directory') { if (depth < 6 && !name.startsWith('.')) await walk(h, depth + 1); continue; }
+        scanned++;
+        const k = key(name);
+        if (!want.has(k) || done.has(k)) continue;
+        const all = want.get(k);
+        const same = all.filter((it) => parentOf(it) === d.name); // 같은 이름이 여럿이면 작품 폴더 이름이 맞는 것부터
+        const targets = same.length ? same : all;
+        try {
+          const f = await h.getFile();
+          if (f.size > 20 * 1024 * 1024) continue;
+          const bytes = new Uint8Array(await f.arrayBuffer());
+          let s = '';
+          for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+          const data = btoa(s);
+          const format = (name.split('.').pop() || 'mp3').toLowerCase();
+          for (const it of targets) {
+            await B.request('audio.put', { itemId: it.id, data, mime: format === 'wav' ? 'audio/wav' : 'audio/mpeg', format, leadMs: it.file.leadMs, source: 'import' }, 30000);
+            found++; audioCache.delete(it.id); bufferCache.delete(it.id); fileIssue.delete(it.id);
+          }
+          if (targets === all) done.add(k);
+        } catch (e) { /* 다음 파일 */ }
+      }
+    }
+    try { await walk(dir, 0); } catch (e) { toast('폴더를 읽는 중 오류: ' + e.message); return; }
+    toast(found ? 'MP3 ' + found + '개를 불러왔습니다. 이제 웹에서 바로 재생됩니다.' : '"' + dir.name + '" 폴더에서 맞는 MP3 를 찾지 못했습니다 (파일 ' + scanned + '개 확인). MP3 가 든 SubTutor 폴더(예: 다운로드 안의 SubTutor)나 그 상위 폴더를 고르세요. 크롬은 다운로드 폴더 자체는 고를 수 없습니다.', 7000);
+    if (found) loadItems(true);
+  }
+
   // ───────── 플레이어 원격 재생 ─────────
   function setClip(itemId, st, message, loop) {
     const keepLoop = loop === undefined ? (state.clip.itemId === itemId && !!state.clip.loop) : !!loop;
@@ -139,18 +256,19 @@
       clipWaiters.splice(0).forEach((w) => w.resolve({ itemId, state: st }));
     }
   }
-  const STATE_TEXT = { opening: '플레이어 준비 중…', playing: '재생 중', ended: '', stopped: '', error: '' };
+  const STATE_TEXT = { loading: 'MP3 읽는 중…', opening: '플레이어 준비 중…', playing: '재생 중', ended: '', stopped: '', error: '' };
   function renderClipStates() {
     document.querySelectorAll('[data-clip-item]').forEach((node) => {
       const id = node.dataset.clipItem;
       const mine = state.clip.itemId === id;
       const st = mine ? state.clip.state : null;
-      node.classList.toggle('playing', mine && (st === 'opening' || st === 'playing'));
+      const busy = mine && (st === 'opening' || st === 'loading');
+      node.classList.toggle('playing', busy || (mine && st === 'playing'));
       const btn = node.querySelector('.play');
       if (btn) {
-        btn.classList.toggle('busy', mine && st === 'opening');
+        btn.classList.toggle('busy', busy);
         btn.classList.toggle('active', mine && st === 'playing');
-        const icon = mine && st === 'opening' ? '…' : (mine && st === 'playing' ? '◼' : '▶');
+        const icon = busy ? '…' : (mine && st === 'playing' ? '◼' : '▶');
         btn.textContent = btn.dataset.label ? icon + ' ' + btn.dataset.label : icon;
         btn.title = mine && st === 'playing' ? '정지' : '플레이어에서 이 대사 재생';
       }
@@ -162,20 +280,25 @@
     });
   }
   const audioCache = new Map(); // itemId -> Blob
+  const fileIssue = new Map();  // itemId -> PC 파일에서 읽지 못한 이유
+  function b64ToBlob(b64, mime) { const bin = atob(b64); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return new Blob([bytes], { type: mime || 'audio/wav' }); }
   async function localAudioBlob(itemId) {
     if (audioCache.has(itemId)) return audioCache.get(itemId);
+    const it = state.items.find((i) => i.id === itemId);
     try {
       const r = await B.request('audio.get', { itemId }, 20000);
       const b64 = r && (r.data || r.wav);
-      if (b64) {
-        const bin = atob(b64);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        const blob = new Blob([bytes], { type: (r && r.mime) || 'audio/wav' });
-        audioCache.set(itemId, blob);
-        return blob;
-      }
-    } catch (e) { /* 원격 재생으로 */ }
+      if (b64) { const blob = b64ToBlob(b64, r && r.mime); audioCache.set(itemId, blob); return blob; }
+    } catch (e) { /* 아래로 */ }
+    // PC 파일(MP3)만 있는 예전 항목: 확장 프로그램이 지정 폴더에서 읽어 복사본을 만들어 준다 (그 뒤로는 보관 오디오처럼 바로)
+    if (it && it.file && !it.audio) {
+      try {
+        const r = await B.request('audio.file', { itemId }, 30000);
+        if (r && r.data) { fileIssue.delete(itemId); const blob = b64ToBlob(r.data, r.mime); audioCache.set(itemId, blob); loadItems(); return blob; }
+        fileIssue.set(itemId, (r && r.reason) || 'error');
+      } catch (e) { fileIssue.set(itemId, 'error'); }
+      return null; // 권한을 허용하면 바로 다시 시도할 수 있게 캐시하지 않는다
+    }
     audioCache.set(itemId, null);
     return null;
   }
@@ -209,7 +332,7 @@
     const blob = await localAudioBlob(itemId);
     let buf = null;
     if (blob) { try { buf = await getCtx().decodeAudioData(await blob.arrayBuffer()); } catch (e) { buf = null; } }
-    bufferCache.set(itemId, buf);
+    if (buf || audioCache.has(itemId)) bufferCache.set(itemId, buf);
     return buf;
   }
   function playLocal(it, buf, range, loop, rate) {
@@ -254,7 +377,7 @@
     if (!state.extOk) { toast('확장 프로그램이 필요합니다'); return; }
     R.stop();
     const cur = state.clip;
-    const busy = cur.state === 'playing' || cur.state === 'opening';
+    const busy = cur.state === 'playing' || cur.state === 'opening' || cur.state === 'loading';
     if (busy) {
       // 정지 상태를 먼저 기록해 두어야, 멈추면서 끝나는 이전 재생이 '끝남'으로 덮어쓰지 않는다
       if (!opts.rate) state.ladderFor = null;
@@ -265,8 +388,11 @@
     } else stopLocalAudio();
     const loop = opts.loop === undefined ? state.repeat : !!opts.loop;
     const it = state.items.find((i) => i.id === itemId);
-    if (it && it.audio) {
+    if (it && (it.audio || it.file)) {
+      // 보관 오디오(또는 PC 파일의 복사본)로 바로 재생. 복사본이 없는 파일 항목은 확장 프로그램이 지정 폴더에서 읽어 온다
+      setClip(itemId, 'loading', '', loop);
       const buf = await localAudioBuffer(itemId);
+      if (state.clip.itemId !== itemId || state.clip.state !== 'loading') return; // 그사이 다른 대사를 누르거나 멈췄다
       if (buf) {
         state.clipLocal = true;
         setClip(itemId, 'playing', '', loop);
@@ -276,7 +402,7 @@
       }
     }
     state.clipLocal = false;
-    if (it && !it.audio) hintStoredAudio();
+    if (it && !it.audio) hintNoLocalAudio(it);
     setClip(itemId, 'opening', '', loop);
     try {
       const r = await B.request('clip.play', { itemId, loop, rate: opts.rate || 0 }, 90000);
@@ -649,11 +775,13 @@
     render();
   }
   window.addEventListener('hashchange', route);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.edit.on && !isEditable(e.target)) setEdit(false); });
   document.addEventListener('focusout', () => { if (renderPending) setTimeout(() => { if (renderPending && !(document.activeElement && document.activeElement.classList.contains('comment'))) render(); }, 50); });
 
   function render() {
     if (document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('comment')) { renderPending = true; return; }
     renderPending = false;
+    editSync = null;
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === state.view));
     const app = $('#app');
     app.textContent = '';
@@ -694,10 +822,12 @@
     if (state.filterTitle && !titles.includes(state.filterTitle)) state.filterTitle = '';
     const body = el('div', { class: 'list-body' });
     const countEl = el('span', { class: 'count' });
-    const renderBody = () => {
+    let lastFiltered = [];
+    const renderBodyInner = () => {
       body.textContent = '';
       const q = S.normalizeForCompare(state.search);
       const filtered = items.filter((i) => (!state.filterTitle || i.title === state.filterTitle) && (!state.filterTag || (i.tags || []).includes(state.filterTag)) && (!q || S.normalizeForCompare(i.text + ' ' + (i.comment || '')).includes(q) || (i.translation || '').includes(state.search.trim())));
+      lastFiltered = filtered;
       countEl.textContent = filtered.length + '개' + (state.filterTag ? ' · 태그 "' + state.filterTag + '"' : '');
       if (!filtered.length) {
         body.append(el('div', { class: 'empty' }, items.length ? (state.filterTag ? '이 태그가 붙은 자막이 없습니다.' : '검색 결과가 없습니다.') : (kind === 'learning'
@@ -734,20 +864,24 @@
         else if (sort === 'group-new-bottom') g.items.sort(bySaved(1));
         else g.items.sort((a, b) => a.startMs - b.startMs);
         const gEl = el('div', { class: 'group' }, [
-          el('h3', { class: 'group-title' }, [g.title, g.episode ? el('small', null, g.episode) : null, el('small', null, g.items.length + '개')]),
+          el('h3', { class: 'group-title' }, [g.title, g.episode ? el('small', null, g.episode) : null, el('small', null, g.items.length + '개'), state.edit.on ? el('button', { class: 'btn mini group-pick', title: '이 묶음의 대사를 모두 선택/해제', onclick: () => togglePickMany(g.items.map((i) => i.id)) }, '묶음 선택') : null]),
         ]);
         g.items.forEach((it) => gEl.append(itemEl(it, kind)));
         body.append(gEl);
       }
       syncVeils();
     };
+    const renderBody = () => { renderBodyInner(); if (editSync) editSync(); };
     const sel = el('select', { onchange: (e) => { state.filterTitle = e.target.value; renderBody(); } }, [el('option', { value: '' }, '모든 작품')].concat(titles.map((t) => el('option', { value: t, selected: t === state.filterTitle }, t))));
     const search = el('input', { type: 'search', placeholder: '자막 · 번역 · 코멘트 검색', value: state.search, oninput: debounce((e) => { state.search = e.target.value; renderBody(); }, 150) });
     const SORTS = [['group-time', '작품별 · 영상 시간순'], ['group-new-top', '작품별 · 최신 저장이 위'], ['group-new-bottom', '작품별 · 최신 저장이 아래'], ['flat-new-top', '전체 · 최신 저장이 위'], ['flat-new-bottom', '전체 · 최신 저장이 아래'], ['title', '작품 이름순 · 영상 시간순']];
     if (!SORTS.some(([v]) => v === state.sort)) state.sort = 'group-time';
     const sort = el('select', { class: 'sort', title: '정렬', onchange: (e) => { state.sort = e.target.value; savePref('subtutor.sort', state.sort); renderBody(); } }, SORTS.map(([v, t]) => el('option', { value: v, selected: state.sort === v }, t)));
     const hideBtn = (f) => el('button', { class: 'btn hide-toggle', 'data-field': f, onclick: () => setGlobalHide(f, !state.hide[f]) }, '');
-    wrap.append(buildTagBar(renderBody), el('div', { class: 'toolbar' }, [sel, search, sort, infoBtn('sort'), hideBtn('text'), hideBtn('ko'), infoBtn('veil'), repeatButton(), infoBtn('repeat'), countEl]), body);
+    const editUi = buildEditUi(items, body, () => lastFiltered);
+    editSync = editUi.sync;
+    wrap.classList.toggle('editing', state.edit.on);
+    wrap.append(buildTagBar(renderBody), el('div', { class: 'toolbar' }, [sel, search, sort, infoBtn('sort'), hideBtn('text'), hideBtn('ko'), infoBtn('veil'), repeatButton(), infoBtn('repeat'), countEl, el('span', { class: 'spacer' }), editButton(), infoBtn('edit')]), editUi.bar, body);
     renderBody();
     syncVeils();
     return wrap;
@@ -756,7 +890,12 @@
     opts = opts || {};
     const node = el('div', { class: 'item' + (kind === 'known' ? ' known' : '') + (it.translation ? '' : ' no-ko'), 'data-clip-item': it.id, 'data-id': it.id });
     const play = el('button', { class: 'play', title: '이 대사 재생', onclick: () => playItem(it.id) }, '▶');
-    const playCol = el('div', { class: 'play-col' }, [play, state.web.ladder ? el('button', { class: 'ladder', title: '속도 사다리 0.8→0.9→1.0→1.15×', onclick: () => playLadder(it.id) }, '⤴') : null]);
+    const pick = state.edit.on ? el('input', { type: 'checkbox', class: 'pick', title: '선택', checked: state.edit.sel.has(it.id), onchange: (e) => setPick(it.id, e.target.checked) }) : null;
+    if (state.edit.on) {
+      node.classList.toggle('selected', state.edit.sel.has(it.id));
+      node.addEventListener('click', (e) => { if (e.target.closest('button, input, textarea, select, a, label, .trim-box, .rec-row, .tags-row')) return; setPick(it.id, !state.edit.sel.has(it.id)); });
+    }
+    const playCol = el('div', { class: 'play-col' }, [pick, play, state.web.ladder ? el('button', { class: 'ladder', title: '속도 사다리 0.8→0.9→1.0→1.15×', onclick: () => playLadder(it.id) }, '⤴') : null]);
     const body = el('div', { class: 'body' }, [
       el('div', { class: 'vis-btns' }, [
         el('button', { class: 'btn mini vis-text', title: '이 대사의 자막 보기/감추기', onclick: () => setItemVeil(it.id, 'text', !isVeiled(it.id, 'text')) }, '자막'),
@@ -770,8 +909,7 @@
         opts.showWork ? el('span', { class: 'work' }, it.title + (it.episode ? ' · ' + it.episode : '')) : null,
         el('span', { class: 'span' }, timeText(it)),
         el('span', null, PLATFORM_NAMES[it.platform] || it.platform),
-        it.audio ? el('span', { class: 'fmt stored', title: '보관 오디오 ' + String(it.audio.format || 'wav').toUpperCase() + (it.audio.rate ? ' · ' + Math.round(it.audio.rate / 1000) + 'kHz' : '') + (it.audio.ms ? ' · ' + (it.audio.ms / 1000).toFixed(1) + '초' : '') + ' — 플레이어 탭 없이 바로 재생' }, '♪ ' + String(it.audio.format || 'wav').toUpperCase()) : null,
-        it.file ? el('span', { class: 'fmt file', title: 'PC 파일 ' + String(it.file.format || '').toUpperCase() + ': ' + (it.file.path || '') }, '⬇ ' + String(it.file.format || 'mp3').toUpperCase()) : null,
+        fmtBadge(it),
         el('span', null, '저장 ' + fmtDate(it.savedAt || Date.now())),
         it.reviews ? el('span', null, '복습 ' + it.reviews + '회' + (it.forgot ? ' · 잊음 ' + it.forgot : '')) : null,
         el('button', { class: 'link', onclick: () => B.request('item.open', { itemId: it.id }, 60000).catch((e) => toast(e.message)) }, '플레이어에서 열기 ↗'),
@@ -792,10 +930,24 @@
         ? el('button', { class: 'btn good', onclick: () => { updateItem(it.id, { box: 'known', knownAt: Date.now() }); render(); toast('알고 있는 표현으로 이동했습니다'); } }, '✓ 알고 있어')
         : el('button', { class: 'btn', onclick: () => { updateItem(it.id, { box: 'learning' }); render(); toast('다시 학습 목록으로'); } }, '↩ 다시 학습'),
       el('button', { class: 'btn trim-toggle' + (state.trimOpen === it.id ? ' on' : '') + (effRange(it).trimmed ? ' trimmed' : ''), 'data-id': it.id, title: '오디오 재생 구간을 ms 단위로 조정', onclick: () => toggleTrim(it) }, '⏱ 구간 조정'),
-      el('button', { class: 'btn danger', onclick: () => { if (confirm('이 자막과 녹음을 삭제할까요?')) removeItem(it.id); } }, '삭제'),
+      el('button', { class: 'btn danger', onclick: () => bulkDelete([it.id], '이 대사') }, '삭제'),
     ]);
     node.append(playCol, body, el('div', { class: 'side' }, [comment, actions]));
     return node;
+  }
+  // 작은 오디오 형식 배지: ♪ 보관 오디오 · ⬇ PC 파일(복사본 있음) · 주황 ⬇ PC 파일만(누르면 MP3 폴더에서 불러오기)
+  function fmtBadge(it) {
+    const up = (s, d) => String(s || d).toUpperCase();
+    const khz = (a) => (a && a.rate ? ' · ' + Math.round(a.rate / 1000) + 'kHz' : '');
+    if (it.file) {
+      const copy = !!it.audio;
+      const title = 'PC 파일 ' + up(it.file.format, 'mp3') + ': ' + (it.file.path || '') + (copy
+        ? ' · 웹 재생용 복사본 있음' + khz(it.audio) + ' — 플레이어 탭 없이 바로 재생'
+        : ' · 웹 재생용 복사본 없음 — ▶ 를 누르면 지정 폴더에서 읽어 옵니다. 다운로드 폴더라면 여기를 눌러 MP3 폴더에서 불러오세요');
+      return el(copy ? 'span' : 'button', { class: 'fmt file' + (copy ? ' stored' : ' only'), title, onclick: copy ? null : () => importMp3Folder() }, '⬇ ' + up(it.file.format, 'mp3'));
+    }
+    if (it.audio) return el('span', { class: 'fmt stored', title: '보관 오디오 ' + up(it.audio.format, 'wav') + khz(it.audio) + (it.audio.ms ? ' · ' + (it.audio.ms / 1000).toFixed(1) + '초' : '') + ' — 플레이어 탭 없이 바로 재생' }, '♪ ' + up(it.audio.format, 'wav'));
+    return null;
   }
 
   // ───────── 퀴즈 ─────────
@@ -986,6 +1138,8 @@
     const wrap = el('div', { class: 'settings' });
     const total = state.items.length;
     const reviews = state.items.reduce((a, i) => a + (i.reviews || 0), 0);
+    const fileOnly = state.items.filter((i) => i.file && !i.audio).length; // PC 파일만 있고 웹 재생용 복사본이 없는 예전 대사
+    const fileCount = state.items.filter((i) => i.file).length;
     const recCount = el('b', null, '…');
     R.listAll().then((all) => { recCount.textContent = String(all.length); }).catch(() => { recCount.textContent = '0'; });
     const fileInput = el('input', { type: 'file', accept: 'application/json', style: 'display:none', onchange: async (e) => {
@@ -1031,9 +1185,13 @@
           } }, '자막 내보내기 (JSON)'),
           el('button', { class: 'btn', disabled: !state.extOk, onclick: () => fileInput.click() }, '자막 가져오기'),
           fileInput,
+          el('button', { class: 'btn mp3-import', disabled: !state.extOk, onclick: () => importMp3Folder() }, 'MP3 폴더에서 불러오기' + (fileOnly ? ' (' + fileOnly + '개 대기)' : '')),
+          infoBtn('mp3Import'),
           el('button', { class: 'btn danger', disabled: !state.extOk, onclick: async () => {
-            if (!confirm('저장한 자막을 모두 삭제할까요? 되돌릴 수 없습니다.')) return;
-            await B.request('items.clear').catch((e) => toast(e.message));
+            if (!confirm('저장한 자막 ' + total + '개를 모두 삭제할까요? 보관 오디오' + (fileCount ? '와 PC 에 저장한 MP3 파일 ' + fileCount + '개' : '') + '도 함께 지워집니다. 되돌릴 수 없습니다.')) return;
+            const r = await B.request('items.clear', {}, 120000).catch((e) => { toast(e.message); return null; });
+            if (r && r.files && r.files.failed && r.files.failed.length) toast('자막은 모두 지웠지만 MP3 파일 ' + r.files.failed.length + '개는 지우지 못했습니다 (' + (FAIL_REASON[r.files.failed[0].reason] || r.files.failed[0].reason) + ')', 8000);
+            audioCache.clear(); bufferCache.clear(); fileIssue.clear();
             loadItems();
           } }, '자막 모두 삭제'),
           el('button', { class: 'btn danger', onclick: async () => {

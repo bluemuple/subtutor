@@ -80,5 +80,52 @@ globalThis.SubTutorFS = (() => {
       return { ok: false, reason: 'error', name: st.name, error: String((e && e.message) || e) };
     }
   }
-  return { ROOT_DIR, getHandle, setHandle, status, requestPermission, pick, clear, writeFile };
+  // 저장 때 기록한 경로('<폴더 이름>/SubTutor/작품/파일.mp3')를 지금 고른 폴더 기준의 부분 배열로. 폴더 이름이 달라졌어도 SubTutor/ 아래 구조는 같다
+  function partsFromRecorded(path, rootName) {
+    const parts = String(path || '').split('/').map((x) => x.trim()).filter((x) => x && x !== '.' && x !== '..');
+    if (parts.length < 2) return null;
+    if (rootName && parts[0] === rootName) return parts.slice(1);
+    const i = parts.indexOf(ROOT_DIR);
+    return i >= 0 && i < parts.length - 1 ? parts.slice(i) : null;
+  }
+  function fsError(e, name) {
+    const n = e && e.name;
+    if (n === 'NotFoundError') return { ok: false, reason: 'missing', name };
+    if (n === 'NotAllowedError' || n === 'SecurityError') return { ok: false, reason: 'prompt', name, error: String((e && e.message) || e) };
+    return { ok: false, reason: 'error', name, error: String((e && e.message) || e) };
+  }
+  // 기록된 경로의 파일을 읽는다 → { ok, bytes(Uint8Array), name, path, size }
+  async function readFile(recordedPath) {
+    const st = await status();
+    if (st.state === 'none') return { ok: false, reason: 'none' };
+    if (st.state !== 'granted') return { ok: false, reason: st.state, name: st.name || '' };
+    const parts = partsFromRecorded(recordedPath, st.name);
+    if (!parts) return { ok: false, reason: 'other-folder', name: st.name };
+    try {
+      let dir = st.handle;
+      for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part);
+      const file = await (await dir.getFileHandle(parts[parts.length - 1])).getFile();
+      return { ok: true, bytes: new Uint8Array(await file.arrayBuffer()), name: st.name, path: st.name + '/' + parts.join('/'), size: file.size };
+    } catch (e) { return fsError(e, st.name); }
+  }
+  // 기록된 경로의 파일을 지우고, 비게 된 작품 폴더도 지운다 (SubTutor 폴더 자체는 남긴다)
+  async function removeFile(recordedPath) {
+    const st = await status();
+    if (st.state === 'none') return { ok: false, reason: 'none' };
+    if (st.state !== 'granted') return { ok: false, reason: st.state, name: st.name || '' };
+    const parts = partsFromRecorded(recordedPath, st.name);
+    if (!parts) return { ok: false, reason: 'other-folder', name: st.name };
+    try {
+      const dirs = [st.handle]; // dirs[k] = parts[k-1] 폴더
+      for (const part of parts.slice(0, -1)) dirs.push(await dirs[dirs.length - 1].getDirectoryHandle(part));
+      await dirs[dirs.length - 1].removeEntry(parts[parts.length - 1]);
+      for (let i = dirs.length - 1; i >= 2; i--) {
+        const first = await dirs[i].entries().next();
+        if (!first.done) break;
+        await dirs[i - 1].removeEntry(parts[i - 1]);
+      }
+      return { ok: true, name: st.name };
+    } catch (e) { return fsError(e, st.name); }
+  }
+  return { ROOT_DIR, getHandle, setHandle, status, requestPermission, pick, clear, writeFile, readFile, removeFile, partsFromRecorded };
 })();

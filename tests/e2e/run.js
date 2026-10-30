@@ -431,6 +431,7 @@ function ensureFixtures() {
       // 실제 탭 캡처는 사용자 클릭(activeTab)이 필요하므로, 같은 파이프라인(MediaStreamTrackProcessor → 조각 배치 → 자르기 → MP3)에 300→900Hz 로 올라가는 합성 신호를 넣는다
       await sw.evaluate(async () => { const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: Object.assign({}, settings, { audioMode: 'store', captureTest: 'sweep' }) }); });
       await sleep(400);
+      try {
       await setTime(page, 14.3, true);
       await sleep(300);
       await page.keyboard.press('KeyE');
@@ -453,15 +454,21 @@ function ensureFixtures() {
       const w = [0.1, 0.5, 0.85].map(win);
       assert(w.every((x) => x.rms > 1500), 'no silent gaps: ' + JSON.stringify(w));
       assert(w[0].hz > 250 && w[0].hz < 700 && w[2].hz > w[0].hz + 120 && w[1].hz > w[0].hz && w[2].hz > w[1].hz, 'rising sweep ' + JSON.stringify(w));
-      // 정리: 별표 해제(항목·오디오 삭제), 설정 복원
-      await page.keyboard.press('KeyE');
-      await waitFor(() => sw.evaluate(async () => !((await chrome.storage.local.get('items')).items.find((i) => i.id === 'netflix:12345:14000'))), 5000, 'unstarred');
-      await sw.evaluate(async () => { const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: Object.assign({}, settings, { audioMode: 'off', captureTest: '' }) }); });
-      await sleep(300);
+      } finally {
+        // 정리(검사가 실패해도 실행): 별표 해제로 항목·오디오 삭제, 설정 복원 — 안 하면 뒤 단계의 항목 수가 어긋나 줄줄이 실패한다
+        const still = () => sw.evaluate(async () => !!(((await chrome.storage.local.get('items')).items || []).find((i) => i.id === 'netflix:12345:14000')));
+        if (await still()) {
+          await page.keyboard.press('KeyE');
+          await waitFor(async () => !(await still()), 5000, 'unstarred').catch(() => sw.evaluate(() => globalThis.__subtutorHandle({ type: 'web.items.removeMany', payload: { ids: ['netflix:12345:14000'] } }, {})));
+        }
+        await sw.evaluate(async () => { const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: Object.assign({}, settings, { audioMode: 'off', captureTest: '' }) }); });
+        await sleep(300);
+      }
     });
 
     console.log('▶ 모의 유튜브 페이지');
     const yt = await browser.newPage();
+    let ytClipB64 = null; // 유튜브 저장 단계의 MP3 (파일 = 웹 복사본) — 뒤 단계에서 비교에 쓴다
     yt.on('pageerror', (e) => logs.push('[yt pageerror] ' + e.message));
     await yt.goto('https://www.youtube.com/watch?v=mock1234567', { waitUntil: 'domcontentloaded' });
     await step('유튜브: json3 자막 10줄 + 자동 번역 한국어가 연결된다', async () => {
@@ -482,11 +489,11 @@ function ensureFixtures() {
       await yt.keyboard.press('KeyD');
       await waitFor(async () => { const t = await videoTime(yt); return t >= 9.8 && t < 10.6; }, 4000, 'yt next cue');
     });
-    await step('유튜브: 별표 저장 시 대사 오디오를 캡처해 보관하고 지정 폴더에 MP3 로 쓴다', async () => {
+    await step('유튜브: 별표 저장(PC 파일 모드) 시 대사 오디오를 지정 폴더에 MP3 로 쓰고 같은 MP3 를 웹 재생용으로 보관한다', async () => {
       await yt.click('.st-head .st-icon');
       await yt.waitForSelector('.st-settings:not(.st-hidden)');
-      const ok = await yt.evaluate(() => { const sel = [...document.querySelectorAll('.st-settings select')].find((s) => [...s.options].some((o) => o.value === 'both')); if (!sel) return false; sel.value = 'both'; sel.dispatchEvent(new Event('change', { bubbles: true })); return true; });
-      assert(ok, 'audio mode select');
+      const ok = await yt.evaluate(() => { const sel = [...document.querySelectorAll('.st-settings select')].find((s) => [...s.options].some((o) => o.value === 'download')); if (!sel || [...sel.options].some((o) => o.value === 'both')) return false; sel.value = 'download'; sel.dispatchEvent(new Event('change', { bubbles: true })); return true; });
+      assert(ok, 'audio mode select (download, no legacy both)');
       await yt.click('.st-head .st-icon');
       await setTime(yt, 22.3, true);
       await sleep(300);
@@ -498,17 +505,21 @@ function ensureFixtures() {
         const toastText = await yt.$eval('.st-toast', (t) => t.textContent).catch(() => '');
         throw new Error(e.message + ' toast=' + toastText);
       });
+      ytClipB64 = wavB64;
       const buf = Buffer.from(wavB64, 'base64');
       assert(buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0, 'mp3 sync bytes: ' + buf.slice(0, 4).toString('hex'));
       const file = path.join(TMP, 'e2e-clip.mp3');
       fs.writeFileSync(file, buf);
       const probe = require('child_process').execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_name,sample_rate,channels', '-of', 'default=nw=1', file]).toString();
-      assert(/codec_name=mp3/.test(probe) && /sample_rate=32000/.test(probe) && /channels=1/.test(probe), 'ffprobe: ' + probe.replace(/\s+/g, ' '));
+      const probeRate = +((/sample_rate=(\d+)/.exec(probe) || [])[1] || 0);
+      assert(/codec_name=mp3/.test(probe) && probeRate >= 32000 && /channels=1/.test(probe), 'ffprobe: ' + probe.replace(/\s+/g, ' '));
       const durMs = parseFloat(/duration=([\d.]+)/.exec(probe)[1]) * 1000;
-      assert(durMs > 1800 && durMs < 3700, 'clip duration ' + durMs);
+      assert(durMs > 2300 && durMs < 3300, 'clip duration ' + durMs + ' (cue 2000ms + 앞뒤 250ms 여유)');
       const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
       const it = items.find((i) => i.platform === 'youtube');
-      assert(it && it.audio && it.audio.format === 'mp3' && it.audio.rate === 32000, 'item audio meta: ' + JSON.stringify(it && it.audio));
+      assert(it && it.audio && it.audio.format === 'mp3' && it.audio.rate === probeRate && it.audio.sameAsFile === true, 'item audio meta (same MP3 as the file): ' + JSON.stringify(it && it.audio));
+      assert(it.file && it.file.location === 'folder' && Number.isFinite(it.file.leadMs), 'file meta: ' + JSON.stringify(it.file));
+      assert(it.audio.stats && it.audio.stats.reason === 'done' && it.audio.stats.entered === true, 'capture ended by reaching the cue end, not by timeout: ' + JSON.stringify(it.audio.stats));
       await yt.evaluate(() => document.querySelector('video').pause());
       // 지정 폴더: <폴더>/SubTutor/<작품 에피소드>/<시각 대사>.mp3 (원본 샘플레이트 128kbps) — 다운로드 폴더로는 가지 않는다
       const files = await opt.evaluate(async () => {
@@ -525,6 +536,7 @@ function ensureFixtures() {
       });
       assert(files.length === 1 && /^e2e-docs\/SubTutor\/Mock Lecture Title Mock Channel\/00-2\d .+\.mp3$/.test(files[0].path), 'folder file ' + JSON.stringify(files));
       assert(files[0].size > 5000 && files[0].head[0] === 0xff && (files[0].head[1] & 0xe0) === 0xe0, 'mp3 in folder ' + JSON.stringify(files[0]));
+      assert(files[0].size === buf.length, 'web copy is byte-identical to the file: ' + files[0].size + ' vs ' + buf.length);
       const dls = await sw.evaluate(() => new Promise((r) => chrome.downloads.search({}, r)));
       assert(dls.length === 0, 'no chrome download when folder works: ' + dls.length);
       const toastText = await yt.$eval('.st-toast', (t) => t.textContent).catch(() => '');
@@ -536,7 +548,7 @@ function ensureFixtures() {
     const web = await browser.newPage();
     web.on('pageerror', (e) => logs.push('[web pageerror] ' + e.message));
     web.on('console', (m) => logs.push('[web ' + m.type() + '] ' + m.text()));
-    web.on('dialog', (d) => d.accept());
+    web.on('dialog', (d) => { logs.push('[web dialog] ' + d.message()); d.accept(); });
     await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
     const trackClipEvents = () => web.evaluate(() => { window.__clipEvents = []; window.SubTutorBridge.on('clip.state', (p) => window.__clipEvents.push(Object.assign({ at: Date.now() % 100000 }, p))); }).catch(() => {});
     await trackClipEvents();
@@ -697,16 +709,66 @@ function ensureFixtures() {
     await step('보관된 오디오가 있는 항목은 플레이어 탭 없이 바로 재생된다', async () => {
       const row = await web.$('[data-id^="youtube:"]');
       assert(row, 'youtube item row');
-      const badge = await row.$eval('.fmt.stored', (e) => e.textContent + '|' + e.title).catch(() => null);
-      assert(badge && /MP3/.test(badge) && /32kHz/.test(badge), 'small format badge: ' + badge);
-      const fileBadge = await row.$eval('.fmt.file', (e) => e.textContent + '|' + e.title).catch(() => null);
-      assert(fileBadge && /MP3/.test(fileBadge) && /e2e-docs\/SubTutor/.test(fileBadge), 'file badge for folder save: ' + fileBadge);
+      const badges = await row.$$eval('.fmt', (els) => els.map((e) => e.className + '|' + e.textContent + '|' + e.title));
+      assert(badges.length === 1 && /file stored/.test(badges[0]) && /⬇ MP3/.test(badges[0]) && /e2e-docs\/SubTutor/.test(badges[0]) && /\d+kHz/.test(badges[0]) && /복사본 있음/.test(badges[0]), 'one small badge for file + web copy: ' + JSON.stringify(badges));
       await yt.evaluate(() => { window.__pauses = []; });
       await (await row.$('.play')).click();
       await waitFor(() => web.$eval('[data-id^="youtube:"]', (e) => e.classList.contains('playing')), 5000, 'local playing');
       await waitFor(() => web.$eval('[data-id^="youtube:"]', (e) => !e.classList.contains('playing')), 8000, 'local ended');
       const pauses = await yt.evaluate(() => window.__pauses);
       assert(pauses.length === 0, 'player tab untouched: ' + JSON.stringify(pauses));
+    });
+    const ytSelAll = '[data-id^="youtube:"]';
+    let ytId = null;
+    await step('PC 파일만 있는 예전 항목: ▶ 를 누르면 지정 폴더에서 읽어 바로 재생하고 복사본을 보관한다', async () => {
+      ytId = await web.$eval(ytSelAll, (e) => e.dataset.id);
+      // 예전 버전처럼 복사본 없이 파일만 있는 상태로 만든다
+      await sw.evaluate(async (id) => { await chrome.storage.local.remove('audio:' + id); await globalThis.__subtutorHandle({ type: 'items.update', id, patch: { audio: null } }, {}); }, ytId);
+      await waitFor(() => web.$(ytSelAll + ' button.fmt.only'), 8000, 'file-only badge (orange button)');
+      await yt.evaluate(() => { window.__pauses = []; });
+      await web.click(ytSelAll + ' .play');
+      await waitFor(() => web.$eval(ytSelAll, (e) => e.classList.contains('playing')), 8000, 'playing from the folder file');
+      await waitFor(() => web.$eval(ytSelAll, (e) => !e.classList.contains('playing')), 10000, 'ended');
+      assert((await yt.evaluate(() => window.__pauses)).length === 0, 'player tab untouched');
+      const it = await waitFor(async () => { const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); const x = items.find((i) => i.id === ytId); return x && x.audio ? x : null; }, 5000, 'copy stored from folder');
+      assert(it.audio.source === 'folder' && it.audio.sameAsFile === true && it.audio.format === 'mp3', 'copy meta ' + JSON.stringify(it.audio));
+      const stored = await sw.evaluate(async (id) => (await chrome.storage.local.get('audio:' + id))['audio:' + id], ytId);
+      assert(stored === ytClipB64, 'copy bytes equal the file');
+      await waitFor(() => web.$(ytSelAll + ' span.fmt.file.stored'), 8000, 'badge back to file + copy');
+    });
+    await step('다운로드 폴더의 MP3: 안내가 뜨고, 웹의 "MP3 폴더에서 불러오기"로 복사본을 가져온다', async () => {
+      // 다운로드 폴더에 저장한 것처럼 기록을 바꾸고 복사본을 지운다 (확장 프로그램은 다운로드 폴더를 읽을 수 없다)
+      const rel = await sw.evaluate(async (id) => { await chrome.storage.local.remove('audio:' + id); const items = (await chrome.storage.local.get('items')).items; const it = items.find((i) => i.id === id); it.audio = null; it.fileFolder = it.file; const rel = it.file.path.split('/').slice(1).join('/'); it.file = { format: 'mp3', location: 'downloads', path: '다운로드/' + rel, leadMs: it.file.leadMs }; await chrome.storage.local.set({ items }); return rel; }, ytId);
+      await waitFor(() => web.$(ytSelAll + ' button.fmt.only'), 8000, 'file-only badge (downloads)');
+      await web.click(ytSelAll + ' .play');
+      await waitFor(() => web.$eval('#toast', (t) => /다운로드 폴더에 있어/.test(t.textContent)), 8000, 'downloads hint toast');
+      await sleep(400);
+      await web.evaluate((sel) => { const b = document.querySelector(sel + ' .play'); if (b && (b.classList.contains('busy') || b.classList.contains('active'))) b.click(); }, ytSelAll); // 플레이어 재생으로 넘어갔으면 멈춘다
+      // 웹사이트 원본의 OPFS 에 다운로드 폴더와 같은 구조로 MP3 를 두고(크롬이 붙이는 " (1)" 이름), 폴더 선택 창을 그 핸들로 대신한다
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await waitFor(() => web.$eval('.btn.mp3-import', (b) => /1개 대기/.test(b.textContent)), 8000, 'import button shows one waiting');
+      await web.evaluate(async (rel, b64) => {
+        const root = await navigator.storage.getDirectory();
+        let dir = await root.getDirectoryHandle('e2e-downloads', { create: true });
+        const parts = rel.split('/');
+        for (const x of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(x, { create: true });
+        const fh = await dir.getFileHandle(parts[parts.length - 1].replace(/\.mp3$/, ' (1).mp3'), { create: true });
+        const w = await fh.createWritable();
+        const bin = atob(b64); const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        await w.write(bytes); await w.close();
+        window.showDirectoryPicker = async () => root.getDirectoryHandle('e2e-downloads');
+      }, rel, ytClipB64);
+      await web.click('.btn.mp3-import');
+      await waitFor(() => web.$eval('#toast', (t) => /MP3 1개를 불러왔습니다/.test(t.textContent)), 15000, 'import toast');
+      const it = await waitFor(async () => { const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); const x = items.find((i) => i.id === ytId); return x && x.audio ? x : null; }, 5000, 'copy imported');
+      assert(it.audio.source === 'import' && it.audio.sameAsFile === true, 'import meta ' + JSON.stringify(it.audio));
+      assert(await sw.evaluate(async (id) => (await chrome.storage.local.get('audio:' + id))['audio:' + id], ytId) === ytClipB64, 'imported bytes equal the file');
+      await waitFor(() => web.$eval('.btn.mp3-import', (b) => !/대기/.test(b.textContent)), 8000, 'nothing waiting');
+      // 원래대로 지정 폴더 기록으로 되돌린다
+      await sw.evaluate(async (id) => { const items = (await chrome.storage.local.get('items')).items; const it = items.find((i) => i.id === id); it.file = it.fileFolder; delete it.fileFolder; await chrome.storage.local.set({ items }); }, ytId);
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await trackClipEvents();
+      await waitFor(() => web.$(ytSelAll + ' span.fmt.file.stored'), 8000, 'badge restored');
     });
     await step('웹에서 ▶ 를 누르면 플레이어 탭이 그 구간만 재생하고 멈춘다', async () => {
       await page.evaluate(() => { window.__pauses = []; });
@@ -738,7 +800,7 @@ function ensureFixtures() {
       await sleep(600);
       assert(await videoPaused(page), 'stays paused');
     });
-    await step('🔁 반복: 보관 오디오·플레이어 재생을 되풀이하고, 다른 대사를 누르면 이전 것이 멈춘다', async () => {
+    await step('🔁 반복: 보관 오디오·플레이어 재생을 되풀이하고, 다른 대사를 누르면 이전 것이 멈춘다 · 삭제하면 MP3 파일도 함께 지워진다', async () => {
       await web.click('.toolbar .repeat-toggle');
       assert(await web.$eval('.toolbar .repeat-toggle', (b) => b.classList.contains('on')), 'repeat on');
       const ytSel = '[data-id^="youtube:"]', nfSel = '[data-id="netflix:12345:22000"]';
@@ -771,6 +833,10 @@ function ensureFixtures() {
       await waitFor(() => web.$$eval('.item', (r) => r.length === 2), 5000, 'youtube item deleted');
       const left = await sw.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith('audio:')));
       assert(left.length === 0, 'audio removed with item: ' + left);
+      // 삭제하면 지정 폴더의 MP3 파일과 비게 된 작품 폴더도 지워지고, 확인 창이 그 사실을 알린다
+      assert(logs.some((l) => /\[web dialog\] 이 대사 1개를 삭제할까요\? PC 에 저장한 MP3 파일 1개도 함께 지웁니다/.test(l)), 'delete confirm names the MP3 file: ' + logs.filter((l) => /web dialog/.test(l)).slice(-1).join(''));
+      const folders = await opt.evaluate(async () => { const sub = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [n] of sub.entries()) out.push(n); return out; });
+      assert(!folders.some((n) => /Mock Lecture/.test(n)), 'MP3 file and its emptied folder removed with the item: ' + JSON.stringify(folders));
     });
     await step('코멘트를 쓰면 저장되고 새로고침 후에도 남는다', async () => {
       const ta = await web.$('[data-id="netflix:12345:22000"] .comment');
@@ -888,6 +954,65 @@ function ensureFixtures() {
       await web.click('.item .btn.danger');
       await waitFor(() => web.$$eval('.item', (r) => r.length === 1), 5000, 'deleted');
       await waitFor(() => page.$$eval('.st-row.saved', (r) => r.length === 1), 6000, 'panel star updated');
+    });
+    await step('편집 모드: 선택 상자로 고른 대사를 삭제하면 PC 의 MP3 파일도 함께 지워진다', async () => {
+      // 편집용 항목 4개: Edit Show S1:E1 ×2, S1:E2 ×1(지정 폴더에 MP3 있음), Edit Movie ×1(다운로드 폴더 기록만, 실제 파일 없음)
+      const now = Date.now();
+      const mk = (id, title, episode, text, extra) => Object.assign({ id, platform: 'netflix', videoId: id.split(':')[1], url: 'https://www.netflix.com/watch/' + id.split(':')[1], title, episode, startMs: 1000, endMs: 2000, text, translation: '', savedAt: now, box: 'learning' }, extra || {});
+      const filePath = 'e2e-docs/SubTutor/Edit Show S1E2/00-01 keep calm.mp3';
+      const keepPath = 'e2e-docs/SubTutor/Edit Keep/00-02 stay.mp3'; // 다른 작품 폴더의 파일은 남아야 한다
+      for (const p of [filePath, keepPath]) await opt.evaluate(async (p) => { const root = await navigator.storage.getDirectory(); let dir = await root.getDirectoryHandle('e2e-docs'); const parts = p.split('/').slice(1); for (const x of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(x, { create: true }); const fh = await dir.getFileHandle(parts[parts.length - 1], { create: true }); const w = await fh.createWritable(); await w.write(new Uint8Array([0xff, 0xfb, 0x90, 0x00, 1, 2, 3])); await w.close(); }, p);
+      const extra = [
+        mk('netflix:801:1000', 'Edit Show', 'S1:E1', 'Edit one'),
+        mk('netflix:801:5000', 'Edit Show', 'S1:E1', 'Edit two'),
+        mk('netflix:802:1000', 'Edit Show', 'S1:E2', 'Edit three', { file: { format: 'mp3', location: 'folder', path: filePath, leadMs: 250, savedAt: now } }),
+        mk('netflix:803:1000', 'Edit Movie', '', 'Edit four', { file: { format: 'mp3', location: 'downloads', path: '다운로드/SubTutor/Edit Movie/00-01 nothing.mp3', leadMs: 250, savedAt: now } }),
+      ];
+      const r = await web.evaluate((items) => window.SubTutorBridge.request('items.import', { items }), extra);
+      assert(r.added === 4, 'imported ' + JSON.stringify(r));
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await waitFor(() => web.$$eval('.item', (x) => x.length === 5), 8000, 'five items');
+      assert((await web.$$('.item .pick')).length === 0 && await web.$eval('.edit-bar', (e) => e.classList.contains('hidden')), 'no checkboxes before edit');
+      await web.click('.toolbar .edit-toggle');
+      await waitFor(() => web.$$eval('.item .pick', (x) => x.length === 5), 5000, 'checkboxes in edit mode');
+      assert(!(await web.$eval('.edit-bar', (e) => e.classList.contains('hidden'))), 'edit bar visible');
+      assert(await web.$eval('.edit-bar .del-selected', (b) => b.disabled && /선택 0개 삭제/.test(b.textContent)), 'delete disabled with nothing selected');
+      await web.click('[data-id="netflix:802:1000"] .pick');
+      await waitFor(() => web.$eval('.edit-bar .del-selected', (b) => !b.disabled && /선택 1개 삭제/.test(b.textContent)), 3000, 'one selected');
+      assert(await web.$eval('[data-id="netflix:802:1000"]', (e) => e.classList.contains('selected')), 'card highlighted');
+      await web.click('[data-id="netflix:801:1000"] .meta .span'); // 카드 본문을 눌러도 선택
+      await waitFor(() => web.$eval('.edit-bar .del-selected', (b) => /선택 2개 삭제/.test(b.textContent)), 3000, 'card click selects');
+      await web.click('[data-id="netflix:801:1000"] .meta .span');
+      await waitFor(() => web.$eval('.edit-bar .del-selected', (b) => /선택 1개 삭제/.test(b.textContent)), 3000, 'card click deselects');
+      await web.screenshot({ path: path.join(TMP, 'shots', 'web-edit-mode.png') });
+      await web.click('.edit-bar .del-selected'); // 확인 창은 자동 수락 (문구는 logs 에 남는다)
+      await waitFor(() => web.$$eval('.item', (x) => x.length === 4), 8000, 'deleted');
+      assert(!(await web.$('[data-id="netflix:802:1000"]')), 'selected item gone');
+      assert(logs.some((l) => /\[web dialog\] 선택한 대사 1개를 삭제할까요\? PC 에 저장한 MP3 파일 1개도 함께 지웁니다/.test(l)), 'confirm names the file: ' + logs.filter((l) => /web dialog/.test(l)).slice(-1).join(''));
+      await waitFor(() => web.$eval('#toast', (t) => /대사 1개 삭제 · MP3 파일 1개 삭제/.test(t.textContent)), 5000, 'toast reports the deleted file');
+      const left = await opt.evaluate(async () => { const root = await navigator.storage.getDirectory(); const sub = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [name] of sub.entries()) out.push(name); return out; });
+      assert(!left.includes('Edit Show S1E2') && left.includes('Edit Keep'), 'file and its emptied folder removed, other folders kept: ' + JSON.stringify(left));
+      assert(await web.$$eval('.item .pick', (x) => x.length) === 4, 'still in edit mode after deleting');
+    });
+    await step('편집 모드: 드롭다운으로 에피소드·작품 전체 삭제, 완료·Esc 로 나오기', async () => {
+      const pickScope = async (re) => { const v = await web.$$eval('.edit-bar .bulk-scope option', (os, src) => { const o = os.find((x) => new RegExp(src).test((x.parentElement.label || '') + ' ' + x.textContent)); return o ? o.value : null; }, re.source); assert(v, 'scope option ' + re); await web.select('.edit-bar .bulk-scope', v); };
+      await pickScope(/^Edit Show S1:E1 · 2개$/);
+      await waitFor(() => web.$$eval('.item', (x) => x.length === 2), 8000, 'episode deleted');
+      assert(!(await web.$$eval('.item', (x) => x.map((e) => e.dataset.id))).some((i) => i.startsWith('netflix:801:')), 'S1:E1 items gone');
+      // 작품 전체: 다운로드 폴더 기록만 있고 크롬 다운로드 기록에 없는 파일 → 자막은 지우고 파일은 못 지웠다고 알린다
+      await pickScope(/^Edit Movie 작품 전체 · 1개$/);
+      await waitFor(() => web.$$eval('.item', (x) => x.length === 1), 8000, 'work deleted');
+      assert(logs.some((l) => /\[web dialog\] 작품 "Edit Movie"의 대사 1개를 삭제할까요\? PC 에 저장한 MP3 파일 1개도 함께 지웁니다/.test(l)), 'confirm text for the work: ' + logs.filter((l) => /web dialog/.test(l)).slice(-1).join(''));
+      await waitFor(() => web.$eval('#toast', (t) => /대사 1개 삭제 · 파일 1개는 지우지 못했습니다 \(크롬 다운로드 기록에 없어/.test(t.textContent)), 5000, 'toast reports the missing download');
+      const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
+      assert(items.length === 1 && !items.some((i) => i.title.startsWith('Edit')), 'storage cleaned: ' + items.map((i) => i.id).join(','));
+      await web.click('.edit-bar .edit-done');
+      await waitFor(() => web.$$eval('.item .pick', (x) => x.length === 0), 3000, 'checkboxes gone');
+      assert(await web.$eval('.edit-bar', (e) => e.classList.contains('hidden')), 'edit bar hidden');
+      await web.click('.toolbar .edit-toggle');
+      await waitFor(() => web.$$eval('.item .pick', (x) => x.length === 1), 3000, 'edit again');
+      await web.keyboard.press('Escape');
+      await waitFor(() => web.$$eval('.item .pick', (x) => x.length === 0), 3000, 'Esc exits edit mode');
     });
     await step('내보내기/가져오기 데이터 형식', async () => {
       const r = await web.evaluate(() => window.SubTutorBridge.request('items.import', { items: [{ id: 'netflix:999:1000', platform: 'netflix', videoId: '999', url: 'https://www.netflix.com/watch/999', title: 'Imported', episode: '', startMs: 1000, endMs: 2000, text: 'Imported line', translation: '', savedAt: Date.now(), box: 'learning' }] }));

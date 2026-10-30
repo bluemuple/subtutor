@@ -642,14 +642,14 @@
     else result = await captureViaTab(startV, endV, item, i);
     if (!result) return;
     if (result.silent) { toast('이 영상의 오디오는 캡처가 차단되어 있습니다(보호된 재생)'); return; }
-    const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, storeFormat: result.storeFormat || 'wav', storeMime: result.storeMime || 'audio/wav', storeRate: result.storeRate || 16000, download: result.download, downloadMime: result.downloadMime || 'audio/wav', fileName: fileNameFor(item, result.downloadFormat || 'wav'), durationMs: result.durationMs, leadMs: Number.isFinite(result.leadMs) ? result.leadMs : 250, stats: result.stats || null });
+    const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, storeFormat: result.storeFormat || 'wav', storeMime: result.storeMime || 'audio/wav', storeRate: result.storeRate || 16000, download: result.download, downloadMime: result.downloadMime || 'audio/wav', downloadRate: result.downloadRate || 0, fileName: fileNameFor(item, result.downloadFormat || 'wav'), durationMs: result.durationMs, leadMs: Number.isFinite(result.leadMs) ? result.leadMs : 250, stats: result.stats || null });
     const fmt = (result.downloadFormat || 'wav').toUpperCase();
-    if (mode === 'store') toast('🔊 오디오를 웹 퀴즈용으로 보관했습니다', 2500);
+    if (mode === 'store') toast('🔊 오디오를 웹 재생용으로 보관했습니다', 2500);
     else {
       const where = r && r.location === 'folder' ? (r.fileName || '') : '다운로드 폴더/' + ((r && r.fileName) || 'SubTutor');
       const extra = r && r.folderIssue === 'prompt' ? ' · 지정한 폴더의 권한이 풀려 다운로드 폴더에 저장했습니다. 툴바의 SubTutor 아이콘 → "폴더 권한 허용"'
         : (r && r.folderIssue === 'error' ? ' · 지정한 폴더에 쓰지 못해 다운로드 폴더에 저장했습니다 (' + (r.folderError || '') + ')' : '');
-      toast('🔊 ' + fmt + ' 파일 저장: ' + where + (mode === 'both' ? ' (+ 웹 퀴즈용 보관)' : '') + extra, extra ? 6000 : 2500);
+      toast('🔊 ' + fmt + ' 파일 저장: ' + where + ' (웹에서도 바로 재생)' + extra, extra ? 6000 : 2500);
     }
     if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
   }
@@ -717,7 +717,8 @@
     const dl = Au.encodeClip(norm, rate, { kbps: 128 });
     const st = Au.encodeClip(norm, rate, { rate: 32000, kbps: 64 });
     const leadMs = Math.max(0, Math.round(Math.min(PAD, startV + offset - recStartWall)));
-    return { ok: true, durationMs: Math.round((samples.length * 1000) / rate), leadMs, download: Au.bytesToBase64(dl.bytes), downloadFormat: dl.format, downloadMime: dl.mime, store: Au.bytesToBase64(st.bytes), storeFormat: st.format, storeMime: st.mime, storeRate: st.rate };
+    const stats = { source: 'element', reason: cap.reason, entered: !!cap.entered, anchors: cap.anchors.length, recordedMs: Math.round(audio.duration * 1000), windowStartMs: Math.round(startV - PAD + offset - recStartWall), windowEndMs: Math.round(endV + PAD + offset - recStartWall), capMs: Math.round(wall() - recStartWall) };
+    return { ok: true, durationMs: Math.round((samples.length * 1000) / rate), leadMs, stats, download: Au.bytesToBase64(dl.bytes), downloadFormat: dl.format, downloadMime: dl.mime, downloadRate: dl.rate, store: Au.bytesToBase64(st.bytes), storeFormat: st.format, storeMime: st.mime, storeRate: st.rate };
   }
 
   // ───────────── 제목 ─────────────
@@ -1148,7 +1149,7 @@
     f.translationSource = el('select', { onchange: (e) => { saveSettings({ translationSource: e.target.value }); refreshAllKo(); if (state.current >= 0) ensureTranslations(state.current); } });
     [['auto', '자동 (플랫폼 한국어 자막 → 없으면 기계번역)'], ['track', '플랫폼 한국어 자막만'], ['mt', '기계 번역만'], ['off', '끄기']].forEach(([v, t]) => f.translationSource.append(el('option', { value: v }, t)));
     f.audioMode = el('select', { onchange: (e) => saveSettings({ audioMode: e.target.value }) });
-    [['off', '저장 안 함'], ['store', '웹 퀴즈용으로 보관 (확장 프로그램 안)'], ['download', 'PC에 MP3 파일로 저장'], ['both', '둘 다']].forEach(([v, t]) => f.audioMode.append(el('option', { value: v }, t)));
+    [['off', '저장 안 함'], ['store', '웹 재생용으로 보관 (확장 프로그램 안)'], ['download', 'PC에 MP3 파일로 저장 (+ 웹 재생용 복사본)']].forEach(([v, t]) => f.audioMode.append(el('option', { value: v }, t)));
     f.koMode = el('select', { onchange: (e) => saveSettings({ koMode: e.target.value }) });
     [['always', '항상 보임'], ['hold', 'T 키를 누르는 동안만'], ['afterRepeat', '같은 줄 3회 반복 뒤']].forEach(([v, t]) => f.koMode.append(el('option', { value: v }, t)));
     f.cloze = el('select', { onchange: (e) => saveSettings({ cloze: e.target.value }) });
@@ -1205,7 +1206,7 @@
     f.overlay.checked = !!settings.overlay;
     f.hideNative.checked = !!settings.hideNative;
     f.translationSource.value = settings.translationSource;
-    f.audioMode.value = settings.audioMode || 'off';
+    f.audioMode.value = settings.audioMode === 'both' ? 'download' : (settings.audioMode || 'off');
     f.koMode.value = settings.koMode || 'hold';
     f.cloze.value = settings.cloze || 'off';
     f.secondPass.checked = !!settings.secondPass; f.soundsLike.checked = !!settings.soundsLike; f.kiwiNotes.checked = !!settings.kiwiNotes; f.vocabProfile.checked = !!settings.vocabProfile; f.loopLadder.checked = !!settings.loopLadder;
@@ -1669,8 +1670,10 @@
       if (v && Math.abs(v.playbackRate - state.rate) > 0.01) applyRate(true);
     }
     if (capturing) {
-      if (!paused && now() - state.lastSeekAt > 150) capturing.anchors.push([wall(), raw]);
-      if (raw >= capturing.endV + 300 || raw < capturing.startV - 8000) finishCapturing('done');
+      if (!paused && now() - state.lastSeekAt > 150 && raw !== capturing.lastAnchorRaw) { capturing.anchors.push([wall(), raw]); capturing.lastAnchorRaw = raw; } // 미디어 시계가 멈춘 동안(탐색 대기·버퍼링)의 중복 앵커는 오프셋을 치우치게 하므로 버린다
+      // 구간 안에 들어온 뒤에만 '끝'으로 본다: 별표를 누른 순간 재생 위치가 이미 구간 끝을 지나 있으면, 되감기 탐색이 반영되기 전 첫 tick 에서 끝났다고 착각해 0.3초짜리 녹음이 된다
+      if (raw >= capturing.startV - 1500 && raw < capturing.endV + 300) capturing.entered = true;
+      if ((capturing.entered && raw >= capturing.endV + 300) || raw < capturing.startV - 8000) finishCapturing('done');
     }
     if (idx !== state.current) {
       state.current = idx;

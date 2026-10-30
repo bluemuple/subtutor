@@ -81,14 +81,14 @@
   async function init() {
     $('version').textContent = 'v' + chrome.runtime.getManifest().version;
     await loadSettings();
-    $('audioMode').value = settings.audioMode || 'off';
+    $('audioMode').value = settings.audioMode === 'both' ? 'download' : (settings.audioMode || 'off');
     const st = await refresh();
     if (location.hash === '#grant') {
       $('help').open = true;
       if (st.state === 'granted') msg('지금은 권한이 살아 있습니다. 나중에 "다시 허용 필요"로 바뀌면 이 페이지에서 "폴더 권한 허용"을 누르고 크롬 창에서 "매번 허용"을 고르세요.', 'ok');
       else if (st.state === 'prompt') { msg('2단계: "폴더 권한 허용"을 누르고, 크롬이 띄우는 창에서 "매번 허용" (Allow on every visit) 을 고르세요.', 'warn'); $('grant').classList.add('pulse'); $('grant').focus(); }
     }
-    chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && ch.settings) { settings = ch.settings.newValue || {}; $('audioMode').value = settings.audioMode || 'off'; } });
+    chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && ch.settings) { settings = ch.settings.newValue || {}; $('audioMode').value = settings.audioMode === 'both' ? 'download' : (settings.audioMode || 'off'); } });
   }
   init();
 })();

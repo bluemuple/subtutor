@@ -35,7 +35,7 @@ function render() {
   $('autoPause').checked = !!settings.autoPause;
   $('shadowing').checked = !!settings.shadowing;
   $('shadowPauseSec').value = String(settings.shadowPauseSec);
-  $('audioMode').value = settings.audioMode || 'off';
+  $('audioMode').value = settings.audioMode === 'both' ? 'download' : (settings.audioMode || 'off');
   $('koMode').value = settings.koMode || 'hold';
   $('cloze').value = settings.cloze || 'off';
   ['secondPass', 'soundsLike', 'kiwiNotes', 'vocabProfile', 'loopLadder'].forEach((k) => { $(k).checked = !!settings[k]; });

@@ -249,3 +249,19 @@ table.eps td.num { white-space: nowrap; color: var(--muted); }
 .step-desc { color: var(--muted); margin: 0 0 12px; font-size: 14px; }
 .answer.veiled-text { color: var(--dim); font-weight: 400; font-style: italic; }
 .shadow-card .answer { margin-bottom: 6px; }
+
+/* 편집 모드: 선택 상자 · 편집 막대 */
+.btn.edit-toggle { white-space: nowrap; }
+.edit-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: -4px 0 14px; padding: 10px 14px; background: var(--card); border: 1px solid rgba(248,113,113,.35); border-radius: 10px; }
+.edit-bar .pick-all-label { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.edit-bar select { background: var(--card2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; max-width: 340px; }
+.edit-bar .spacer { flex: 1; }
+input.pick, input.pick-all { width: 22px; height: 22px; accent-color: var(--accent); cursor: pointer; margin: 0; flex: none; }
+.item .pick { margin-bottom: 2px; }
+.editing .item { cursor: pointer; }
+.item.selected { border-color: var(--red); box-shadow: 0 0 0 1px var(--red) inset; background: #1f191c; }
+.group-title .group-pick { margin-left: 4px; }
+/* 오디오 배지: PC 파일만 있는 항목(주황, 누르면 불러오기) */
+.meta .fmt.file.stored { color: #7fb59a; border-color: rgba(52,211,153,.25); }
+.meta button.fmt.only { cursor: pointer; background: none; color: var(--orange); border-color: rgba(251,191,36,.4); font: inherit; font-size: 10.5px; line-height: 1.4; }
+.meta button.fmt.only:hover { background: rgba(251,191,36,.12); }

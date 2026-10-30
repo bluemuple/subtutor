@@ -202,7 +202,7 @@
     // 다운로드: 원본 샘플레이트 모노 128kbps MP3 / 보관: 32kHz 모노 64kbps MP3 (MP3 인코더가 없으면 WAV)
     const dl = A.encodeClip(norm, cur.sampleRate, { rate: downloadRate || 0, kbps: 128 });
     const st = A.encodeClip(norm, cur.sampleRate, { rate: storeRate || 32000, kbps: 64 });
-    out.download = A.bytesToBase64(dl.bytes); out.downloadFormat = dl.format; out.downloadMime = dl.mime;
+    out.download = A.bytesToBase64(dl.bytes); out.downloadFormat = dl.format; out.downloadMime = dl.mime; out.downloadRate = dl.rate;
     out.store = A.bytesToBase64(st.bytes); out.storeFormat = st.format; out.storeMime = st.mime; out.storeRate = st.rate;
     return out;
   }

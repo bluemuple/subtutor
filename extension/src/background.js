@@ -259,28 +259,33 @@ async function openSite() {
 const audioKey = (id) => 'audio:' + id;
 async function saveAudio(msg) {
   const out = { ok: true };
-  const mode = msg.mode || 'store';
-  if ((mode === 'store' || mode === 'both') && msg.store) {
-    await chrome.storage.local.set({ [audioKey(msg.id)]: msg.store });
-    await withItems((items) => updateItem(items, msg.id, { audio: { format: msg.storeFormat || 'wav', mime: msg.storeMime || 'audio/wav', rate: msg.storeRate || 16000, ms: msg.durationMs || 0, leadMs: Number.isFinite(msg.leadMs) ? msg.leadMs : 250, savedAt: Date.now(), stats: msg.stats || null } }));
+  const mode = msg.mode === 'both' ? 'download' : (msg.mode || 'store'); // 'both'(예전 값)는 'PC 파일'과 같다
+  const fileName = String(msg.fileName || 'SubTutor/clip.mp3').replace(/^\/+/, '');
+  const ext = (fileName.split('.').pop() || 'mp3').toLowerCase();
+  const leadMs = Number.isFinite(msg.leadMs) ? msg.leadMs : 250;
+  // 웹 재생용 복사본: '보관'은 작은 MP3(32kHz 64kbps), 'PC 파일'은 파일과 똑같은 MP3 — 어느 쪽이든 웹에서 플레이어 탭 없이 바로 재생된다
+  const copy = mode === 'download' && msg.download
+    ? { data: msg.download, format: ext, mime: msg.downloadMime || 'audio/mpeg', rate: msg.downloadRate || 0, sameAsFile: true }
+    : ((mode === 'store' || mode === 'download') && msg.store ? { data: msg.store, format: msg.storeFormat || 'wav', mime: msg.storeMime || 'audio/wav', rate: msg.storeRate || 16000, sameAsFile: false } : null);
+  if (copy) {
+    await chrome.storage.local.set({ [audioKey(msg.id)]: copy.data });
+    await withItems((items) => updateItem(items, msg.id, { audio: { format: copy.format, mime: copy.mime, rate: copy.rate, ms: msg.durationMs || 0, leadMs, savedAt: Date.now(), stats: msg.stats || null, sameAsFile: copy.sameAsFile } }));
     out.stored = true;
   }
-  if ((mode === 'download' || mode === 'both') && msg.download) {
-    const fileName = String(msg.fileName || 'SubTutor/clip.mp3').replace(/^\/+/, '');
+  if (mode === 'download' && msg.download) {
     // 1) 사용자가 고른 폴더가 있고 권한이 살아 있으면 그 폴더 안에 바로 쓴다
     const folder = await saveToFolder(fileName, msg.download);
-    const ext = (fileName.split('.').pop() || 'mp3').toLowerCase();
     if (folder.ok) {
       out.fileName = folder.path; out.location = 'folder';
-      await withItems((items) => updateItem(items, msg.id, { file: { format: ext, location: 'folder', path: folder.path, savedAt: Date.now() } }));
+      await withItems((items) => updateItem(items, msg.id, { file: { format: ext, location: 'folder', path: folder.path, leadMs, savedAt: Date.now() } }));
       return out;
     }
     if (folder.reason && folder.reason !== 'none') { out.folderIssue = folder.reason === 'error' ? 'error' : 'prompt'; out.folderError = folder.error || ''; out.folderName = folder.name || ''; }
-    // 2) 아니면 크롬 다운로드 폴더(Downloads/SubTutor/…)
+    // 2) 아니면 크롬 다운로드 폴더(Downloads/SubTutor/…). 다운로드 id 를 기록해 두면 나중에 삭제할 때 찾기 쉽다
     try {
       out.downloadId = await chrome.downloads.download({ url: 'data:' + (msg.downloadMime || 'audio/wav') + ';base64,' + msg.download, filename: fileName, conflictAction: 'uniquify', saveAs: false });
       out.fileName = fileName; out.location = 'downloads';
-      await withItems((items) => updateItem(items, msg.id, { file: { format: ext, location: 'downloads', path: '다운로드/' + fileName, savedAt: Date.now() } }));
+      await withItems((items) => updateItem(items, msg.id, { file: { format: ext, location: 'downloads', path: '다운로드/' + fileName, downloadId: out.downloadId, leadMs, savedAt: Date.now() } }));
     } catch (e) {
       throw new Error('파일 다운로드 실패: ' + ((e && e.message) || e));
     }
@@ -320,6 +325,64 @@ async function getAudio(id) {
 async function removeAudio(ids) {
   const keys = ids.map(audioKey);
   if (keys.length) await chrome.storage.local.remove(keys);
+}
+function bytesToBase64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+// 웹 재생용 복사본 넣기 (지정 폴더에서 읽었거나 웹에서 MP3 폴더를 골라 가져온 파일)
+async function putAudio(p) {
+  if (!p || !p.itemId || !p.data) throw new Error('오디오 데이터가 없습니다');
+  await chrome.storage.local.set({ [audioKey(p.itemId)]: p.data });
+  await withItems((items) => updateItem(items, p.itemId, { audio: { format: p.format || 'mp3', mime: p.mime || 'audio/mpeg', rate: p.rate || 0, ms: p.ms || 0, leadMs: Number.isFinite(p.leadMs) ? p.leadMs : 250, savedAt: Date.now(), stats: null, sameAsFile: true, source: p.source || 'import' } }));
+  return { ok: true };
+}
+// PC 파일(MP3)만 있고 웹 재생용 복사본이 없는 예전 항목: 지정 폴더에서 읽어 복사본을 만든다. 다운로드 폴더는 확장 프로그램이 읽을 수 없다
+async function audioFromFile(id) {
+  const item = (await getItems()).find((i) => i.id === id);
+  if (!item || !item.file || !item.file.path) return { data: null, reason: 'no-file' };
+  if (item.file.location !== 'folder') return { data: null, reason: 'downloads', path: item.file.path };
+  let r;
+  try { r = await FS.readFile(item.file.path); } catch (e) { r = { ok: false, reason: 'error', error: String((e && e.message) || e) }; }
+  if (!r.ok) return { data: null, reason: r.reason || 'error', error: r.error || '', path: item.file.path, folder: r.name || '' };
+  const mime = item.file.format === 'wav' ? 'audio/wav' : 'audio/mpeg';
+  const data = bytesToBase64(r.bytes);
+  await putAudio({ itemId: id, data, mime, format: item.file.format || 'mp3', leadMs: Number.isFinite(item.file.leadMs) ? item.file.leadMs : 250, source: 'folder' });
+  return { data, mime, path: r.path };
+}
+// 다운로드 폴더에 저장한 파일: 크롬 다운로드 기록에서 찾아 지운다 (기록이 지워졌으면 못 찾는다)
+async function removeDownload(file) {
+  if (!chrome.downloads) return { ok: false, reason: 'no-downloads-api' };
+  const rel = String(file.path || '').replace(/^다운로드\//, '');
+  const base = rel.split('/').pop() || '';
+  const stem = base.replace(/\.[^.]+$/, '');
+  const unify = (n) => n.replace(/ \(\d+\)(\.[^.]+)$/, '$1'); // 크롬이 같은 이름에 붙이는 " (1)"
+  const baseOf = (f) => String(f || '').replace(/\\/g, '/').split('/').pop();
+  let found = [];
+  if (file.downloadId) { try { found = await chrome.downloads.search({ id: file.downloadId }); } catch (e) { found = []; } }
+  if (!found.length && stem) { try { found = (await chrome.downloads.search({ query: [stem] })).filter((d) => unify(baseOf(d.filename)) === base); } catch (e) { found = []; } }
+  const d = found.find((x) => x.state === 'complete' && x.exists !== false);
+  if (!d) return { ok: false, reason: found.length ? 'file-gone' : 'not-found' };
+  await chrome.downloads.removeFile(d.id);
+  try { await chrome.downloads.erase({ id: d.id }); } catch (e) { /* ignore */ }
+  return { ok: true };
+}
+// 항목 삭제: 보관 오디오와 PC 파일(지정 폴더는 바로, 다운로드 폴더는 크롬 다운로드 기록으로)도 함께 지운다
+async function removeItems(ids) {
+  const set = new Set(Array.isArray(ids) ? ids : []);
+  const victims = (await getItems()).filter((i) => set.has(i.id));
+  await removeAudio(victims.map((i) => i.id));
+  const files = { deleted: 0, failed: [] };
+  for (const it of victims) {
+    if (!it.file || !it.file.path) continue;
+    let r;
+    try { r = it.file.location === 'folder' ? await FS.removeFile(it.file.path) : await removeDownload(it.file); }
+    catch (e) { r = { ok: false, reason: 'error', error: String((e && e.message) || e) }; }
+    if (r && r.ok) files.deleted++; else files.failed.push({ id: it.id, path: it.file.path, reason: (r && r.reason) || 'error', error: (r && r.error) || '' });
+  }
+  await withItems((items) => ({ write: true, items: items.filter((i) => !set.has(i.id)), result: { ok: true } }));
+  return { ok: true, removed: victims.length, files };
 }
 
 // ───────── 탭 오디오 캡처 (offscreen 문서 중계) ─────────
@@ -462,9 +525,12 @@ async function handleMessage(msg, sender) {
     case 'web.ping': return { ok: true, version: chrome.runtime.getManifest().version };
     case 'web.items.list': return { items: await getItems() };
     case 'web.items.update': return withItems((items) => updateItem(items, p.id, p.patch));
-    case 'web.items.remove': await removeAudio([p.id]); return withItems((items) => ({ write: true, items: items.filter((i) => i.id !== p.id), result: { ok: true } }));
-    case 'web.items.clear': { const ids = (await getItems()).map((i) => i.id); await removeAudio(ids); return withItems(() => ({ write: true, items: [], result: { ok: true } })); }
+    case 'web.items.remove': return removeItems([p.id]);
+    case 'web.items.removeMany': return removeItems(p.ids);
+    case 'web.items.clear': return removeItems((await getItems()).map((i) => i.id));
     case 'web.audio.get': return getAudio(p.itemId);
+    case 'web.audio.file': return audioFromFile(p.itemId);
+    case 'web.audio.put': return putAudio(p);
     case 'web.audio.remove': { await removeAudio([p.itemId]); return withItems((items) => updateItem(items, p.itemId, { audio: null })); }
     case 'web.setEnabled': {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
