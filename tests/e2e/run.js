@@ -258,8 +258,8 @@ function ensureFixtures() {
       await page.keyboard.press('KeyP');
       await sleep(200);
     });
-    await step('W: 쉐도잉 — 자막 끝에서 1초 쉬고 자동으로 이어 재생', async () => {
-      await page.select('.st-shadow-sec', '1');
+    await step('W: 따라하기(고정 시간) — 자막 끝에서 1초 쉬고 자동으로 이어 재생', async () => {
+      await page.select('.st-shadow-sec', 's1');
       await page.keyboard.press('KeyW');
       await waitFor(() => page.$eval('.st-mode.st-shadow', (b) => b.classList.contains('on')), 2000, 'shadow on');
       await setTime(page, 17.7, true);
@@ -275,6 +275,43 @@ function ensureFixtures() {
       assert(waited >= 500 && waited <= 2500, 'resume delay ' + waited + 'ms');
       await page.keyboard.press('KeyW');
       await sleep(200);
+    });
+    await step('따라하기: 자막 길이 × 배율만큼 쉬었다가 다음 자막으로 이어 재생', async () => {
+      try {
+        // 앞 단계에서 재생 중이던 영상이 모드를 켜는 사이에 자막 끝을 지나가지 않도록, 멈춰 두고 자리를 잡은 뒤 켠다
+        await page.evaluate(() => document.querySelector('video').pause());
+        await setTime(page, 13.7, false);
+        await sleep(300);
+        await page.select('.st-shadow-sec', 'r1');   // 자막 길이 ×1.0 (목 자막은 한 줄이 2초)
+        await page.keyboard.press('KeyW');
+        await waitFor(() => page.$eval('.st-mode.st-shadow', (b) => b.classList.contains('on')), 2000, 'follow mode on');
+        const chip = await page.$eval('.st-ov-chip.on-shadow', (e) => e.textContent).catch(() => '');
+        assert(/따라하기 자막 길이 ×1$/.test(chip.trim()), 'mode chip shows the ratio: ' + chip);
+        await page.evaluate(() => document.querySelector('video').play());
+        await waitFor(async () => (await videoPaused(page)), 8000, 'paused at cue end');
+        const tp = await videoTime(page);
+        assert(tp >= 15.8 && tp < 16.9, '14–16초 자막 끝에서 멈춘다: ' + tp);
+        const txt = await page.$eval('.st-ov-shadow', (e) => e.textContent);
+        assert(/2초 뒤 다음 자막/.test(txt), '2초짜리 자막 → 2초 안내: ' + txt);
+        const t0 = Date.now();
+        await waitFor(async () => !(await videoPaused(page)), 6000, 'resumed by itself');
+        const waited = Date.now() - t0;
+        assert(waited >= 1300 && waited <= 3300, '약 2초 쉬고 이어 재생: ' + waited + 'ms');
+        // 배율을 올리면 같은 자막에서 더 오래 쉰다
+        await page.select('.st-shadow-sec', 'r1.5');
+        await page.evaluate(() => document.querySelector('video').pause());
+        await setTime(page, 17.7, false);
+        await sleep(300);
+        await page.evaluate(() => document.querySelector('video').play());
+        await waitFor(async () => (await videoPaused(page)), 8000, 'paused again');
+        const txt2 = await page.$eval('.st-ov-shadow', (e) => e.textContent);
+        assert(/3초 뒤 다음 자막/.test(txt2), '×1.5 → 3초 안내: ' + txt2);
+      } finally {
+        await page.evaluate(() => { const b = document.querySelector('.st-mode.st-shadow.on'); if (b) b.click(); }).catch(() => {});
+        await page.select('.st-shadow-sec', 's1').catch(() => {});
+        await setTime(page, 10.3, true);
+        await sleep(250);
+      }
     });
     await step('E: 현재 자막 저장(별표)', async () => {
       await setTime(page, 22.4, true);
@@ -402,6 +439,54 @@ function ensureFixtures() {
       await page.keyboard.press('Backslash');
       await sleep(200);
     });
+    await step('컨트롤 바 배속 버튼: ST 버튼 왼쪽에서 설정한 단계로 오르내린다', async () => {
+      try {
+        await waitFor(() => page.$('.st-rate'), 5000, 'rate control');
+        const pos = await page.evaluate(() => {
+          const r = document.querySelector('.st-rate');
+          const c = document.querySelector('.st-ctl-wrap') || document.querySelector('.st-ctl');
+          return { leftOfST: r.nextElementSibling === c, sameRow: Math.abs(r.getBoundingClientRect().top - c.getBoundingClientRect().top) < 14, label: document.querySelector('.st-rate-now').textContent, steps: document.querySelectorAll('.st-rate .st-rate-step').length };
+        });
+        assert(pos.leftOfST && pos.sameRow && pos.steps === 2 && pos.label === '1×', 'rate buttons left of ST: ' + JSON.stringify(pos));
+        await page.click('.st-rate-up');                 // 1 → 1.15 (설정한 다음 단계)
+        await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1.15) < 0.01), 3000, 'up to 1.15');
+        assert(await page.$eval('.st-rate-now', (e) => e.textContent) === '1.15×', 'label follows the rate');
+        await page.click('.st-rate-down');
+        await page.click('.st-rate-down');                // 1.15 → 1 → 0.9 (연속으로 눌러도 빠뜨리지 않는다)
+        await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.9) < 0.01), 3000, 'down to 0.9');
+        await page.click('.st-rate-now');                 // 가운데를 누르면 보통 속도
+        await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 3000, 'back to 1');
+        // SubTutor 를 끄면 배속 버튼도 사라진다 (끄고 켜는 것은 설정으로 — 패널이 밀려나는 동안 버튼 자리가 가려져 연달아 클릭하면 어긋난다)
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { enabled: { netflix: false } } }, {}));
+        await waitFor(() => page.$eval('.st-rate', (e) => e.style.display === 'none'), 4000, 'hidden while off');
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { enabled: {} } }, {}));
+        await waitFor(() => page.$eval('.st-rate', (e) => e.style.display !== 'none'), 4000, 'back when on');
+      } finally {
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { enabled: {} } }, {})).catch(() => {});
+        await page.keyboard.press('Backslash').catch(() => {});
+        await sleep(300);
+      }
+    });
+    await step('Shift+< / Shift+> : 설정한 배속으로 한 단계씩 (유튜브는 유튜브 기능에 맡긴다)', async () => {
+      try {
+        const shift = async (code) => { await page.keyboard.down('Shift'); await page.keyboard.press(code); await page.keyboard.up('Shift'); };
+        await shift('Period');                            // Shift+> 한 단계 빠르게: 1 → 1.15
+        await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1.15) < 0.01), 3000, 'Shift+> → 1.15');
+        await shift('Period');                            // 가장 빠른 단계에서 더 누르면 그대로
+        await sleep(300);
+        assert(await page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1.15) < 0.01), 'stays at the top step');
+        await shift('Comma'); await shift('Comma'); await shift('Comma');  // 1.15 → 1 → 0.9 → 0.8
+        await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.8) < 0.01), 3000, 'Shift+< → 0.8');
+        assert(await page.$eval('.st-rate-now', (e) => e.textContent) === '0.8×', 'control bar label follows the keys');
+        // Shift 없이 누르면 우리 기능이 아니다 (플레이어의 , . 는 그대로 둔다)
+        await page.keyboard.press('Period');
+        await sleep(300);
+        assert(await page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.8) < 0.01), 'plain . does nothing');
+      } finally {
+        await page.keyboard.press('Backslash').catch(() => {});
+        await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 3000, 'rate reset').catch(() => {});
+      }
+    });
     await step('반복 속도 사다리: 웹 설정의 단계대로 S 반복마다 올라가고, 끄면 원래 속도 (음높이 유지)', async () => {
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { loopLadder: true } }, {}));
       await sleep(300);
@@ -511,6 +596,11 @@ function ensureFixtures() {
       await waitFor(() => yt.$eval('.st-brand', (e) => /Mock Lecture Title/.test(e.textContent) && /Mock Channel/.test(e.textContent)), 8000, 'yt title');
       const placed = await yt.evaluate(() => { const b = document.querySelector('.st-ctl'); return b && b.nextElementSibling.classList.contains('ytp-subtitles-button'); });
       assert(placed, 'control button before CC button');
+      // 유튜브에는 자체 배속 메뉴와 Shift+< , Shift+> 가 이미 있어 우리 배속 버튼·단축키를 넣지 않는다
+      assert(!(await yt.$('.st-rate')), 'no rate buttons on YouTube');
+      await yt.keyboard.down('Shift'); await yt.keyboard.press('Period'); await yt.keyboard.up('Shift');
+      await sleep(300);
+      assert(await yt.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 'Shift+> left to YouTube');
       const layout = await yt.evaluate(() => ({ margin: getComputedStyle(document.querySelector('ytd-app')).marginRight, top: getComputedStyle(document.getElementById('st-panel')).top, videoRight: Math.round(document.querySelector('video').getBoundingClientRect().right) }));
       assert(layout.margin === '0px' && layout.top === '56px', 'panel overlays the page below the masthead: ' + JSON.stringify(layout));
     });
@@ -519,6 +609,32 @@ function ensureFixtures() {
       await waitFor(() => yt.evaluate(() => !document.getElementById('st-overlay').classList.contains('st-hidden') && document.querySelector('.st-ov-text').textContent.includes('Raffie')), 5000, 'yt overlay');
       await yt.keyboard.press('KeyD');
       await waitFor(async () => { const t = await videoTime(yt); return t >= 9.8 && t < 10.6; }, 4000, 'yt next cue');
+    });
+    await step('유튜브에서도 따라하기: 자막 길이만큼 쉬었다가 다음 자막으로 이어 재생', async () => {
+      try {
+        // 멈춰 두고 자리를 잡은 뒤 모드를 켠다 (켜는 사이에 자막 끝을 지나가면 거기서 멈춰 버린다)
+        await yt.evaluate(() => document.querySelector('video').pause());
+        await setTime(yt, 13.7, false);
+        await sleep(300);
+        await yt.select('.st-shadow-sec', 'r1');   // 자막 길이 ×1.0 (유튜브 목 자막도 한 줄 2초)
+        await yt.keyboard.press('KeyW');
+        await waitFor(() => yt.$eval('.st-mode.st-shadow', (b) => b.classList.contains('on')), 3000, 'follow mode on (youtube)');
+        await yt.evaluate(() => document.querySelector('video').play());
+        await waitFor(async () => (await videoPaused(yt)), 8000, 'paused at cue end');
+        const t = await videoTime(yt);
+        assert(t >= 15.8 && t < 16.8, 'paused at the end of the 14–16s cue: ' + t);
+        const txt = await yt.$eval('.st-ov-shadow', (e) => e.textContent);
+        assert(/2초 뒤 다음 자막/.test(txt), 'countdown says 2s: ' + txt);
+        const t0 = Date.now();
+        await waitFor(async () => !(await videoPaused(yt)), 6000, 'resumed by itself');
+        const waited = Date.now() - t0;
+        assert(waited >= 1300 && waited <= 3300, '약 2초 쉬고 이어 재생: ' + waited + 'ms');
+      } finally {
+        await yt.evaluate(() => { const b = document.querySelector('.st-mode.st-shadow.on'); if (b) b.click(); }).catch(() => {});
+        await yt.select('.st-shadow-sec', 's1').catch(() => {});
+        await yt.evaluate(() => document.querySelector('video').pause()).catch(() => {});
+        await sleep(200);
+      }
     });
     await step('유튜브: 별표 저장(PC 파일 모드) 시 지정 폴더에 MP3 를 하나만 쓰고, 복사본은 두지 않는다', async () => {
       await yt.click('.st-head .st-icon');

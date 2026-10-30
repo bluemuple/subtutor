@@ -22,7 +22,9 @@
     fontScale: 100,
     autoPause: false,
     shadowing: false,
-    shadowPauseSec: 2,
+    shadowPauseSec: 2,          // 고정 시간으로 쉴 때의 초 (1~7)
+    shadowPauseMode: 'ratio',   // ratio = 자막 길이 × 배율(따라하기) | sec = 고정 초
+    shadowPauseRatio: 1,        // 자막 길이의 몇 배를 쉴지 (0.5~3.0)
     leadMs: 150,
     tailMs: 200,
     audioMode: 'off',           // off | store | download | both : 별표 저장 시 오디오 처리
@@ -785,9 +787,9 @@
     ui.panel = el('div', { id: 'st-panel', class: 'st-pf-' + adapter.name });
     ui.title = el('div', { class: 'st-brand', text: 'SubTutor' });
     ui.btnAP = el('button', { class: 'st-mode', title: '자동 일시정지 (P): 자막이 끝나면 멈춥니다. F로 다시 듣기', onclick: () => setMode('autoPause', !settings.autoPause) }, 'AP');
-    ui.btnShadow = el('button', { class: 'st-mode st-shadow', title: '쉐도잉 (W): 자막이 끝나면 쉬었다가 자동으로 이어 재생합니다', onclick: () => setMode('shadowing', !settings.shadowing) }, '쉐도잉');
-    ui.shadowSec = el('select', { class: 'st-shadow-sec', title: '쉐도잉 쉬는 시간', onchange: (e) => saveSettings({ shadowPauseSec: +e.target.value }) });
-    for (let s = 1; s <= 7; s++) ui.shadowSec.append(el('option', { value: s }, s + '초'));
+    ui.btnShadow = el('button', { class: 'st-mode st-shadow', title: '따라하기 (W): 자막이 끝나면 그 자막 길이만큼 쉬었다가 다음 자막으로 이어 재생합니다', onclick: () => setMode('shadowing', !settings.shadowing) }, '따라하기');
+    ui.shadowSec = el('select', { class: 'st-shadow-sec', title: '따라하기: 자막이 끝난 뒤 쉬는 시간', onchange: (e) => saveSettings(shadowPausePatch(e.target.value)) });
+    shadowPauseOptions(false).forEach((g) => ui.shadowSec.append(g));
     ui.btnSettings = el('button', { class: 'st-icon', title: '설정', onclick: () => { ui.settings.classList.toggle('st-hidden'); syncSettingsForm(); } }, '⚙');
     ui.btnClose = el('button', { class: 'st-icon', title: '패널 닫기 (`)', onclick: () => setPanelOpen(false) }, '✕');
     const head = el('div', { class: 'st-head' }, [ui.title, ui.btnAP, ui.btnShadow, ui.shadowSec, ui.btnSettings, ui.btnClose]);
@@ -999,7 +1001,7 @@
     syncShadowNativeStyles();
     if (!open && fit.el) restoreFit();
     setTimeout(fitVideoBesidePanel, 250);
-    ui.shadowSec.value = String(settings.shadowPauseSec);
+    ui.shadowSec.value = shadowPauseValue();
     syncSettingsForm();
     updateModeUI();
     renderOverlay(true);
@@ -1011,11 +1013,13 @@
     ui.ovModes.textContent = '';
     if (state.loop) ui.ovModes.append(el('span', { class: 'st-ov-chip on-loop' }, '🔁 반복'));
     if (settings.autoPause) ui.ovModes.append(el('span', { class: 'st-ov-chip on-ap' }, '⏸ AP'));
-    if (settings.shadowing) ui.ovModes.append(el('span', { class: 'st-ov-chip on-shadow' }, '🗣 쉐도잉 ' + settings.shadowPauseSec + '초'));
-    if (Math.abs(state.rate - 1) > 0.01) ui.ovModes.append(el('span', { class: 'st-ov-chip on-rate' }, '⏩ ' + state.rate.toFixed(2).replace(/\.?0+$/, '') + '×'));
+    if (settings.shadowing) ui.ovModes.append(el('span', { class: 'st-ov-chip on-shadow' }, '🗣 따라하기 ' + shadowPauseText()));
+    if (Math.abs(state.rate - 1) > 0.01) ui.ovModes.append(el('span', { class: 'st-ov-chip on-rate' }, '⏩ ' + rateText(state.rate) + '×'));
+    if (ui.rateNow) { ui.rateNow.textContent = rateText(state.rate) + '×'; ui.rateNow.classList.toggle('on', Math.abs(state.rate - 1) > 0.01); ui.rateNow.title = '지금 ' + rateText(state.rate) + '배속 · 누르면 보통 속도로 (\\)'; }
     if (settings.cloze && settings.cloze !== 'off') ui.ovModes.append(el('span', { class: 'st-ov-chip on-cloze' }, '▭ 빈칸 (V 공개)'));
     if (settings.secondPass) ui.ovModes.append(el('span', { class: 'st-ov-chip on-pass' }, '2회차'));
     if (ui.ctlBtn) { ui.ctlBtn.classList.toggle('off', !isEnabled()); ui.ctlBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기'; }
+    if (ui.rateCtl) ui.rateCtl.style.display = isEnabled() ? '' : 'none'; // SubTutor 를 끄면 배속 버튼도 숨긴다 (단축키도 같이 꺼진다)
   }
   function computeProfile() {
     state.profile = null;
@@ -1062,6 +1066,42 @@
   }
   function chipHide() { clearTimeout(chipTimer); if (ui.chip) ui.chip.classList.remove('show'); }
 
+  // 컨트롤 바에 넣는 것들의 스타일. content.css 가 아니라 여기에 두는 이유: 디즈니+ 는 컨트롤이
+  // disney-web-player 의 shadow DOM 안이라 바깥 스타일시트가 닿지 않는다 → 같은 CSS 를 그 루트에도 넣는다.
+  const CONTROL_CSS = [
+    '.st-ctl { all: unset; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: top; color: #fff; opacity: .95; transition: transform .12s ease, opacity .12s ease; }',
+    '.st-ctl-svg { display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }',
+    '.st-ctl .st-ctl-slash { display: none; }',
+    '.st-ctl:hover { transform: scale(1.12); opacity: 1; }',
+    '.st-ctl.off { opacity: .5; }',
+    '.st-ctl.off .st-ctl-slash { display: block; }',
+    '.st-ctl-wrap { display: flex; align-items: center; justify-content: center; }',
+    '.st-ctl-netflix { width: 100%; height: 100%; min-width: 2.4em; } .st-ctl-netflix .st-ctl-svg { width: 2em; height: 2em; min-width: 30px; min-height: 30px; }',
+    '.st-ctl-youtube { width: 48px; height: 100%; } .st-ctl-youtube .st-ctl-svg { width: 26px; height: 26px; }',
+    '.st-ctl-prime, .st-ctl-disney { width: 2.6em; height: 100%; margin: 0 .2em; min-width: 40px; } .st-ctl-prime .st-ctl-svg, .st-ctl-disney .st-ctl-svg { width: 32px; height: 32px; }',
+    /* 배속 조절 (ST 버튼 왼쪽): ‹ 1× › */
+    '.st-rate { display: inline-flex; align-items: center; gap: 1px; height: 100%; color: #fff; font: 700 13px/1 -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; text-shadow: 0 1px 2px rgba(0,0,0,.55); }',
+    '.st-rate button { all: unset; cursor: pointer; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; color: #fff; opacity: .92; border-radius: 4px; font: inherit; transition: background .12s ease, opacity .12s ease; }',
+    '.st-rate button:hover { opacity: 1; background: rgba(255,255,255,.22); }',
+    '.st-rate .st-rate-step { width: 1.5em; height: 2em; font-size: 19px; font-weight: 700; padding-bottom: .12em; }',
+    '.st-rate .st-rate-now { min-width: 3.2em; height: 2em; font-size: 13px; letter-spacing: -.02em; }',
+    '.st-rate .st-rate-now.on { color: #ffd166; }',
+    '.st-rate-netflix { margin-right: .3em; } .st-rate-prime, .st-rate-disney { margin: 0 .2em; }',
+  ].join('\n');
+  // 배속 버튼은 자체 배속 메뉴가 없는 플랫폼에만 (유튜브는 Shift+< , Shift+> 가 이미 유튜브 기능이다)
+  const RATE_UI = adapter.name !== 'youtube';
+  const ctlStyled = new WeakMap();
+  function ensureControlStyle(node) {
+    const root = node && node.getRootNode ? node.getRootNode() : document;
+    const host = (root === document || root === document.documentElement || !root.appendChild) ? document.documentElement : root;
+    const cur = ctlStyled.get(host);
+    if (cur && cur.isConnected) return;
+    const st = el('style', { class: 'st-ctl-style' });
+    st.textContent = CONTROL_CSS;
+    host.append(st);
+    ctlStyled.set(host, st);
+  }
+
   // 플레이어 컨트롤 바의 켜기/끄기 버튼 (Language Reactor 식)
   // 플랫폼 아이콘과 비슷한 흰색 선 아이콘. 꺼짐 상태는 반투명 + 사선
   const CTL_ICON = '<svg class="st-ctl-svg" viewBox="0 0 32 32" aria-hidden="true" focusable="false">'
@@ -1086,11 +1126,18 @@
     if (!anchor || !anchor.parentElement) return null;
     const wrapper = controlWrapperOf(anchor);
     if (adapter.controlPlace === 'groupStart' && wrapper.parentElement) {
-      const first = Array.from(wrapper.parentElement.children).find((c) => c !== ui.ctlMount);
+      const first = Array.from(wrapper.parentElement.children).find((c) => c !== ui.ctlMount && c !== ui.rateCtl); // 우리가 넣은 것들은 기준에서 뺀다 (매 틱 다시 꽂히는 것을 막는다)
       return { before: first || wrapper, wrapper };
     }
     if (!wrapper.parentElement) return null;
     return { before: wrapper, wrapper };
+  }
+  // 배속 조절: ‹ 느리게 · 지금 배속(누르면 1배속) · 빠르게 ›  (단계는 설정 › 속도 사다리의 배속)
+  function buildRateCtl() {
+    ui.rateDown = el('button', { class: 'st-rate-step st-rate-down', type: 'button', title: '한 단계 느리게 (Shift+<)', 'aria-label': '재생 속도 한 단계 느리게' }, '‹');
+    ui.rateNow = el('button', { class: 'st-rate-now', type: 'button', title: '보통 속도로 (\\)', 'aria-label': '재생 속도' }, '1×');
+    ui.rateUp = el('button', { class: 'st-rate-step st-rate-up', type: 'button', title: '한 단계 빠르게 (Shift+>)', 'aria-label': '재생 속도 한 단계 빠르게' }, '›');
+    ui.rateCtl = el('div', { class: 'st-rate st-rate-' + adapter.name }, [ui.rateDown, ui.rateNow, ui.rateUp]);
   }
   function mountControlButton() {
     if (!adapter.controlAnchor) return;
@@ -1098,7 +1145,8 @@
     if (!pt) return;
     const parent = pt.before.parentElement || (pt.before.getRootNode && pt.before.getRootNode().host ? null : null);
     if (!parent) return;
-    if (ui.ctlMount && ui.ctlMount.isConnected && ui.ctlMount.nextElementSibling === pt.before) return;
+    const rateOk = !RATE_UI || (ui.rateCtl && ui.rateCtl.isConnected && ui.rateCtl.nextElementSibling === ui.ctlMount);
+    if (ui.ctlMount && ui.ctlMount.isConnected && ui.ctlMount.nextElementSibling === pt.before && rateOk) return;
     if (!ui.ctlBtn) {
       ui.ctlBtn = el('button', { class: 'st-ctl st-ctl-' + adapter.name, title: 'SubTutor 끄기', 'aria-label': 'SubTutor 켜기/끄기', type: 'button' });
       ui.ctlBtn.innerHTML = CTL_ICON;
@@ -1116,20 +1164,32 @@
       ui.ctlMount = ui.ctlBtn;
     }
     parent.insertBefore(ui.ctlMount, pt.before);
+    if (RATE_UI) {
+      if (!ui.rateCtl) buildRateCtl();
+      parent.insertBefore(ui.rateCtl, ui.ctlMount); // ST 버튼 왼쪽
+    }
+    ensureControlStyle(parent);
     updateModeUI();
   }
   // 프라임처럼 컨트롤을 자주 다시 그리거나 포인터 이벤트를 가로채는 플레이어에서도 토글이 되도록, 창 수준 캡처 단계에서 우리 버튼을 향한 첫 이벤트에 바로 반응한다
-  let ctlToggleAt = 0;
+  // 한 번의 누름에서 pointerdown → mousedown → click 이 모두 오므로 하나만 처리해야 한다.
+  // 시간으로 거르면(예: 250ms 안의 중복 무시) 빠르게 두 번 누른 것까지 삼켜 버리므로,
+  // 이 브라우저가 가장 먼저 알려 주는 종류 하나를 골라 그것만 쓴다 (뒤따르는 종류는 무시).
+  const CTL_EVENT_RANK = { pointerdown: 3, mousedown: 2, click: 1 };
+  let ctlEventKind = '';
+  function ctlTargets() {
+    return [[ui.ctlBtn, () => setEnabled(!isEnabled())], [ui.rateDown, () => stepRate(-1)], [ui.rateNow, () => changeRate(0)], [ui.rateUp, () => stepRate(1)]];
+  }
   function onCtlPointer(e) {
-    if (!ui.ctlBtn) return;
     const path = e.composedPath ? e.composedPath() : [];
-    if (!path.includes(ui.ctlBtn)) return;
+    if (!path.length) return;
+    const hit = ctlTargets().find((t) => t[0] && path.includes(t[0]));
+    if (!hit) return;
     e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-    if (e.type === 'pointerdown' || e.type === 'mousedown' || e.type === 'click') {
-      if (now() - ctlToggleAt < 250) return; // 같은 클릭에서 오는 나머지 이벤트(pointerdown 뒤의 mousedown/click)
-      ctlToggleAt = now();
-      setEnabled(!isEnabled());
-    }
+    const rank = CTL_EVENT_RANK[e.type] || 0;
+    if (!rank || rank < (CTL_EVENT_RANK[ctlEventKind] || 0)) return;
+    ctlEventKind = e.type;
+    hit[1]();
   }
   ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((t) => window.addEventListener(t, onCtlPointer, true));
 
@@ -1199,9 +1259,8 @@
     [['off', '끄기'], ['function', '기능어(약형) 가리기'], ['random', '아무 단어나 가리기']].forEach(([v, t]) => f.cloze.append(el('option', { value: v }, t)));
     f.fontScale = el('input', { type: 'range', min: 60, max: 160, step: 5 });
     f.fontScale.addEventListener('input', () => saveSettings({ fontScale: +f.fontScale.value }));
-    f.shadowPauseSec = el('input', { type: 'range', min: 1, max: 7, step: 1 });
-    f.shadowPauseSecLabel = el('span', { text: '' });
-    f.shadowPauseSec.addEventListener('input', () => { f.shadowPauseSecLabel.textContent = f.shadowPauseSec.value + '초'; saveSettings({ shadowPauseSec: +f.shadowPauseSec.value }); });
+    f.shadowPause = el('select', { onchange: (e) => saveSettings(shadowPausePatch(e.target.value)) });
+    shadowPauseOptions(true).forEach((g) => f.shadowPause.append(g));
     const num = (key, min, max) => { const i = el('input', { type: 'number', min, max, step: 50 }); i.addEventListener('change', () => saveSettings({ [key]: clamp(+i.value || 0, min, max) })); f[key] = i; return i; };
     f.offset = el('input', { type: 'number', min: -120000, max: 120000, step: 100 });
     f.offset.addEventListener('change', () => saveOffset(clamp(+f.offset.value || 0, -120000, 120000), 'manual'));
@@ -1226,7 +1285,7 @@
       field('반복 속도 사다리', sw('loopLadder'), 'loopLadder'),
       el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: showVocab }, '이 에피소드 어휘 목록'), el('button', { class: 'st-btn', onclick: () => showInfo('missed') }, 'Q 못 알아들음 표시란?'), el('button', { class: 'st-btn', onclick: () => showInfo('twoPass') }, '두 번 보기 순서')]),
       el('h4', { text: '재생' }),
-      field('쉐도잉 쉬는 시간', el('span', null, [f.shadowPauseSec, ' ', f.shadowPauseSecLabel]), 'shadowing'),
+      field('따라하기 쉬는 시간', f.shadowPause, 'shadowing'),
       field('재생 시작 여유 (ms)', num('leadMs', 0, 2000), 'leadTail'),
       field('재생 끝 여유 (ms)', num('tailMs', 0, 2000), 'leadTail'),
       el('div', { class: 'st-field' }, [el('label', null, ['이 영상 자막 시간 보정 (ms)', infoBtn('offset')]), el('span', { class: 'st-offset-ctl' }, [el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs - 500, 'manual') }, '−0.5초'), f.offset, el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs + 500, 'manual') }, '+0.5초')])]),
@@ -1254,8 +1313,7 @@
     f.cloze.value = settings.cloze || 'off';
     f.secondPass.checked = !!settings.secondPass; f.soundsLike.checked = !!settings.soundsLike; f.kiwiNotes.checked = !!settings.kiwiNotes; f.vocabProfile.checked = !!settings.vocabProfile; f.loopLadder.checked = !!settings.loopLadder;
     f.fontScale.value = settings.fontScale;
-    f.shadowPauseSec.value = settings.shadowPauseSec;
-    f.shadowPauseSecLabel.textContent = settings.shadowPauseSec + '초';
+    f.shadowPause.value = shadowPauseValue();
     f.leadMs.value = settings.leadMs; f.tailMs.value = settings.tailMs;
     f.offset.value = state.offsetMs;
     f.offset.title = state.offsetMs ? (state.offsetSource === 'auto' ? '플랫폼 자막과 대조해 자동 감지한 값' : '직접 입력한 값') + ' · 자막이 소리보다 빠르면 음수' : '자막이 소리보다 빠르면 음수, 늦으면 양수. 플랫폼 자막이 켜져 있으면 자동 감지';
@@ -1270,7 +1328,7 @@
       'tracks=' + JSON.stringify((trackCache.get(state.videoId) || []).map((t) => t.lang + (t.cc ? '[cc]' : '') + (t.asr ? '[asr]' : '') + (t.forced ? '[f]' : ''))),
       'offset=' + state.offsetMs + ' (' + state.offsetSource + ') samples=' + JSON.stringify(state.alignSamples),
       'meta=' + JSON.stringify(state.meta) + ' status=' + state.statusText,
-      'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + settings.shadowPauseSec + 's audio=' + settings.audioMode + ' rate=' + state.rate + ' clearance=' + state.clearanceCur,
+      'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + shadowPauseValue() + ' audio=' + settings.audioMode + ' rate=' + state.rate + ' clearance=' + state.clearanceCur,
       'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' clip=' + JSON.stringify(state.clip) + ' capturing=' + !!state.capturing + ' tabId=' + state.tabId,
       'layout panel=' + !!(settings.panelOpen && state.active) + ' videoRight=' + (v ? Math.round(v.getBoundingClientRect().right) : '-') + '/' + window.innerWidth + ' fit=' + (fit.el ? describeEl(fit.el) : '-') + ' shadowRoots=' + (adapter.deep ? A.deepRoots().length - 1 : 0) + ' nativeHidden=' + nativeHiddenCount() + ' cueEl=' + (adapter.nativeCueSelector ? A.qsaDeep(adapter.nativeCueSelector).map(describeEl).slice(0, 2).join(',') : '-'),
     ].join('\n');
@@ -1507,7 +1565,7 @@
       try { if (Math.abs(v.playbackRate - r) > 0.01) v.playbackRate = r; } catch (e) { /* ignore */ }
     }
     state.rateReapplyUntil = now() + 2500;
-    if (!quiet) toast('⏩ 재생 속도 ' + r.toFixed(2).replace(/\.?0+$/, '') + '×');
+    if (!quiet) toast('⏩ 재생 속도 ' + rateText(r) + '×');
     updateModeUI();
   }
   function changeRate(delta) {
@@ -1583,7 +1641,20 @@
     const out = raw.map((x) => Math.round(clamp(+x, 0.3, 2) * 100) / 100).filter((x) => Number.isFinite(x) && x > 0).slice(0, 6);
     return out.length ? out : LADDER_FALLBACK;
   }
-  const rateText = (r) => r.toFixed(2).replace(/0$/, '').replace(/\.$/, '');
+  const rateText = (r) => String(Math.round(r * 100) / 100);
+  // Shift+< / Shift+> 와 컨트롤 바의 ‹ › 가 오르내리는 단계: 설정 › 속도 사다리에 넣은 배속(+ 보통 속도 1배)
+  function rateSteps() {
+    const set = new Set(ladderRates().concat([1]).map((r) => Math.round(clamp(r, 0.3, 2) * 100) / 100));
+    return Array.from(set).sort((a, b) => a - b);
+  }
+  function stepRate(dir) {
+    const L = rateSteps();
+    const cur = state.rate;
+    const next = dir > 0 ? L.find((r) => r > cur + 0.005) : L.filter((r) => r < cur - 0.005).pop();
+    if (next === undefined) { toast('⏩ ' + (dir > 0 ? '가장 빠른' : '가장 느린') + ' 단계입니다 · ' + rateText(cur) + '× (단계는 설정에서)'); return; }
+    state.rate = next;
+    applyRate(false);
+  }
   function toggleLoop() {
     if (state.loop) {
       state.loop = false; state.loopIdx = -1; toast('반복 끔');
@@ -1604,7 +1675,7 @@
     else { patch.shadowing = !!on; if (on) patch.autoPause = false; }
     saveSettings(patch);
     if (!on) cancelModesPending();
-    toast(mode === 'autoPause' ? (on ? '⏸ 자동 일시정지 켬 (F: 다시 듣기)' : '자동 일시정지 끔') : (on ? '🗣 쉐도잉 켬 · ' + settings.shadowPauseSec + '초 쉬고 다음 자막' : '쉐도잉 끔'));
+    toast(mode === 'autoPause' ? (on ? '⏸ 자동 일시정지 켬 (F: 다시 듣기)' : '자동 일시정지 끔') : (on ? '🗣 따라하기 켬 · ' + shadowPauseText() + '만큼 쉬고 다음 자막' : '따라하기 끔'));
     updateModeUI();
   }
   function pauseFor(i) {
@@ -1617,19 +1688,51 @@
     renderOverlay(true);
     if (settings.shadowing) startShadowWait(i);
   }
+  // 따라하기(쉐도잉)에서 자막이 끝난 뒤 쉬는 시간.
+  // 기본은 "그 자막이 떠 있던 시간 × 배율" — 긴 대사는 길게, 짧은 대사는 짧게 쉬므로 따로 맞출 필요가 없다.
+  // 아주 짧은 대사("Yeah.")도 따라 할 틈이 있도록 0.8초 이상, 너무 오래 멈추지 않도록 10초 이하로 둔다.
+  const SHADOW_RATIOS = [0.8, 1, 1.1, 1.2, 1.3, 1.5, 2];
+  const SHADOW_MIN_MS = 800, SHADOW_MAX_MS = 10000;
+  // 고를 수 있는 배율 중 가장 가까운 값으로 맞춘다. 목록에 없는 값이 저장돼 있으면 선택 상자가 빈칸으로 보인다.
+  const shadowRatio = () => {
+    const v = clamp(+settings.shadowPauseRatio || 1, 0.5, 3);
+    return SHADOW_RATIOS.reduce((best, r) => (Math.abs(r - v) < Math.abs(best - v) ? r : best), SHADOW_RATIOS[0]);
+  };
+  const shadowSecs = () => clamp(+settings.shadowPauseSec || 2, 1, 7);
+  const shadowByRatio = () => settings.shadowPauseMode !== 'sec';
+  const shadowPauseValue = () => (shadowByRatio() ? 'r' + shadowRatio() : 's' + shadowSecs());
+  function shadowPausePatch(v) {
+    const s = String(v || '');
+    if (s.charAt(0) === 's') return { shadowPauseMode: 'sec', shadowPauseSec: clamp(+s.slice(1) || 2, 1, 7) };
+    return { shadowPauseMode: 'ratio', shadowPauseRatio: clamp(+s.slice(1) || 1, 0.5, 3) };
+  }
+  function shadowPauseMs(i) {
+    const c = state.cues[i];
+    if (!shadowByRatio() || !c) return shadowSecs() * 1000;
+    return Math.round(clamp((c.end - c.start) * shadowRatio(), SHADOW_MIN_MS, SHADOW_MAX_MS));
+  }
+  const shadowPauseText = () => (shadowByRatio() ? '자막 길이 ×' + rateText(shadowRatio()) : shadowSecs() + '초');
+  // 패널 헤더는 자리가 좁아 짧게(×1), 설정 화면은 길게(자막 길이 ×1). 묶음 이름이 무슨 뜻인지 알려 준다.
+  function shadowPauseOptions(long) {
+    return [
+      el('optgroup', { label: '자막 길이 기준' }, SHADOW_RATIOS.map((r) => el('option', { value: 'r' + r }, (long ? '자막 길이 ×' : '×') + rateText(r)))),
+      el('optgroup', { label: '고정 시간' }, Array.from({ length: 7 }, (_, k) => el('option', { value: 's' + (k + 1) }, (long ? '고정 ' : '') + (k + 1) + '초'))),
+    ];
+  }
   function startShadowWait(i) {
     clearShadow();
-    const sec = clamp(+settings.shadowPauseSec || 2, 1, 7);
-    ui.ovShadowText.textContent = '🗣 따라 말해 보세요 · ' + sec + '초 뒤 계속';
+    const ms = shadowPauseMs(i);
+    const sec = Math.round(ms / 100) / 10;
+    ui.ovShadowText.textContent = '🗣 따라 말해 보세요 · ' + sec + '초 뒤 다음 자막';
     ui.ovShadowBar.style.transition = 'none';
     ui.ovShadowBar.style.width = '100%';
     ui.ovShadow.classList.add('on');
-    requestAnimationFrame(() => requestAnimationFrame(() => { ui.ovShadowBar.style.transition = 'width ' + sec + 's linear'; ui.ovShadowBar.style.width = '0%'; }));
+    requestAnimationFrame(() => requestAnimationFrame(() => { ui.ovShadowBar.style.transition = 'width ' + (ms / 1000) + 's linear'; ui.ovShadowBar.style.width = '0%'; }));
     state.shadowTimer = setTimeout(() => {
       state.shadowTimer = null;
       ui.ovShadow.classList.remove('on');
       if (settings.shadowing && state.pausedFor === i && adapter.isPaused()) requestPlay();
-    }, sec * 1000);
+    }, ms);
   }
   function clearShadow() {
     if (state.shadowTimer) { clearTimeout(state.shadowTimer); state.shadowTimer = null; }
@@ -1776,19 +1879,27 @@
     if (i >= 0) toggleSave(i); else chip('info', '저장할 자막이 없습니다');
   }
   const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: saveShownCue, Enter: saveShownCue, KeyQ: toggleMissed, KeyV: () => { state.clozeRevealIdx = displayIndex(); renderOverlay(true); }, KeyT: () => { if (!state.koHold) { state.koHold = true; renderOverlay(true); } }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
+  // Shift 와 함께: < 한 단계 느리게 · > 한 단계 빠르게. 단계는 설정 › 속도 사다리의 배속을 그대로 쓴다.
+  // 유튜브는 Shift+< , Shift+> 가 이미 유튜브 자체 기능이라 건드리지 않는다 (두 번 적용되는 것을 막는다).
+  const SHIFT_ACTIONS = RATE_UI ? { Comma: () => stepRate(-1), Period: () => stepRate(1) } : {};
+  function keyAction(e) {
+    if (e.code === 'Comma' || e.code === 'Period') return (e.shiftKey && SHIFT_ACTIONS[e.code]) || null;
+    return KEY_ACTIONS[e.code] || null;
+  }
   function shouldHandleKey(e) {
     if (!state.active || !isEnabled()) return false;
-    if (!state.cues.length && !/^(Backquote|BracketLeft|BracketRight|Backslash)$/.test(e.code)) return false;
+    if (!state.cues.length && !/^(Backquote|BracketLeft|BracketRight|Backslash|Comma|Period)$/.test(e.code)) return false;
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
     if (isEditable(e.target) || (e.target && e.target.closest && e.target.closest('#st-panel input, #st-panel select, #st-panel textarea'))) return false;
     if (e.code === 'Enter') return e.target === document.body || e.target === document.documentElement || (e.target && e.target.tagName === 'VIDEO') ? displayIndex() >= 0 : false; // Enter 는 자막이 보일 때, 버튼 등에 포커스가 없을 때만
-    return !!KEY_ACTIONS[e.code];
+    return !!keyAction(e);
   }
   window.addEventListener('keydown', (e) => {
     if (!shouldHandleKey(e)) return;
     e.preventDefault(); e.stopImmediatePropagation();
     if (e.repeat) return;
-    KEY_ACTIONS[e.code]();
+    const fn = keyAction(e);
+    if (fn) fn();
   }, true);
   window.addEventListener('keyup', (e) => {
     if (e.code === 'KeyT' && state.koHold) { state.koHold = false; renderOverlay(true); }

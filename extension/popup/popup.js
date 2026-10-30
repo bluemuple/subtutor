@@ -1,4 +1,19 @@
-const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '', koMode: 'hold', secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false };
+const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '', koMode: 'hold', secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false };
+// 따라하기 쉬는 시간: 자막 길이 × 배율(r…) 또는 고정 초(s…) — content.js 와 같은 규칙
+const SHADOW_RATIOS = [0.8, 1, 1.1, 1.2, 1.3, 1.5, 2];
+const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));
+const shadowRatio = () => {
+  const v = clampNum(+settings.shadowPauseRatio || 1, 0.5, 3);
+  return SHADOW_RATIOS.reduce((best, r) => (Math.abs(r - v) < Math.abs(best - v) ? r : best), SHADOW_RATIOS[0]);
+};
+const shadowPauseValue = () => (settings.shadowPauseMode === 'sec'
+  ? 's' + clampNum(+settings.shadowPauseSec || 2, 1, 7)
+  : 'r' + shadowRatio());
+function shadowPausePatch(v) {
+  const s = String(v || '');
+  if (s.charAt(0) === 's') return { shadowPauseMode: 'sec', shadowPauseSec: clampNum(+s.slice(1) || 2, 1, 7) };
+  return { shadowPauseMode: 'ratio', shadowPauseRatio: clampNum(+s.slice(1) || 1, 0.5, 3) };
+}
 const Ex = globalThis.SubTutorExplain;
 function showInfo(key) {
   const x = Ex && Ex.get(key);
@@ -34,7 +49,7 @@ function render() {
   $('hideNative').checked = !!settings.hideNative;
   $('autoPause').checked = !!settings.autoPause;
   $('shadowing').checked = !!settings.shadowing;
-  $('shadowPauseSec').value = String(settings.shadowPauseSec);
+  $('shadowPauseSec').value = shadowPauseValue();
   $('audioMode').value = settings.audioMode === 'both' ? 'download' : (settings.audioMode || 'off');
   $('koMode').value = settings.koMode || 'hold';
   $('cloze').value = settings.cloze || 'off';
@@ -45,14 +60,16 @@ function render() {
 async function init() {
   $('version').textContent = 'v' + chrome.runtime.getManifest().version;
   const sel = $('shadowPauseSec');
-  for (let s = 1; s <= 7; s++) { const o = document.createElement('option'); o.value = s; o.textContent = s + '초'; sel.append(o); }
+  const group = (label, opts) => { const g = document.createElement('optgroup'); g.label = label; opts.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; g.append(o); }); return g; };
+  sel.append(group('자막 길이 기준', SHADOW_RATIOS.map((r) => ['r' + r, '자막 길이 ×' + r])));
+  sel.append(group('고정 시간', Array.from({ length: 7 }, (_, k) => ['s' + (k + 1), (k + 1) + '초'])));
   const { settings: s } = await chrome.storage.local.get('settings');
   settings = Object.assign({}, DEFAULTS, s || {});
   render();
   ['panelOpen', 'showTranslation', 'hideNative'].forEach((k) => $(k).addEventListener('change', (e) => save({ [k]: e.target.checked })));
   $('autoPause').addEventListener('change', (e) => save({ autoPause: e.target.checked, shadowing: e.target.checked ? false : settings.shadowing }));
   $('shadowing').addEventListener('change', (e) => save({ shadowing: e.target.checked, autoPause: e.target.checked ? false : settings.autoPause }));
-  sel.addEventListener('change', (e) => save({ shadowPauseSec: +e.target.value }));
+  sel.addEventListener('change', (e) => save(shadowPausePatch(e.target.value)));
   $('audioMode').addEventListener('change', (e) => save({ audioMode: e.target.value }));
   $('koMode').addEventListener('change', (e) => save({ koMode: e.target.value }));
   $('cloze').addEventListener('change', (e) => save({ cloze: e.target.value }));
