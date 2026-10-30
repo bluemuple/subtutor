@@ -693,6 +693,44 @@ function ensureFixtures() {
       await waitFor(() => web.$eval(yt, (e) => !e.classList.contains('playing')), 6000, 'ladder finished');
       assert(seen.has('0.8') && seen.has('1'), 'rates seen ' + [...seen].join(','));
     });
+    await step('대사마다의 배속 버튼: 설정한 배속이 그대로 나오고, 반복을 켜면 그 배속으로 계속 반복된다', async () => {
+      const yt = '[data-id^="youtube:"]';
+      try {
+        // 설정한 4단계가 그대로 버튼으로 나온다
+        const labels = await web.$$eval(yt + ' .rate-btns .rate-btn', (b) => b.map((x) => x.textContent));
+        assert(labels.join(',') === '0.8,0.9,1,1.15', 'rate buttons: ' + labels.join(','));
+        // 자막·뜻 버튼과 같은 줄에 있어 카드 높이가 늘지 않는다
+        const row = await web.evaluate((s) => {
+          const card = document.querySelector(s);
+          const ko = card.querySelector('.vis-ko').getBoundingClientRect();
+          const r = card.querySelector('.rate-btn').getBoundingClientRect();
+          return { same: Math.abs(ko.top - r.top) < 6, after: r.left > ko.right };
+        }, yt);
+        assert(row.same && row.after, 'rate buttons sit on the 자막·뜻 row: ' + JSON.stringify(row));
+        // 0.9 버튼 → 그 배속으로 한 번 재생 (음높이 유지, 반복 꺼짐)
+        await web.click(yt + ' .rate-btn[data-rate="0.9"]');
+        await waitFor(() => web.$eval(yt + ' .rate-btn[data-rate="0.9"]', (b) => b.classList.contains('on')), 8000, '0.9 button on');
+        const live = await web.evaluate(() => ({ rate: window.__subtutorDebug.state.playRate, clip: window.__subtutorDebug.state.lastClip, loop: window.__subtutorDebug.state.clip.loop }));
+        assert(live.rate === 0.9 && live.clip && live.clip.pitched === true && live.clip.speed === 1 && live.loop === false, 'plays once at 0.9: ' + JSON.stringify(live));
+        await waitFor(() => web.$eval(yt, (e) => !e.classList.contains('playing')), 12000, 'single pass ended (no loop while 반복 is off)');
+        assert(await web.$eval(yt + ' .rate-btn[data-rate="0.9"]', (b) => !b.classList.contains('on')), 'button off when it ends');
+        // 🔁 반복을 켠 채 배속 버튼 → 그 배속으로 계속 반복
+        await web.click('.toolbar .repeat-toggle');
+        await waitFor(() => web.$eval('.toolbar .repeat-toggle', (b) => b.classList.contains('on')), 4000, 'repeat on');
+        await web.click(yt + ' .rate-btn[data-rate="1.15"]');
+        await waitFor(() => web.$eval(yt + ' .rate-btn[data-rate="1.15"]', (b) => b.classList.contains('on') && b.classList.contains('looping')), 8000, '1.15 looping');
+        assert(await web.evaluate(() => window.__subtutorDebug.state.clip.loop) === true, 'loop flag set');
+        await sleep(3500); // 2초 구간을 1.15배로 → 한 번만 재생했다면 벌써 끝났을 시간
+        assert(await web.$eval(yt, (e) => e.classList.contains('playing')), 'still looping after one pass');
+        assert(await web.evaluate(() => window.__subtutorDebug.state.playRate) === 1.15, 'rate kept while looping');
+        // 같은 배속을 다시 누르면 정지
+        await web.click(yt + ' .rate-btn[data-rate="1.15"]');
+        await waitFor(() => web.$eval(yt, (e) => !e.classList.contains('playing')), 6000, 'same rate again stops');
+        assert(await web.evaluate(() => window.__subtutorDebug.state.playRate) === 0, 'play rate cleared on stop');
+      } finally {
+        await web.evaluate(() => { const b = document.querySelector('.toolbar .repeat-toggle.on'); if (b) b.click(); }).catch(() => {});
+      }
+    });
     await step('속도 사다리 설정: 단계 수·단계별 배속(0.3~2.0)·음높이 유지를 바꾸면 그대로 재생된다', async () => {
       const yt = '[data-id^="youtube:"]';
       try {
@@ -716,6 +754,8 @@ function ensureFixtures() {
       await trackClipEvents();
       await waitFor(() => web.$(yt + ' .ladder'), 8000, 'list back');
       assert(/0\.45 → 1×/.test(await web.$eval(yt + ' .ladder', (b) => b.title)) && !/음높이 유지/.test(await web.$eval(yt + ' .ladder', (b) => b.title)), 'title follows the settings: ' + await web.$eval(yt + ' .ladder', (b) => b.title));
+      const perItem = await web.$$eval(yt + ' .rate-btn', (b) => b.map((x) => x.textContent));
+      assert(perItem.join(',') === '0.45,1', 'per-item rate buttons follow the settings: ' + perItem.join(','));
       await web.click(yt + ' .ladder');
       const seen = [];
       await waitFor(async () => { const t = await web.$eval('#toast', (e) => e.textContent); const m = /⤴ ([\d.]+)×/.exec(t); if (m && seen[seen.length - 1] !== m[1]) seen.push(m[1]); return seen.length >= 2 && seen[seen.length - 1] === '1'; }, 30000, 'custom ladder 0.45 → 1').catch((e) => { throw new Error(e.message + ' seen=' + seen.join(',')); });

@@ -27,6 +27,7 @@
     stats: null, shadow: null, ladderFor: null,
     clip: { itemId: null, state: null, message: '', loop: false }, clipLocal: false,
     repeat: false,                        // 🔁 반복: ▶ 로 재생한 대사를 계속 반복
+    playRate: 0,                          // 지금 재생 중인 배속 (0 = 재생 안 함, 1 = ▶ 기본) — 각 대사의 배속 버튼을 켜 보이게 한다
     theme: loadPref('subtutor.theme', 'dark'),
     hide: loadHide(), reveal: new Map(),  // 자막/뜻 감추기: 전체 기본값 + 항목별 예외
     recordings: new Map(), recording: null, playingRec: null,
@@ -288,6 +289,13 @@
         btn.textContent = btn.dataset.label ? icon + ' ' + btn.dataset.label : icon;
         btn.title = mine && st === 'playing' ? '정지' : '플레이어에서 이 대사 재생';
       }
+      // 각 대사의 배속 버튼: 지금 그 배속으로 재생 중이면 켜진 상태, 반복 중이면 테두리로 표시
+      const liveRate = mine && st === 'playing' ? (state.playRate || 1) : 0;
+      node.querySelectorAll('.rate-btn').forEach((b) => {
+        const on = liveRate > 0 && Math.abs(parseFloat(b.dataset.rate) - liveRate) < 0.005;
+        b.classList.toggle('on', on);
+        b.classList.toggle('looping', on && !!state.clip.loop);
+      });
       const se = node.querySelector('.state');
       if (se) {
         se.textContent = mine ? (st === 'error' ? '재생 실패: ' + (state.clip.message || '') : (st === 'playing' && state.clip.loop ? '반복 재생 중 · ◼ 로 정지' : (STATE_TEXT[st] || ''))) : '';
@@ -425,9 +433,10 @@
       setClip(cur.itemId, 'stopped');
       stopLocalAudio();
       if (!state.clipLocal) await B.request('clip.stop').catch(() => {});
-      if (cur.itemId === itemId) return;
+      if (cur.itemId === itemId) { state.playRate = 0; renderClipStates(); return; }
     } else stopLocalAudio();
     const loop = opts.loop === undefined ? state.repeat : !!opts.loop;
+    state.playRate = opts.rate && opts.rate > 0 ? Math.round(opts.rate * 100) / 100 : 1;
     const it = state.items.find((i) => i.id === itemId);
     if (it && (it.audio || it.file)) {
       // 보관 오디오(또는 PC 파일의 복사본)로 바로 재생. 복사본이 없는 파일 항목은 확장 프로그램이 지정 폴더에서 읽어 온다
@@ -471,6 +480,24 @@
     }
     if (state.ladderFor === itemId) state.ladderFor = null;
   }
+  // 대사마다 붙는 배속 버튼 ([0.8] [0.9] [1] [1.15]): 설정 › 속도 사다리에 넣은 배속이 그대로 나온다.
+  // 누르면 그 배속으로 재생하고, 🔁 반복이 켜져 있으면 그 배속으로 계속 반복한다.
+  // 같은 배속을 다시 누르면 정지, 다른 배속을 누르면 바로 그 배속으로 바꿔 재생한다.
+  async function playAtRate(itemId, rate) {
+    state.ladderFor = null;                                   // 사다리가 돌던 중이면 멈춘다
+    const cur = state.clip;
+    const live = cur.itemId === itemId && (cur.state === 'playing' || cur.state === 'opening' || cur.state === 'loading');
+    const same = live && Math.abs((state.playRate || 1) - rate) < 0.005;
+    if (live) {
+      setClip(itemId, 'stopped');
+      stopLocalAudio();
+      if (!state.clipLocal) await B.request('clip.stop').catch(() => {});
+      if (same) { state.playRate = 0; renderClipStates(); return; }
+    }
+    await playItem(itemId, { rate });
+  }
+  const rateTitle = (r) => fmtRate(r) + '배속으로 재생' + (state.web.ladderPitch === false ? '' : ' (음높이 유지)') + ' · 🔁 반복을 켜 두면 이 배속으로 계속 반복합니다 · 같은 배속을 다시 누르면 정지';
+  const rateBtns = (it) => (state.web.ladder === false ? [] : ladderRates().map((r) => el('button', { class: 'btn mini rate-btn', 'data-rate': fmtRate(r), title: rateTitle(r), onclick: () => playAtRate(it.id, r) }, fmtRate(r))));
   function setRepeat(on) {
     state.repeat = !!on;
     document.querySelectorAll('.repeat-toggle').forEach((b) => { b.classList.toggle('on', state.repeat); b.title = REPEAT_TITLE[state.repeat ? 1 : 0]; });
@@ -944,10 +971,12 @@
       node.addEventListener('click', (e) => { if (e.target.closest('button, input, textarea, select, a, label, .trim-box, .rec-row, .tags-row')) return; setPick(it.id, !state.edit.sel.has(it.id)); });
     }
     const playCol = el('div', { class: 'play-col' }, [pick, play, state.web.ladder ? el('button', { class: 'ladder', title: ladderTitle(), onclick: () => playLadder(it.id) }, '⤴') : null]);
+    const rates = rateBtns(it); // 설정한 배속이 그대로: [0.8] [0.9] [1] [1.15]
     const body = el('div', { class: 'body' }, [
       el('div', { class: 'vis-btns' }, [
         el('button', { class: 'btn mini vis-text', title: '이 대사의 자막 보기/감추기', onclick: () => setItemVeil(it.id, 'text', !isVeiled(it.id, 'text')) }, '자막'),
         el('button', { class: 'btn mini vis-ko', title: '이 대사의 뜻 보기/감추기', onclick: () => setItemVeil(it.id, 'ko', !isVeiled(it.id, 'ko')) }, '뜻'),
+        rates.length ? el('span', { class: 'rate-btns' }, rates) : null,
       ]),
       el('div', { class: 'en', text: it.text }),
       el('button', { class: 'veil veil-text-btn', title: '자막 보기', onclick: () => setItemVeil(it.id, 'text', false) }, '자막 감춤 · 눌러서 보기'),
