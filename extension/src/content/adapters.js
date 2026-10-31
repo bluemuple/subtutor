@@ -6,7 +6,18 @@ globalThis.SubTutorAdapters = (() => {
   'use strict';
 
   // MAIN world 페이지 스크립트가 보내주는 시간(디즈니+)
-  const shared = { pageTime: { ms: 0, at: 0, advancing: false } };
+  const shared = { pageTime: { ms: 0, at: 0, advancing: false }, ctMap: { samples: [], k: NaN } };
+  // 디즈니+: 플레이어가 알려 주는 재생 위치(콘텐츠 시간)는 띄엄띄엄·내림값으로 와서 늦다. 영상 요소의 currentTime 은
+  // 콘텐츠 시간과 다른 기준(MediaSource)이지만 매끈하고 정확하므로, 둘의 차이 k 를 알아 두고 콘텐츠 시간 = currentTime + k 로 쓴다.
+  // 보고값은 내림이라 늘 실제보다 작거나 같다 → 최근 12초 동안의 가장 큰 차이가 실제에 가장 가깝다. 3초 넘게 어긋나면(기준이 바뀜) 새로 잰다
+  function noteContentTime(ms, ctMs, at) {
+    const m = shared.ctMap;
+    const k = ms - ctMs;
+    if (m.samples.length && Math.abs(k - m.k) > 3000) m.samples = [];
+    m.samples.push([at, k]);
+    while (m.samples.length > 1 && at - m.samples[0][0] > 12000) m.samples.shift();
+    m.k = Math.max(...m.samples.map((x) => x[1]));
+  }
 
   // MAIN world 와의 요청/응답
   const page = {
@@ -199,6 +210,8 @@ globalThis.SubTutorAdapters = (() => {
     timeMs() {
       const p = shared.pageTime;
       if (!p.at) return NaN;
+      const v0 = pickVideo();
+      if (v0 && shared.ctMap.samples.length >= 2 && Number.isFinite(shared.ctMap.k) && Number.isFinite(v0.currentTime)) return v0.currentTime * 1000 + shared.ctMap.k;
       if (!p.advancing) return p.ms;
       // 보고 사이를 이어 붙일 때 배속을 곱한다 — 0.5배로 재생하면 위치도 0.5배로 흐른다 (예전에는 1배로 가정해 앞서 갔다가 되돌아왔다)
       const v = pickVideo();
@@ -258,13 +271,16 @@ globalThis.SubTutorAdapters = (() => {
     // 패널은 페이지를 밀지 않고 오른쪽 추천 영상 영역 위에 겹친다. 마스트헤드(검색창)는 가리지 않고, 전체화면에서는 맨 위부터
     layoutCss: 'html:not(:fullscreen) #st-panel.st-pf-youtube { top: 56px; }',
     fitVideo: false,
-    // 오른쪽 추천 영상 칸(#secondary)을 통째로 덮는 너비. 극장 모드처럼 칸이 아래로 내려가면 기본 400
+    // 오른쪽 추천 영상 칸(#secondary)을 통째로 덮는 너비. 극장 모드처럼 칸이 아래로 내려가면 기본 400.
+    // 홈에서 영상으로 넘어오면 숨은 홈 페이지(ytd-browse)의 #secondary 가 문서 앞쪽에 남아 있으므로, 화면에 보이는 칸만 고른다
     panelWidth() {
-      const sec = document.querySelector('ytd-watch-flexy #secondary, #secondary');
-      if (!sec) return 400;
-      const r = sec.getBoundingClientRect();
-      if (r.width < 100 || r.left < window.innerWidth * 0.5) return 400;
-      return Math.ceil(window.innerWidth - r.left) + 2;
+      let left = Infinity;
+      for (const sec of document.querySelectorAll('ytd-watch-flexy #secondary, ytd-watch-grid #secondary, #secondary')) {
+        const r = sec.getBoundingClientRect();
+        if (r.width < 100 || r.height < 50 || r.left < window.innerWidth * 0.5) continue;
+        left = Math.min(left, r.left);
+      }
+      return Number.isFinite(left) ? Math.ceil(window.innerWidth - left) + 2 : 400;
     },
     nativeCueSelector: '.ytp-caption-segment',
     controlAnchor() { const rc = document.querySelector('#movie_player .ytp-right-controls'); return (rc && rc.firstElementChild) || document.querySelector('#movie_player .ytp-subtitles-button'); },
@@ -289,5 +305,5 @@ globalThis.SubTutorAdapters = (() => {
     return a;
   }
 
-  return { shared, page, detect, pickVideo, findButton, qsaDeep, deepRoots };
+  return { shared, page, detect, pickVideo, findButton, qsaDeep, deepRoots, noteContentTime };
 })();

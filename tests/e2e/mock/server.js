@@ -39,6 +39,9 @@ function mockHandler(root) {
         'master.m3u8': '#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub-main",NAME="English",LANGUAGE="en",AUTOSELECT=YES,URI="en.m3u8"\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub-main",NAME="한국어",LANGUAGE="ko",AUTOSELECT=YES,URI="ko.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=100000,SUBTITLES="sub-main"\nvideo.m3u8\n',
         'en.m3u8': '#EXTM3U\n#EXT-X-TARGETDURATION:60\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:60.000,\n/tracks/en.vtt\n#EXT-X-ENDLIST\n',
         'ko.m3u8': '#EXTM3U\n#EXT-X-TARGETDURATION:60\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:60.000,\n/tracks/ko.vtt\n#EXT-X-ENDLIST\n',
+        // 두 번째 작품: 자막이 빈틈없이 이어 붙어 있다 (따라하기 멈춤이 다음 줄로 넘어가지 않는지 보는 용도)
+        'master2.m3u8': '#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub-main",NAME="English",LANGUAGE="en",AUTOSELECT=YES,URI="en2.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=100000,SUBTITLES="sub-main"\nvideo.m3u8\n',
+        'en2.m3u8': '#EXTM3U\n#EXT-X-TARGETDURATION:60\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:60.000,\n/tracks/adjacent-en.vtt\n#EXT-X-ENDLIST\n',
       }[name];
       if (!m3u8) { res.writeHead(404); res.end(); return; }
       res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
@@ -69,7 +72,9 @@ function mockHandler(root) {
     if (p === '/translate_a/single') {
       const q = url.searchParams.get('q') || '';
       res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify([[['[번역] ' + q, q, null, null]], null, 'en']));
+      // 진짜 응답처럼 줄마다 한 조각 (줄바꿈은 앞 조각 끝에 붙는다)
+      const lines = q.split('\n');
+      res.end(JSON.stringify([lines.map((l, i) => ['[번역] ' + l + (i < lines.length - 1 ? '\n' : ''), l, null, null]), null, 'en']));
       return;
     }
     if (p === '/translate_a/t') {

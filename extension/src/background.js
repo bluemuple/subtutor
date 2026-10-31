@@ -7,7 +7,7 @@ const FS = globalThis.SubTutorFS;
 const SITE_URL = 'https://bluemuple.github.io/subtutor/';
 const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
-  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {},
+  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {},
   audioDirName: '', // 사용자가 고른 오디오 저장 폴더 이름 (핸들은 IndexedDB). 비어 있으면 다운로드 폴더
   koMode: 'hold', koRepeats: 3, secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false, missedTag: '못 알아들음',
   web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1] },
@@ -47,6 +47,71 @@ function withItems(fn) {
   });
   itemsChain = run.catch(() => {});
   return run;
+}
+// ───────── 단어장: 플레이어 패널의 단어 목록에서 ☆ 로 저장 → 웹에서 카드로 복습 ─────────
+// 카드 { word, meaning, sentence, sentenceKo, source{platform,videoId,title,episode,startMs}, savedAt, review{level,due,reps,lapses,last} }
+async function getWords() {
+  const { words } = await chrome.storage.local.get('words');
+  return Array.isArray(words) ? words : [];
+}
+let wordsChain = Promise.resolve();
+function withWords(fn) {
+  const run = wordsChain.then(async () => {
+    const words = await getWords();
+    const r = await fn(words);
+    if (r && r.write) await chrome.storage.local.set({ words: r.words });
+    return r ? r.result : undefined;
+  });
+  wordsChain = run.catch(() => {});
+  return run;
+}
+const wordKey = (w) => String(w || '').toLowerCase().trim().slice(0, 60);
+// 망각 곡선을 따라 간격을 늘린다: 알고 있어요 → 1·3·7·14·30·60·120일 뒤, 잘 모름 → 10분 뒤 다시(그 뒤 1일부터 다시 늘림)
+const WORD_STEPS_DAYS = [1, 3, 7, 14, 30, 60, 120];
+function reviewWord(card, result, now) {
+  const r = Object.assign({ level: 0, due: now, reps: 0, lapses: 0 }, card.review || {});
+  r.reps++; r.last = now;
+  if (result === 'know') { r.level = Math.min(WORD_STEPS_DAYS.length, r.level + 1); r.due = now + WORD_STEPS_DAYS[r.level - 1] * 86400000; }
+  else { r.level = 0; r.lapses++; r.due = now + 10 * 60000; }
+  return r;
+}
+// 단어 뜻(기계 번역): 40개씩 줄바꿈으로 묶어 한 번에 번역하고, 줄 수가 어긋나면 그 묶음만 하나씩. 번역 캐시(mt.cache)를 같이 쓴다
+async function translateWords(words) {
+  await loadCache();
+  const list = words.map((w) => String(w).slice(0, 60));
+  const out = list.map((w) => mt.cache['ko:' + w] || '');
+  const misses = list.map((w, i) => (out[i] ? -1 : i)).filter((i) => i >= 0);
+  if (!misses.length) return { meanings: out };
+  if (Date.now() < mt.backoffUntil) return { meanings: out, error: '번역 요청이 잠시 제한되었습니다. 1분 뒤 다시 시도하세요.' };
+  for (let k = 0; k < misses.length; k += 40) {
+    const idx = misses.slice(k, k + 40);
+    let parts = null;
+    try {
+      const lines = (await translateOne(idx.map((i) => list[i]).join('\n'), 'en', 'ko')).split('\n').map((x) => x.trim());
+      if (lines.length === idx.length) parts = lines;
+    } catch (e) { if (Date.now() < mt.backoffUntil) break; }
+    if (!parts) {
+      parts = [];
+      for (const i of idx) {
+        try { parts.push(await translateOne(list[i], 'en', 'ko')); } catch (e) { parts.push(''); if (Date.now() < mt.backoffUntil) break; }
+      }
+    }
+    idx.forEach((i, n) => { const m = String(parts[n] || '').trim(); if (m) { out[i] = m; mt.cache['ko:' + list[i]] = m; } });
+    scheduleCacheSave();
+  }
+  return { meanings: out };
+}
+async function saveWordCard(card) {
+  const key = wordKey(card && card.word);
+  if (!key) return { ok: false, error: '단어가 비었습니다' };
+  return withWords((words) => {
+    const i = words.findIndex((w) => wordKey(w.word) === key);
+    const now = Date.now();
+    const base = { word: key, meaning: String(card.meaning || '').slice(0, 200), sentence: String(card.sentence || '').slice(0, 400), sentenceKo: String(card.sentenceKo || '').slice(0, 400), source: card.source || null };
+    if (i >= 0) { words[i] = Object.assign({}, words[i], base, { meaning: base.meaning || words[i].meaning }); return { write: true, words, result: { ok: true, existed: true } }; }
+    words.push(Object.assign(base, { savedAt: now, review: { level: 0, due: now, reps: 0, lapses: 0 } }));
+    return { write: true, words, result: { ok: true, count: words.length } };
+  });
 }
 async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
@@ -542,6 +607,13 @@ async function handleMessage(msg, sender) {
     // 웹사이트(브리지)
     case 'web.ping': return { ok: true, version: chrome.runtime.getManifest().version };
     case 'web.items.list': return { items: await getItems() };
+    case 'words.translate': case 'web.words.translate': return translateWords(Array.isArray(p.words || msg.words) ? (p.words || msg.words) : []);
+    case 'words.list': case 'web.words.list': return { words: await getWords() };
+    case 'words.save': return saveWordCard(msg.card || p.card);
+    case 'words.remove': case 'web.words.remove': { const key = wordKey(msg.word || p.word); return withWords((words) => ({ write: true, words: words.filter((w) => wordKey(w.word) !== key), result: { ok: true } })); }
+    case 'web.words.update': { const key = wordKey(p.word); return withWords((words) => { const w = words.find((x) => wordKey(x.word) === key); if (!w) return { result: { ok: false } }; if (typeof (p.patch || {}).meaning === 'string') w.meaning = p.patch.meaning.slice(0, 200); return { write: true, words, result: { ok: true } }; }); }
+    case 'web.words.import': { const incoming = Array.isArray(p.words) ? p.words : []; return withWords((words) => { const have = new Set(words.map((w) => wordKey(w.word))); let added = 0; for (const c of incoming) { const key = wordKey(c && c.word); if (!key || have.has(key)) continue; have.add(key); added++; words.push(Object.assign({}, c, { word: key })); } return { write: added > 0, words, result: { ok: true, added, total: words.length } }; }); } // 이미 있는 단어는 복습 기록을 지키려고 건드리지 않는다
+    case 'web.words.review': { const key = wordKey(p.word); return withWords((words) => { const w = words.find((x) => wordKey(x.word) === key); if (!w) return { result: { ok: false } }; w.review = reviewWord(w, p.result === 'know' ? 'know' : 'forgot', Date.now()); return { write: true, words, result: { ok: true, review: w.review } }; }); }
     case 'web.items.update': return withItems((items) => updateItem(items, p.id, p.patch));
     case 'web.items.remove': return removeItems([p.id]);
     case 'web.items.removeMany': return removeItems(p.ids);

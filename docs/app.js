@@ -33,6 +33,7 @@
     recordings: new Map(), recording: null, playingRec: null,
     edit: { on: false, sel: new Set() },  // 편집 모드: 선택 상자로 골라 한꺼번에 삭제
     quiz: null, quizPrefs: { title: '', tag: '', order: 'due', dueOnly: true, autoplay: true },
+    words: [], wordReview: null,          // 단어장 (패널 '단어 목록'에서 ☆ 로 저장) · 카드 복습 진행
   };
   const clipWaiters = [];
   let renderPending = false;
@@ -844,7 +845,7 @@
   function route() {
     if (state.shadow && state.view === 'shadow') { state.shadow.gen++; state.shadow.busy = false; }
     const m = /^#\/(\w+)/.exec(location.hash);
-    state.view = m && ['list', 'quiz', 'known', 'settings', 'shadow'].includes(m[1]) ? m[1] : 'list';
+    state.view = m && ['list', 'quiz', 'words', 'known', 'settings', 'shadow'].includes(m[1]) ? m[1] : 'list';
     render();
   }
   window.addEventListener('hashchange', route);
@@ -858,12 +859,13 @@
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === state.view));
     const app = $('#app');
     app.textContent = '';
-    const titles = { list: '저장한 자막', quiz: '퀴즈', known: '알고 있는 표현', settings: '설정', shadow: '쉐도잉' };
+    const titles = { list: '저장한 자막', quiz: '퀴즈', words: '단어장', known: '알고 있는 표현', settings: '설정', shadow: '쉐도잉' };
     document.title = 'SubTutor · ' + titles[state.view];
     switch (state.view) {
       case 'list': app.append(renderList(learning(), 'learning')); break;
       case 'known': app.append(renderList(known(), 'known')); break;
       case 'quiz': app.append(renderQuiz()); break;
+      case 'words': app.append(renderWords()); break;
       case 'settings': app.append(renderSettings()); break;
       case 'shadow': app.append(renderShadow()); break;
       default: break;
@@ -1208,6 +1210,167 @@
     else if (e.code === 'KeyR') toggleRecord(it.id);
   });
 
+  // ───────── 단어장: 플레이어 패널의 '단어 목록'에서 ☆ 로 저장한 단어 → 카드 복습 ─────────
+  // 앞면: 단어 + 그 단어가 쓰인 자막 문장 / 뒷면: 뜻(기계 번역) + 문장 번역. 다음 복습 시각은 확장 프로그램이 정한다
+  // (알고 있어요 → 1·3·7·14·30·60·120일 뒤, 잘 모름 → 10분 뒤 다시, 간격은 처음부터)
+  const WORD_STEPS = [1, 3, 7, 14, 30, 60, 120];
+  const wordDue = (w) => (w.review && Number.isFinite(w.review.due) ? w.review.due : (w.savedAt || 0));
+  const dueWords = () => state.words.filter((w) => wordDue(w) <= Date.now());
+  const isEditingWord = () => !!(document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('word-meaning'));
+  const wordsSignature = (ws) => ws.map((w) => [w.word, w.meaning, w.sentence, wordDue(w), w.review ? w.review.level : 0].join('\u0001')).join('\u0002');
+  async function loadWords() {
+    if (!state.extOk) return;
+    let list;
+    try { const r = await B.request('words.list'); list = (r && r.words) || []; } catch (e) { return; }
+    const changed = wordsSignature(list) !== wordsSignature(state.words);
+    state.words = list;
+    updateWordCount();
+    if (changed && state.view === 'words' && !isEditingWord()) render();
+  }
+  function updateWordCount() {
+    const b = $('#count-words');
+    if (!b) return;
+    const n = dueWords().length;
+    b.textContent = n ? String(n) : '';
+    b.title = n ? '오늘 복습할 단어 ' + n + '개' : '';
+  }
+  function fmtDueIn(ms) {
+    const d = ms - Date.now();
+    if (d <= 0) return '지금';
+    if (d < 3600000) return Math.max(1, Math.round(d / 60000)) + '분 뒤';
+    if (d < DAY - 1800000) return Math.round(d / 3600000) + '시간 뒤'; // 하루에서 몇 초 모자란 것은 "1일 뒤" (24시간 뒤가 아니라)
+    return Math.max(1, Math.round(d / DAY)) + '일 뒤';
+  }
+  const nextKnowDays = (w) => WORD_STEPS[Math.min(WORD_STEPS.length, ((w.review && w.review.level) || 0) + 1) - 1];
+  const wordSource = (w) => (w.source && w.source.title ? w.source.title + (w.source.episode ? ' · ' + w.source.episode : '') : '');
+  // 예문에서 그 단어를 강조한다
+  function sentenceWithWord(sentence, word) {
+    const out = el('span', { class: 'word-sent' });
+    for (const part of String(sentence || '').split(/(\s+)/)) {
+      const bare = part.toLowerCase().replace(/[’‘]/g, "'").replace(/^[^a-z]+|[^a-z]+$/g, '');
+      out.append(bare && bare === word ? el('b', { class: 'hl' }, part) : part);
+    }
+    return out;
+  }
+  function renderWords() {
+    const wrap = el('div', { class: 'quiz-wrap words-wrap' });
+    const rv = state.wordReview;
+    if (rv) {
+      while (rv.pos < rv.queue.length && !state.words.find((w) => w.word === rv.queue[rv.pos])) rv.pos++;
+      wrap.append(rv.pos >= rv.queue.length ? wordSummary() : wordCard());
+      return wrap;
+    }
+    const due = dueWords().length;
+    wrap.append(el('div', { class: 'quiz-setup' }, [
+      el('h2', null, ['단어장', infoBtn('words')]),
+      el('div', { class: 'row' }, [
+        el('button', { class: 'btn primary big', disabled: !due || !state.extOk, onclick: () => startWordReview(false) }, '복습 시작' + (due ? ' (' + due + ')' : '')),
+        el('button', { class: 'btn big', disabled: !state.words.length || !state.extOk, onclick: () => startWordReview(true) }, '모두 복습'),
+        el('span', { class: 'count' }, !state.extOk ? '확장 프로그램이 연결되어야 단어장을 볼 수 있습니다' : (state.words.length ? '저장 ' + state.words.length + '개 · 오늘 복습 ' + due + '개' : '플레이어 패널의 "단어 목록"에서 ☆ 로 단어를 저장하세요')),
+        infoBtn('keys'),
+      ]),
+    ]));
+    if (!state.words.length) return wrap;
+    const list = el('div', { class: 'word-list' });
+    state.words.slice().sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0)).forEach((w) => {
+      list.append(el('div', { class: 'word-row', 'data-word': w.word }, [
+        el('div', { class: 'word-main' }, [
+          el('b', { class: 'word-w' }, w.word),
+          el('input', { class: 'word-meaning', value: w.meaning || '', placeholder: '뜻', title: '뜻 고치기 (자동 저장)', onchange: (e) => saveWordMeaning(w.word, e.target.value), onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); } }),
+        ]),
+        el('div', { class: 'word-ex' }, [
+          w.sentence ? sentenceWithWord(w.sentence, w.word) : null,
+          el('div', { class: 'word-meta' }, [wordSource(w), (wordSource(w) ? ' · ' : '') + '다음 복습 ' + fmtDueIn(wordDue(w))].join('')),
+        ]),
+        el('button', { class: 'word-del', title: '단어장에서 지우기', onclick: () => removeWord(w.word) }, '✕'),
+      ]));
+    });
+    wrap.append(list);
+    return wrap;
+  }
+  async function saveWordMeaning(word, meaning) {
+    const w = state.words.find((x) => x.word === word);
+    if (w) w.meaning = meaning;
+    try { await B.request('words.update', { word, patch: { meaning } }); } catch (e) { toast('저장 실패: ' + e.message); }
+  }
+  async function removeWord(word) {
+    state.words = state.words.filter((x) => x.word !== word);
+    updateWordCount();
+    render();
+    try { await B.request('words.remove', { word }); } catch (e) { toast('삭제 실패: ' + e.message); loadWords(); }
+  }
+  function startWordReview(all) {
+    const pool = (all ? state.words.slice() : dueWords()).sort((a, b) => wordDue(a) - wordDue(b));
+    if (!pool.length) { toast('복습할 단어가 없습니다'); return; }
+    state.wordReview = { queue: pool.map((w) => w.word), pos: 0, flipped: false, stats: { know: 0, forgot: 0 }, requeued: {} };
+    render();
+  }
+  function wordCard() {
+    const rv = state.wordReview;
+    const w = state.words.find((x) => x.word === rv.queue[rv.pos]);
+    const total = rv.queue.length;
+    const card = el('div', { class: 'quiz-card word-card' + (rv.flipped ? ' flipped' : '') });
+    card.append(
+      el('div', { class: 'quiz-top' }, [el('span', null, wordSource(w) || '단어장'), el('span', null, (rv.pos + 1) + ' / ' + total + '  ·  알고 있어요 ' + rv.stats.know + ' · 잘 모름 ' + rv.stats.forgot)]),
+      el('div', { class: 'progress' }, el('div', { style: 'width:' + Math.round((rv.pos / total) * 100) + '%' })),
+      el('div', { class: 'word-front' }, [
+        el('div', { class: 'word-big' }, w.word),
+        w.sentence ? el('div', { class: 'word-example' }, sentenceWithWord(w.sentence, w.word)) : null,
+      ]),
+    );
+    if (!rv.flipped) {
+      card.append(el('div', { class: 'quiz-actions center' }, [el('button', { class: 'btn primary big word-flip', onclick: flipWord }, '뜻 보기 (Space)')]));
+    } else {
+      card.append(el('div', { class: 'word-back' }, [
+        el('div', { class: 'word-mean' }, w.meaning || '(뜻 없음)'),
+        w.sentenceKo ? el('div', { class: 'ko' }, w.sentenceKo) : null,
+        el('div', { class: 'grade' }, [
+          el('button', { class: 'btn forgot', onclick: () => gradeWord('forgot') }, 'Z  잘 모름 — 10분 뒤 다시'),
+          el('button', { class: 'btn know', onclick: () => gradeWord('know') }, 'C  알고 있어요 — ' + nextKnowDays(w) + '일 뒤'),
+        ]),
+      ]));
+    }
+    return card;
+  }
+  function flipWord() {
+    const rv = state.wordReview;
+    if (!rv || rv.flipped || rv.pos >= rv.queue.length) return;
+    rv.flipped = true;
+    render();
+  }
+  async function gradeWord(result) {
+    const rv = state.wordReview;
+    if (!rv || !rv.flipped || rv.pos >= rv.queue.length) return;
+    const word = rv.queue[rv.pos];
+    if (result === 'forgot') {
+      rv.stats.forgot++;
+      const n = rv.requeued[word] || 0; // 이번 복습 안에서도 몇 장 뒤에 다시 (두 번까지)
+      if (n < 2) { rv.requeued[word] = n + 1; rv.queue.splice(Math.min(rv.queue.length, rv.pos + 4), 0, word); }
+    } else rv.stats.know++;
+    rv.pos++; rv.flipped = false;
+    render();
+    try { await B.request('words.review', { word, result }); } catch (e) { toast('저장 실패: ' + e.message); }
+  }
+  function wordSummary() {
+    const rv = state.wordReview;
+    return el('div', { class: 'quiz-card summary' }, [
+      el('h2', null, '단어 복습 끝!'),
+      el('div', { class: 'nums' }, [el('div', null, [el('b', null, String(rv.stats.know)), '알고 있어요']), el('div', null, [el('b', null, String(rv.stats.forgot)), '잘 모름'])]),
+      el('div', { class: 'row', style: 'display:flex;gap:10px;justify-content:center' }, [
+        el('button', { class: 'btn primary big', onclick: () => { state.wordReview = null; render(); } }, '단어장으로'),
+      ]),
+    ]);
+  }
+  document.addEventListener('keydown', (e) => {
+    if (state.view !== 'words' || !state.wordReview) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || isEditable(e.target)) return;
+    const rv = state.wordReview;
+    if (rv.pos >= rv.queue.length) return;
+    if ((e.code === 'Space' || e.code === 'Enter') && !rv.flipped) { e.preventDefault(); flipWord(); }
+    else if (e.code === 'KeyZ' && rv.flipped) gradeWord('forgot');
+    else if (e.code === 'KeyC' && rv.flipped) gradeWord('know');
+  });
+
   // ───────── 설정 ─────────
   function renderSettings() {
     const wrap = el('div', { class: 'settings' });
@@ -1221,10 +1384,11 @@
       const f = e.target.files[0]; if (!f) return;
       try {
         const data = JSON.parse(await f.text());
-        const items = Array.isArray(data) ? data : data.items;
+        const items = Array.isArray(data) ? data : (data.items || []);
         const r = await B.request('items.import', { items });
-        toast('가져오기 완료: 새 항목 ' + r.added + '개 (총 ' + r.total + '개)');
-        loadItems();
+        const w = data && Array.isArray(data.words) ? await B.request('words.import', { words: data.words }) : null;
+        toast('가져오기 완료: 새 항목 ' + r.added + '개 (총 ' + r.total + '개)' + (w ? ' · 새 단어 ' + w.added + '개' : ''));
+        loadItems(); loadWords();
       } catch (err) { toast('가져오기 실패: ' + err.message); }
       e.target.value = '';
     } });
@@ -1260,11 +1424,11 @@
         el('h3', null, ['데이터', infoBtn('storedAudio')]),
         el('div', { class: 'row' }, [
           el('button', { class: 'btn', disabled: !state.extOk, onclick: () => {
-            const blob = new Blob([JSON.stringify({ app: 'SubTutor', exportedAt: new Date().toISOString(), items: state.items }, null, 2)], { type: 'application/json' });
+            const blob = new Blob([JSON.stringify({ app: 'SubTutor', exportedAt: new Date().toISOString(), items: state.items, words: state.words }, null, 2)], { type: 'application/json' });
             const a = el('a', { href: URL.createObjectURL(blob), download: 'subtutor-items-' + fmtDate(Date.now()).replace(/\./g, '') + '.json' });
             document.body.append(a); a.click(); a.remove();
-          } }, '자막 내보내기 (JSON)'),
-          el('button', { class: 'btn', disabled: !state.extOk, onclick: () => fileInput.click() }, '자막 가져오기'),
+          } }, '자막·단어장 내보내기 (JSON)'),
+          el('button', { class: 'btn', disabled: !state.extOk, onclick: () => fileInput.click() }, '자막·단어장 가져오기'),
           fileInput,
           el('button', { class: 'btn mp3-import', disabled: !state.extOk, onclick: () => importMp3Folder() }, 'MP3 폴더에서 불러오기' + (fileOnly ? ' (' + fileOnly + '개 대기)' : '')),
           infoBtn('mp3Import'),
@@ -1540,11 +1704,13 @@
     await B.waitReady(2000);
     state.extOk = B.detect();
     renderExtStatus();
-    B.on('ready', () => { if (!state.extOk) { state.extOk = true; renderExtStatus(); loadItems(); } });
+    B.on('ready', () => { if (!state.extOk) { state.extOk = true; renderExtStatus(); loadItems(); loadWords(); } });
     B.on('items.changed', () => loadItems());
+    B.on('words.changed', () => loadWords());
+    setInterval(updateWordCount, 60000);
     $('#info-close').addEventListener('click', () => $('#info-dialog').close());
     $('#info-dialog').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
-    if (state.extOk) { await loadWebPrefs(); await loadTagNames(); await loadItems(true); } else render();
+    if (state.extOk) { await loadWebPrefs(); await loadTagNames(); await loadWords(); await loadItems(true); } else render();
   }
   init();
 })();

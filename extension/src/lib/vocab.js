@@ -2,6 +2,7 @@
  * SubTutor – 어휘 프로파일 (확장 프로그램 전용)
  *  - rankOf(word, freq): 빈도 순위 (1 = 가장 흔함, 없으면 0). 가벼운 어형 복원(-s, -ed, -ing, 's).
  *  - profile(cues, freq): 토큰 수, 밴드별 비율, 95%/98% 커버리지에 필요한 단어 수(순위), 3천 밖 단어 목록, 말 속도(wpm).
+ *  - wordList(cues, freq) / sortWords(list, mode): 자막의 모든 단어(중복·이름 없이)와 난이도 정렬 (패널 '단어 목록').
  * 근거: Nation (2006) 듣기용 어휘 크기; Webb & Rodgers (2009) TV 커버리지; van Zeeland & Schmitt (2013) 듣기 95% 커버리지; Rodgers & Webb (2011) 같은 시리즈 반복.
  */
 (function (root, factory) {
@@ -18,7 +19,8 @@
     index = map; indexFor = freq;
     return map;
   }
-  const norm = (t) => String(t).toLowerCase().replace(/[’‘]/g, "'").replace(/^[^a-z']+|[^a-z']+$/g, '');
+  // 앞뒤의 문장 부호·따옴표를 뗀다 ('Really? → really, facts.' → facts). 가운데 아포스트로피(don't)는 남긴다
+  const norm = (t) => String(t).toLowerCase().replace(/[’‘]/g, "'").replace(/^[^a-z]+|[^a-z]+$/g, '');
   // 어형 후보: 더 구체적인 것부터. 짧은 어간(3자 미만)은 버려 us/bit 같은 엉뚱한 단어와 겹치지 않게 한다
   function candidates(w) {
     const out = [w];
@@ -35,7 +37,7 @@
     if (/est$/.test(w)) { add(w.slice(0, -3)); add(w.slice(0, -2)); }
     if (/n't$/.test(w)) add(w.slice(0, -3));
     const ap = w.indexOf("'");
-    if (ap > 0) add(w.slice(0, ap));
+    if (ap > 0 && !out.includes(w.slice(0, ap))) out.push(w.slice(0, ap)); // 축약형의 앞부분은 짧아도 쓴다 (i'm → i, we're → we)
     return out;
   }
   // 가장 구체적인 어형부터 찾아 처음 발견되는 순위를 쓴다 (단어형 빈도; bites 가 목록에 있으면 bites, 없으면 bite)
@@ -89,6 +91,51 @@
       need95, need98, beyond3k: beyond, wpm: minutes ? Math.round(tokens / minutes) : 0, minutes: Math.round(minutes * 10) / 10,
     };
   }
+  // 단어 목록: 자막의 모든 단어를 한 번씩 → [{word, n(이 영상에 나온 횟수), rank, cue(처음 나온 자막 번호)}].
+  // 이름은 뺀다: 늘 대문자로 시작하고(소문자로는 한 번도 안 나옴) 빈도 목록에 없거나 문장 중간에서도 대문자인 단어.
+  // 하이픈 낱말(well-known)은 가장 드문 부분의 순위를 쓴다
+  const BASIC_RANK = 300; // 이보다 흔한 단어(the, to, I …)는 '아주 쉬운 단어'
+  const SENT_END = /[.!?…:]["'”’)\]]*$/;
+  function wordRank(w, freq) {
+    const r = rankOf(w, freq);
+    if (r || w.indexOf('-') < 0) return r;
+    const parts = w.split('-').filter(Boolean).map((x) => rankOf(x, freq));
+    return parts.length && parts.every(Boolean) ? Math.max(...parts) : 0;
+  }
+  function wordList(cues, freq) {
+    const map = new Map();
+    (cues || []).forEach((c, ci) => {
+      const text = typeof c === 'string' ? c : (c && c.text) || '';
+      const toks = tokenize(text.replace(/\n/g, ' '));
+      toks.forEach((raw, k) => {
+        if (/^[A-Z][A-Z'-]+:$/.test(raw)) return; // 화자 표시 (SOFIA:)
+        const w = norm(raw);
+        if (!/^[a-z][a-z'-]*$/.test(w) || (w.length < 2 && w !== 'a' && w !== 'i')) return;
+        const bare = raw.replace(/^[^A-Za-z]+|[^A-Za-z']+$/g, '');
+        const title = /^[A-Z](?=.*[a-z])/.test(bare) && !/^I'/.test(bare), lower = /^[a-z]/.test(bare); // I'm · I've 는 이름이 아니다
+        // 문장 중간: 자막 첫 단어가 아니고, 앞 단어가 문장 끝(. ! ? …)이나 대화 줄표가 아니고, 따옴표로 여는 말(인용 첫 단어)도 아닐 때
+        const mid = k > 0 && !/^["'“‘(\[]/.test(raw) && !SENT_END.test(toks[k - 1]) && !/^[-–—]$/.test(toks[k - 1]);
+        let e = map.get(w);
+        if (!e) { e = { word: w, n: 0, rank: wordRank(w, freq), cue: ci, cap: 0, low: 0, midCap: 0 }; map.set(w, e); }
+        e.n++;
+        if (title) { e.cap++; if (mid) e.midCap++; } else if (lower) e.low++;
+      });
+    });
+    const out = [];
+    for (const e of map.values()) {
+      const name = e.low === 0 && e.cap > 0 && (!e.rank || e.midCap > 0) && e.word !== 'i';
+      if (!name) out.push({ word: e.word, n: e.n, rank: e.rank, cue: e.cue });
+    }
+    return out;
+  }
+  // 정렬: 'hard' 드문 단어부터(빈도 목록 밖이 맨 앞) · 'easy' 흔한 단어부터 · 'easyNoBasic' 아주 쉬운 단어(순위 300 안) 빼고 흔한 단어부터
+  function sortWords(list, mode) {
+    const r = (e) => e.rank || 1e9;
+    const tie = (a, b) => b.n - a.n || (a.word < b.word ? -1 : a.word > b.word ? 1 : 0);
+    if (mode === 'easy') return list.slice().sort((a, b) => r(a) - r(b) || tie(a, b));
+    if (mode === 'easyNoBasic') return list.filter((e) => !(e.rank && e.rank <= BASIC_RANK)).sort((a, b) => r(a) - r(b) || tie(a, b));
+    return list.slice().sort((a, b) => r(b) - r(a) || tie(a, b));
+  }
   // 어려움 등급: 3천 밖(이름 제외) 비율로
   function difficulty(p) {
     const outside = p.tokens ? 100 - p.within3kPct - p.namesPct : 0;
@@ -96,5 +143,5 @@
     if (outside < 10) return { label: '보통', outside };
     return { label: '어려움', outside };
   }
-  return { rankOf, band, profile, difficulty, tokenize, norm };
+  return { rankOf, band, profile, difficulty, tokenize, norm, wordList, sortWords, BASIC_RANK };
 });

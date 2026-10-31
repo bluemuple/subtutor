@@ -27,6 +27,10 @@
     shadowPauseRatio: 1,        // 자막 길이의 몇 배를 쉴지 (0.5~3.0)
     dubPlayback: true,          // 더빙 재생: ★ 로 고른 녹음이 있는 구간은 원래 소리 대신 내 녹음 (☆ 를 고르면 자동으로 켜진다)
     dubRecRate: 1,              // 더빙 녹음 배속 (고른 값을 기억한다, 처음은 1배)
+    dubListenFirst: false,      // ● 녹음: 먼저 원래 소리(원어민)를 들려준 뒤 녹음
+    dubAutoPreview: false,      // 녹음 뒤 내 녹음을 영상에 맞춰 바로 들려주기
+    dubAutoNext: false,         // 그다음 자막으로 넘어가 녹음 준비
+    wordSort: 'hard',           // 단어 목록 정렬: hard · easy · easyNoBasic
     leadMs: 150,
     tailMs: 200,
     audioMode: 'off',           // off | store | download | both : 별표 저장 시 오디오 처리
@@ -150,6 +154,7 @@
       if (['koMode', 'secondPass', 'cloze', 'soundsLike', 'kiwiNotes', 'vocabProfile'].some((k) => prev[k] !== s[k])) { renderList(); renderOverlay(true); if (prev.vocabProfile !== s.vocabProfile) refreshProfileStatus(); }
     }
     if (changes.items) loadSaved();
+    if (changes.words && state.wordView) { const before = savedWords; loadSavedWords().then(() => updateWordCells([...new Set([...before, ...savedWords])].filter((w) => before.has(w) !== savedWords.has(w)))); }
   });
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || !msg.type) return;
@@ -186,7 +191,13 @@
       case 'video': if (d.videoId && d.videoId !== pageVideoId) { pageVideoId = d.videoId; checkVideo(); } break;
       case 'master': onMaster(d.url); break;
       case 'meta': if (d.meta && d.meta.title && (!d.videoId || d.videoId === state.videoId)) { pageMeta = d.meta; setMeta(d.meta); } break;
-      case 'time': A.shared.pageTime = { ms: d.ms, at: now(), advancing: !!d.advancing }; break;
+      case 'time': {
+        A.shared.pageTime = { ms: d.ms, at: now(), advancing: !!d.advancing };
+        // 재생 중인 보고만으로 영상 요소 시계와 콘텐츠 시간의 차이를 잰다 (탐색 중·멈춘 동안의 값은 쓰지 않는다)
+        const v = adapter.usesPageTime && A.noteContentTime ? adapter.video() : null;
+        if (v && d.advancing && !v.paused && !v.seeking && Number.isFinite(d.ms)) A.noteContentTime(d.ms, v.currentTime * 1000, now());
+        break;
+      }
       case 'navigate': checkVideo(); break;
       default: break;
     }
@@ -221,7 +232,7 @@
     state.loop = false; state.loopIdx = -1; state.pausedFor = -1; state.clip = null; state.capturing = null;
     state.saved = new Map(); state.meta = null; state.offsetMs = 0; state.offsetSource = ''; state.alignSamples = []; state.lastNativeText = '';
     clearShadow(); clearEndTimer(); stopTextTrackPoll(); clearTimeout(state.ensureTimer);
-    closeDubBox(); stopDubPlay();
+    closeDubBox(); stopDubPlay(); closeWordView();
     state.dubSegs = [];
     dubBuffers.clear(); dubReady.clear(); dubBroken.clear();
     state.userScrollAt = 0; // 새 에피소드에서는 패널이 지금 줄로 바로 따라가게 (이전 에피소드에서 손으로 스크롤한 기록은 버린다)
@@ -242,6 +253,7 @@
     v.addEventListener('play', () => {
       if (now() < state.resumeByUsUntil) { state.resumeByUsUntil = 0; return; }
       // 사용자가 직접 재생을 눌렀다: 쉐도잉 대기/자동 일시정지 상태를 푼다
+      state.holding = false;
       if (state.shadowTimer || state.pausedFor >= 0) { clearShadow(); state.pausedFor = -1; }
     });
     v.addEventListener('pause', () => {
@@ -249,8 +261,13 @@
       if (now() - state.playRequestedAt > 400 && now() > state.pauseByUsUntil) clearTimeout(state.ensureTimer);
     });
     v.addEventListener('seeking', () => {
-      state.seekingAt = now(); // 우리 것이든 사용자 것이든: 디즈니+ 는 이 뒤 새 위치를 알려 줄 때까지 예전 위치가 남는다 (dubTick 참고)
+      // 스트리밍 플레이어는 재생 중에 스스로 아주 작게 위치를 고친다(버퍼 틈 건너뛰기 등). 사람이 옮긴 것이 아니므로 아무것도 건드리지 않는다
+      // (디즈니+ 에서 이것을 탐색으로 보고 더빙을 멈췄다가 다시 트느라 0.3초마다 내 더빙·원래 소리가 번갈아 나왔다)
+      const jump = Number.isFinite(state.lastCT) ? Math.abs(v.currentTime - state.lastCT) : Infinity;
+      if (jump < 0.75) return;
+      state.seekingAt = now(); // 디즈니+ 는 이 뒤 새 위치를 알려 줄 때까지 예전 위치가 남는다 (dubTick 참고)
       if (now() < state.seekByUsUntil) return;
+      state.holding = false;
       state.lastSeekAt = now();
       clearShadow(); state.pausedFor = -1;
       clearTimeout(state.ensureTimer); // 사용자가 직접 옮겼으면, 우리가 걸어 둔 "그 자리에서 재생되는지 확인" 재시도가 다시 끌고 가지 않게 한다
@@ -824,12 +841,14 @@
     ui.foot = el('div', { class: 'st-foot' }, [
       el('button', { class: 'st-foot-btn', title: '단축키', onclick: () => showInfo('keys') }, '⌨ 단축키'),
       el('button', { class: 'st-foot-btn', title: '두 번 보기 순서', onclick: () => showInfo('twoPass') }, '두 번 보기'),
-      el('button', { class: 'st-foot-btn', title: '이 에피소드의 어휘', onclick: showVocab }, '어휘'),
+      el('button', { class: 'st-foot-btn', title: '이 에피소드의 어휘 통계 (3천 밖 단어·말 속도)', onclick: showVocab }, '어휘 통계'),
+      el('button', { class: 'st-foot-btn st-foot-words', title: '이 영상의 단어 목록 (어려운 단어부터 · 뜻 · 단어장 저장)', onclick: () => toggleWordView() }, '단어 목록'),
       el('button', { class: 'st-foot-btn st-foot-dub', title: '지금 자막으로 더빙 (R)', onclick: () => toggleDubBox() }, '🎙 더빙'),
     ]);
     ui.dubbox = el('div', { class: 'st-dubbox st-hidden', 'data-mic': 'closed' });
     ui.settings = buildSettings();
-    ui.panel.append(head, ui.status, ui.list, ui.settings, ui.foot);
+    ui.wordView = el('div', { class: 'st-wordview st-hidden' });
+    ui.panel.append(head, ui.status, ui.list, ui.wordView, ui.settings, ui.foot);
 
     ui.toggle = el('button', { id: 'st-toggle', title: 'SubTutor 자막 패널 열기 (`)', onclick: () => setPanelOpen(true) }, '‹');
     document.body.append(ui.panel, ui.toggle);
@@ -1304,11 +1323,15 @@
       el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: showVocab }, '이 에피소드 어휘 목록'), el('button', { class: 'st-btn', onclick: () => showInfo('missed') }, 'Q 못 알아들음 표시란?'), el('button', { class: 'st-btn', onclick: () => showInfo('twoPass') }, '두 번 보기 순서')]),
       el('h4', { text: '재생' }),
       field('따라하기 쉬는 시간', f.shadowPause, 'shadowing'),
-      field('더빙 재생 (★ 녹음 구간은 내 목소리)', sw('dubPlayback'), 'dub'),
       field('재생 시작 여유 (ms)', num('leadMs', 0, 2000), 'leadTail'),
       field('재생 끝 여유 (ms)', num('tailMs', 0, 2000), 'leadTail'),
       el('div', { class: 'st-field' }, [el('label', null, ['이 영상 자막 시간 보정 (ms)', infoBtn('offset')]), el('span', { class: 'st-offset-ctl' }, [el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs - 500, 'manual') }, '−0.5초'), f.offset, el('button', { class: 'st-btn st-mini', onclick: () => saveOffset(state.offsetMs + 500, 'manual') }, '+0.5초')])]),
       el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: () => { state.alignSamples = []; saveOffset(0, 'manual'); toast('보정값을 지웠습니다. 플랫폼 자막이 켜져 있으면 다시 자동 감지합니다'); } }, '보정 초기화')]),
+      el('h4', { text: '더빙' }),
+      field('더빙 재생 (★ 녹음 구간은 내 목소리)', sw('dubPlayback'), 'dub'),
+      field('녹음 전에 원래 소리 먼저 듣기', sw('dubListenFirst'), 'dub'),
+      field('녹음 뒤 내 녹음 바로 들어보기', sw('dubAutoPreview'), 'dub'),
+      field('그다음 자막으로 넘어가 녹음 준비', sw('dubAutoNext'), 'dub'),
       el('h4', { text: '저장' }),
       field('별표 저장 시 오디오', f.audioMode, 'audioStore'),
       el('div', { class: 'st-btn-row' }, [
@@ -1334,6 +1357,7 @@
     f.fontScale.value = settings.fontScale;
     f.shadowPause.value = shadowPauseValue();
     f.dubPlayback.checked = settings.dubPlayback !== false;
+    f.dubListenFirst.checked = !!settings.dubListenFirst; f.dubAutoPreview.checked = !!settings.dubAutoPreview; f.dubAutoNext.checked = !!settings.dubAutoNext;
     f.leadMs.value = settings.leadMs; f.tailMs.value = settings.tailMs;
     f.offset.value = state.offsetMs;
     f.offset.title = state.offsetMs ? (state.offsetSource === 'auto' ? '플랫폼 자막과 대조해 자동 감지한 값' : '직접 입력한 값') + ' · 자막이 소리보다 빠르면 음수' : '자막이 소리보다 빠르면 음수, 늦으면 양수. 플랫폼 자막이 켜져 있으면 자동 감지';
@@ -1443,6 +1467,8 @@
 
   // 영상 위 자막
   function displayIndex() {
+    // 따라하기·자동 일시정지로 멈춘 동안에는 그 자막을 계속 보여 준다 — 멈추는 사이 영상이 다음 자막으로 조금 넘어가도 화면은 따라 할 자막 그대로
+    if (state.holding && state.pausedFor >= 0) return state.pausedFor;
     if (state.current >= 0) return state.current;
     if (state.pausedFor >= 0 && (adapter.isPaused() || now() - state.pausedAt < 1500)) return state.pausedFor;
     return -1;
@@ -1572,6 +1598,7 @@
 
   // ───────────── 재생 제어 ─────────────
   function seekTo(ms) {
+    state.seekingAt = now();
     state.seekByUsUntil = now() + 1500;
     state.lastSeekAt = now();
     state.lastSeekTarget = ms;
@@ -1622,7 +1649,7 @@
     };
     state.ensureTimer = setTimeout(check, 700);
   }
-  function cancelModesPending() { clearShadow(); clearEndTimer(); state.pausedFor = -1; cancelDubLadder(true); stopDubPreview(); if (state.dubRec) state.dubRec.cancel = true; }
+  function cancelModesPending() { clearShadow(); clearEndTimer(); state.pausedFor = -1; state.holding = false; cancelDubLadder(true); stopDubPreview(); if (state.dubRec) state.dubRec.cancel = true; }
   function goToCue(i, opts) {
     if (!state.cues.length) return;
     i = clamp(i, 0, state.cues.length - 1);
@@ -1709,18 +1736,27 @@
   function pauseFor(i) {
     state.pausedFor = i;
     state.pausedAt = now();
+    state.holding = true;
     state.resumeByUsUntil = 0;
     state.pauseByUsUntil = now() + 1500;
     clearTimeout(state.ensureTimer);
     adapter.pause();
+    highlightRow(i, false);
     renderOverlay(true);
     if (settings.shadowing) startShadowWait(i);
+    // 멈추는 명령이 늦게 먹어(디즈니+ 등) 다음 자막으로 넘어갔으면 그 자막 끝으로 되돌린다 → 다시 재생할 때 다음 자막이 처음부터 나온다
+    const c = state.cues[i];
+    setTimeout(() => {
+      if (!state.holding || state.pausedFor !== i || !c) return;
+      const t = nowMs();
+      if (isFinite(t) && t > c.end + 60) seekTo(cueVideoEndMs(c) - 40);
+    }, 350);
   }
   // 따라하기(쉐도잉)에서 자막이 끝난 뒤 쉬는 시간.
   // 기본은 "그 자막이 떠 있던 시간 × 배율" — 긴 대사는 길게, 짧은 대사는 짧게 쉬므로 따로 맞출 필요가 없다.
-  // 아주 짧은 대사("Yeah.")도 따라 할 틈이 있도록 0.8초 이상, 너무 오래 멈추지 않도록 10초 이하로 둔다.
+  // ×1 이면 그 자막이 떠 있던 시간과 똑같이 쉰다 (0.3초 미만·30초 초과만 막는다).
   const SHADOW_RATIOS = [0.8, 1, 1.1, 1.2, 1.3, 1.5, 2];
-  const SHADOW_MIN_MS = 800, SHADOW_MAX_MS = 10000;
+  const SHADOW_MIN_MS = 300, SHADOW_MAX_MS = 30000;
   // 고를 수 있는 배율 중 가장 가까운 값으로 맞춘다. 목록에 없는 값이 저장돼 있으면 선택 상자가 빈칸으로 보인다.
   const shadowRatio = () => {
     const v = clamp(+settings.shadowPauseRatio || 1, 0.5, 3);
@@ -1737,7 +1773,10 @@
   function shadowPauseMs(i) {
     const c = state.cues[i];
     if (!shadowByRatio() || !c) return shadowSecs() * 1000;
-    return Math.round(clamp((c.end - c.start) * shadowRatio(), SHADOW_MIN_MS, SHADOW_MAX_MS));
+    // 자막이 화면에 떠 있던 시간 × 배율 (0.8배속으로 보면 그만큼 길게 떠 있었으므로 쉬는 시간도 그만큼). ×1 이면 똑같은 길이로 쉰다
+    const v = adapter.video();
+    const rate = (v && v.playbackRate > 0) ? v.playbackRate : 1;
+    return Math.round(clamp(((c.end - c.start) / rate) * shadowRatio(), SHADOW_MIN_MS, SHADOW_MAX_MS));
   }
   const shadowPauseText = () => (shadowByRatio() ? '자막 길이 ×' + rateText(shadowRatio()) : shadowSecs() + '초');
   // 패널 헤더는 자리가 좁아 짧게(×1), 설정 화면은 길게(자막 길이 ×1). 묶음 이름이 무슨 뜻인지 알려 준다.
@@ -1759,7 +1798,9 @@
     state.shadowTimer = setTimeout(() => {
       state.shadowTimer = null;
       ui.ovShadow.classList.remove('on');
+      state.holding = false;
       if (settings.shadowing && state.pausedFor === i && adapter.isPaused()) requestPlay();
+      renderOverlay(true);
     }, ms);
   }
   function clearShadow() {
@@ -1880,6 +1921,14 @@
     if (dubCtx.state === 'suspended') dubCtx.resume().catch(() => {});
     return dubCtx;
   }
+  // 브라우저는 사용자가 페이지를 누르거나 키를 치기 전에는 소리를 못 내게 한다(새로고침 직후 자동 재생 등).
+  // 아무 클릭·키 입력이 있으면 그 자리에서 더빙 소리를 깨운다 — 그 뒤로는 고른 더빙이 언제나 나온다
+  function unlockDubAudio() {
+    if (!state.dubSegs.some((sg) => sg.chosen) && !dubModeOn()) return;
+    try { dubAudioCtx(); } catch (e) { /* ignore */ }
+  }
+  ['pointerdown', 'keydown', 'touchstart'].forEach((t) => window.addEventListener(t, unlockDubAudio, true));
+  let dubLockHinted = false;
   async function loadDubs() {
     const token = state.runToken, key = dubKey();
     let segs = [];
@@ -2102,16 +2151,24 @@
     const prevMuted = v ? v.muted : false;
     const prevRate = state.rate;
     const recRate = dubRecRate();
-    let stream = null, mr = null, mutedByUs = false;
+    let stream = null, mr = null, mutedByUs = false, saved = null;
     try {
       try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
       catch (e) { throw new Error(e && e.name === 'NotAllowedError' ? '마이크 사용이 막혀 있습니다. 주소창 왼쪽 아이콘에서 마이크를 허용한 뒤 다시 누르세요' : '마이크를 열지 못했습니다 (' + ((e && (e.message || e.name)) || '') + ')'); }
       state.dubMic = stream;
       if (ui.dubbox) ui.dubbox.dataset.mic = 'open';
       if (rec.cancel) throw new Error('cancel');
+      if (Math.abs(state.rate - recRate) > 0.01) { state.rate = recRate; applyRate(true); } // 고른 녹음 배속으로 재생하며 녹음한다
+      // (설정) 녹음 전에 원래 소리 먼저 듣기: 같은 배속으로 원어민 목소리를 한 번 들려준 뒤 녹음한다
+      if (settings.dubListenFirst) {
+        rec.phase = 'listen'; renderDubBox();
+        const heard = await playDubRange(r, settings.leadMs, () => !rec.cancel);
+        if (rec.cancel) throw new Error('cancel');
+        if (!heard) throw new Error('원래 소리를 들려주지 못했습니다');
+        await sleepMs(300);
+      }
       pauseByUs();
       seekTo(r.startMs - DUB_LEAD_MS);
-      if (Math.abs(state.rate - recRate) > 0.01) { state.rate = recRate; applyRate(true); } // 고른 녹음 배속으로 재생하며 녹음한다
       for (let n = 3; n >= 1; n--) { rec.phase = 'count'; rec.count = n; renderDubBox(); await sleepMs(600); if (rec.cancel) throw new Error('cancel'); }
       if (v) { v.muted = true; mutedByUs = true; } // 원래 소리를 끈다 (스피커 소리가 녹음에 섞이지 않게)
       const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => MediaRecorder.isTypeSupported(m)) || '';
@@ -2168,8 +2225,13 @@
         if (k < 0) k = 0;
         dropDubTakeAudio(seg.takes.splice(k, 1)[0].id);
       }
+      // 방금 녹음한 것을 자동으로 ★ — 따로 고르지 않아도 이 구간은 최근 녹음으로 재생된다 (다른 것을 ☆ 로 고를 수 있음)
+      seg.chosen = take.id;
+      saved = { seg, take };
+      if (settings.dubPlayback === false) saveSettings({ dubPlayback: true });
+      dubBuffer(take.id);
       await saveDubs();
-      chip('audio', '더빙 녹음 ' + seg.takes.length + '/' + DUB_MAX_TAKES + ' 저장' + (recRate !== 1 ? ' (' + rateText(recRate) + '배로 녹음 → 원래 속도로 맞춤)' : '') + ' · ☆ 를 누르면 이 구간의 더빙이 됩니다', 3000);
+      chip('audio', '더빙 녹음 ' + seg.takes.length + '/' + DUB_MAX_TAKES + ' 저장 · ★ 이 구간의 더빙으로 골랐습니다' + (recRate !== 1 ? ' (' + rateText(recRate) + '배로 녹음 → 원래 속도로 맞춤)' : ''), 3000);
     } catch (e) {
       if (!e || e.message !== 'cancel') toast('🎙 ' + ((e && e.message) || e), 7000);
     } finally {
@@ -2180,9 +2242,22 @@
       if (v && mutedByUs) v.muted = prevMuted;
       const mine = state.dubRec === rec;
       if (mine) state.dubRec = null;
-      if (dubModeOn()) { renderDubBox(); if (mine) startDubLoop(); } // 더빙 모드면 다시 그 구간 반복
+      if (dubModeOn()) {
+        renderDubBox();
+        if (mine) { if (saved && (settings.dubAutoPreview || settings.dubAutoNext)) afterDubTake(saved.seg, saved.take); else startDubLoop(); } // 더빙 모드면 다시 그 구간 반복
+      }
       else { if (Math.abs(state.rate - prevRate) > 0.01) { state.rate = prevRate; applyRate(true); } renderDubBox(); }
     }
+  }
+  // 녹음 뒤 (설정에 따라) 내 녹음을 영상에 맞춰 바로 들려주고, 그다음 자막으로 넘어가 녹음 준비 (그 줄을 반복하며 ● 녹음을 기다린다)
+  async function afterDubTake(seg, take) {
+    if (settings.dubAutoPreview) await previewDubTake(seg, take);
+    if (!dubModeOn() || state.dubRec || state.dubLadder || state.dubPreview) return;
+    if (settings.dubAutoNext) {
+      const j = state.dubRange[1];
+      if (j < state.cues.length - 1) { openDubBox(j + 1); chip('info', '다음 자막 · ● 녹음을 누르면 녹음합니다', 2000); }
+      else { chip('info', '마지막 자막입니다', 2000); startDubLoop(); }
+    } else if (!settings.dubAutoPreview) startDubLoop();
   }
   function dropDubTakeAudio(id) { dubBuffers.delete(id); dubReady.delete(id); chrome.storage.local.remove(dubAudioKey(id)).catch(() => {}); }
   // ③ ☆ : 이 녹음을 이 구간의 더빙으로 (다시 누르면 해제)
@@ -2265,7 +2340,15 @@
     const staleAfterSeek = adapter.usesPageTime && state.seekingAt > 0 && A.shared.pageTime.at < state.seekingAt && now() - state.seekingAt < 1500;
     const tgt = paused || dubStall >= 6 || staleAfterSeek ? null : dubTarget(t); // 0.24초 넘게 멈춰 있으면 더빙도 멈춘다 (영상이 다시 흐르면 그 자리부터)
     const cur = state.dubPlay;
-    if (!tgt) { if (cur) stopDubPlay(); return; }
+    if (!tgt) {
+      if (cur) {
+        const beyond = t >= cur.take.clipStartMs + cur.take.ms - 40 || t < cur.take.clipStartMs - 300;
+        cur.miss = (cur.miss || 0) + 1;
+        if (paused || beyond || cur.miss >= 4) stopDubPlay(); // 잠깐 빈 틱 하나로 끊었다 다시 틀면 소리가 깜빡인다
+      }
+      return;
+    }
+    if (cur) cur.miss = 0;
     const want = (t - tgt.take.clipStartMs) / 1000; // 녹음 안에서 지금 나와야 할 위치(초)
     if (cur && cur.take.id === tgt.take.id && dubCtx) {
       if (dubStall > 0) return; // 위치가 멈춰 있는 동안에는 맞추지 않는다 (낡은 값으로 되감지 않게)
@@ -2285,7 +2368,10 @@
     if (!buf) { dubBuffer(tgt.take.id); return; } // 디코딩이 끝나면 다음 틱에 시작한다
     if (offsetSec >= buf.duration - 0.04) return;
     const ctx = dubAudioCtx();
-    if (ctx.state !== 'running') return; // 소리를 낼 수 없으면 원래 소리를 끄지 않는다 (페이지를 한 번 누르면 풀린다)
+    if (ctx.state !== 'running') { // 소리를 낼 수 없으면 원래 소리를 끄지 않는다 (페이지를 한 번 누르면 풀린다)
+      if (!dubLockHinted) { dubLockHinted = true; chip('info', '🎙 내 더빙을 들으려면 화면을 한 번 누르세요 (브라우저가 클릭 전에는 소리를 막습니다)', 6000); }
+      return;
+    }
     const prev = state.dubPlay;
     const v = adapter.video();
     if (prev && prev.src) { try { prev.src.stop(); } catch (e) { /* ignore */ } }
@@ -2341,7 +2427,7 @@
     ].concat(dubPracticeRates().map((x) => withProps(el('button', { class: 'st-dub-rate st-dub-play-rate' + (Math.abs(x - nowRate) < 0.005 ? ' on' : ''), 'data-rate': rateText(x), title: rateText(x) + '배속으로 이 구간 반복', onclick: () => setDubLoopRate(x) }, rateText(x)), { disabled: busy })))));
     // ② 녹음 · 녹음 배속
     const recRate = dubRecRate();
-    const recLabel = !R ? '● 녹음' : (R.phase === 'count' ? String(R.count) : (R.phase === 'rec' ? '◼ 녹음 중' : (R.phase === 'save' ? '저장 중…' : '마이크…')));
+    const recLabel = !R ? '● 녹음' : (R.phase === 'listen' ? '듣는 중…' : (R.phase === 'count' ? String(R.count) : (R.phase === 'rec' ? '◼ 녹음 중' : (R.phase === 'save' ? '저장 중…' : '마이크…'))));
     box.append(el('div', { class: 'st-dub-step' }, [
       el('span', { class: 'st-dub-n' }, '2'),
       withProps(el('button', { class: 'st-btn st-mini st-dub-rec' + (R ? ' on' : ''), title: rateText(recRate) + '배속으로 녹음 (원래 소리는 끄고, 다시 누르면 취소)', onclick: recordDubTake }, recLabel), { disabled: !!L || !!(R && R.phase === 'save') }),
@@ -2366,6 +2452,127 @@
     if (box.parentElement) placeDubBox(false);
   }
 
+  // ───────────── 단어 목록 (패널) ─────────────
+  // 이 영상 자막의 모든 단어를 중복·이름 없이 모아 패널에 2칸으로 보여 준다. 기본은 어려운(드문) 단어부터.
+  // 뜻은 기계 번역(한꺼번에 보기·단어별 보기), ☆ 로 저장하면 웹 › 단어장에서 카드로 복습한다 (망각 곡선 간격)
+  const WORD_SORTS = [['hard', '어려운 단어부터'], ['easy', '쉬운 단어부터'], ['easyNoBasic', '쉬운 단어부터 (to·I 빼고)']];
+  const wordMeaning = new Map(); // 단어 -> 기계 번역 뜻
+  let savedWords = new Set();
+  const sortWords = (list, mode) => Voc.sortWords(list, mode);
+  async function loadSavedWords() {
+    try { const r = await bg({ type: 'words.list' }); savedWords = new Set(((r && r.words) || []).map((w) => String(w.word).toLowerCase())); } catch (e) { /* ignore */ }
+  }
+  function openWordView() {
+    if (!ui.wordView) return;
+    if (!state.cues.length || !Voc || !Voc.wordList) { toast('자막을 불러온 뒤에 단어 목록을 볼 수 있습니다'); return; }
+    if (dubModeOn()) closeDubBox();
+    state.wordView = { sort: WORD_SORTS.some(([v]) => v === settings.wordSort) ? settings.wordSort : 'hard', showAll: false, shown: new Set(), list: Voc.wordList(state.cues, Freq) };
+    if (!settings.panelOpen) setPanelOpen(true);
+    if (ui.settings) ui.settings.classList.add('st-hidden');
+    ui.list.classList.add('st-hidden');
+    ui.wordView.classList.remove('st-hidden');
+    renderWordView();
+    loadSavedWords().then(() => { if (state.wordView) updateWordCells([...savedWords]); });
+  }
+  function closeWordView() {
+    if (!state.wordView) return;
+    state.wordView = null;
+    if (!ui.wordView) return;
+    ui.wordView.classList.add('st-hidden');
+    ui.wordView.textContent = '';
+    ui.list.classList.remove('st-hidden');
+    highlightRow(state.current, true);
+  }
+  function toggleWordView() { if (state.wordView) closeWordView(); else openWordView(); }
+  function wordCell(e) {
+    const W = state.wordView;
+    const shown = W.showAll || W.shown.has(e.word);
+    const saved = savedWords.has(e.word);
+    const m = wordMeaning.get(e.word);
+    return el('div', { class: 'st-word' + (saved ? ' saved' : '') + (shown ? ' open' : ''), 'data-word': e.word, title: (e.rank ? '흔한 순서 ' + e.rank + '위' : '빈도 목록 밖 (드문 단어)') + ' · 이 영상에 ' + e.n + '번' }, [
+      el('span', { class: 'st-word-w', text: e.word }),
+      shown ? el('span', { class: 'st-word-m', text: m || '…' }) : el('span', { class: 'st-word-sp' }),
+      el('button', { class: 'st-word-btn st-word-mean' + (shown ? ' on' : ''), title: shown ? '뜻 감추기' : '뜻 보기', onclick: () => toggleMeaning(e.word) }, '뜻'),
+      el('button', { class: 'st-word-btn st-word-save' + (saved ? ' on' : ''), title: saved ? '단어장에서 빼기' : '단어장에 저장 (웹 › 단어장에서 카드로 복습)', onclick: () => toggleSaveWord(e) }, saved ? '★' : '☆'),
+    ]);
+  }
+  // 다시 그려도 보던 자리를 지킨다 (정렬을 바꿀 때만 맨 위로)
+  function renderWordView(toTop) {
+    const W = state.wordView, box = ui.wordView;
+    if (!W || !box) return;
+    const prevGrid = box.querySelector('.st-word-grid');
+    const scroll = prevGrid && !toTop ? prevGrid.scrollTop : 0;
+    const list = sortWords(W.list, W.sort);
+    const sortSel = el('select', { class: 'st-word-sort', title: '정렬 (to·I 빼고 = 아주 쉬운 단어 300개를 뺀 쉬운 단어부터)', onchange: (e) => { W.sort = e.target.value; saveSettings({ wordSort: W.sort }); renderWordView(true); if (W.showAll) fetchMeanings(sortWords(W.list, W.sort).map((x) => x.word)); } },
+      WORD_SORTS.map(([v, t]) => withProps(el('option', { value: v }, t), { selected: W.sort === v })));
+    box.textContent = '';
+    box.append(
+      el('div', { class: 'st-word-head' }, [
+        el('b', { class: 'st-word-count', text: '단어 ' + list.length + '개' }),
+        sortSel,
+        el('button', { class: 'st-btn st-mini st-word-all' + (W.showAll ? ' on' : ''), title: W.showAll ? '모든 뜻 감추기' : '모든 단어의 뜻 보기 (기계 번역)', onclick: toggleAllMeanings }, W.showAll ? '뜻 감추기' : '뜻 모두 보기'),
+        el('span', { class: 'st-dub-sp' }),
+        infoBtn('words'),
+        el('button', { class: 'st-icon st-word-close', title: '자막 목록으로', onclick: closeWordView }, '✕'),
+      ]),
+      el('div', { class: 'st-word-grid' }, list.map(wordCell)),
+    );
+    if (scroll) box.querySelector('.st-word-grid').scrollTop = scroll;
+  }
+  function updateWordCells(words) {
+    const W = state.wordView;
+    if (!W || !ui.wordView) return;
+    for (const w of words) {
+      const old = ui.wordView.querySelector('.st-word[data-word="' + CSS.escape(w) + '"]');
+      const e = W.list.find((x) => x.word === w);
+      if (old && e) old.replaceWith(wordCell(e));
+    }
+  }
+  // 뜻: 기계 번역을 120개씩 받아 온다 (백그라운드가 40개씩 묶어 번역하고 캐시한다)
+  async function fetchMeanings(words) {
+    const need = words.filter((w) => !wordMeaning.has(w));
+    for (let i = 0; i < need.length; i += 120) {
+      const chunk = need.slice(i, i + 120);
+      let r = null;
+      try { r = await bg({ type: 'words.translate', words: chunk }); } catch (e) { r = null; }
+      if (r && Array.isArray(r.meanings)) r.meanings.forEach((m, k) => { if (m) wordMeaning.set(chunk[k], m); });
+      updateWordCells(chunk);
+      if (!r || r.error) { toast((r && r.error) || '뜻을 받아 오지 못했습니다'); break; }
+      if (!state.wordView) break;
+    }
+  }
+  function toggleAllMeanings() {
+    const W = state.wordView;
+    if (!W) return;
+    W.showAll = !W.showAll;
+    if (!W.showAll) W.shown.clear();
+    renderWordView();
+    if (W.showAll) fetchMeanings(sortWords(W.list, W.sort).map((e) => e.word));
+  }
+  function toggleMeaning(w) {
+    const W = state.wordView;
+    if (!W) return;
+    if (W.showAll) { W.showAll = false; W.shown = new Set(W.list.map((e) => e.word)); renderWordView(); }
+    if (W.shown.has(w)) W.shown.delete(w); else W.shown.add(w);
+    updateWordCells([w]);
+    if (W.shown.has(w)) fetchMeanings([w]);
+  }
+  async function toggleSaveWord(e) {
+    if (savedWords.has(e.word)) {
+      await bg({ type: 'words.remove', word: e.word }).catch(() => {});
+      savedWords.delete(e.word);
+    } else {
+      if (!wordMeaning.has(e.word)) await fetchMeanings([e.word]);
+      const c = state.cues[e.cue];
+      const card = { word: e.word, meaning: wordMeaning.get(e.word) || '', sentence: c ? c.text.replace(/\n/g, ' ') : '', sentenceKo: c ? koFor(c) : '',
+        source: { platform: adapter.name, videoId: state.videoId, title: (state.meta && state.meta.title) || '', episode: (state.meta && state.meta.episode) || '', startMs: c ? Math.round(cueVideoMs(c)) : 0 } };
+      const r = await bg({ type: 'words.save', card }).catch(() => null);
+      if (!r || !r.ok) { toast('단어를 저장하지 못했습니다'); return; }
+      savedWords.add(e.word);
+    }
+    updateWordCells([e.word]);
+  }
+
   // ───────────── 메인 루프 ─────────────
   function tick(fromTimer) {
     if (!state.active) return;
@@ -2373,6 +2580,7 @@
     if (state.tickCount % 3 === 0) positionOverlay(false);
     const raw = rawMs();
     if (!isFinite(raw)) return;
+    if (state.videoEl) state.lastCT = state.videoEl.currentTime;
     const paused = adapter.isPaused();
     const t = raw + effectiveOffset();
     const cues = state.cues;
@@ -2395,7 +2603,7 @@
       if (idx >= 0) {
         state.lastShown = idx;
         if (!paused) state.watched.add(idx);
-        highlightRow(idx, false);
+        if (!(state.holding && state.pausedFor >= 0)) highlightRow(idx, false);
         ensureTranslations(idx);
         if (!state.clip && !capturing && !paused && (settings.autoPause || settings.shadowing) && !state.loop && !dubBusy()) scheduleEndCheck(idx, t);
       }
@@ -2418,7 +2626,7 @@
         const ended = cues[prevIdx];
         if (t >= ended.end - 80 && t < ended.end + 1500 && state.pausedFor !== prevIdx) pauseFor(prevIdx);
       } else if ((settings.autoPause || settings.shadowing) && fromTimer && idx >= 0 && cues[idx] && t >= cues[idx].end - 80 && state.pausedFor !== idx) {
-        scheduleEndCheck(idx, t);
+        pauseFor(idx); // 자막 끝 바로 앞에서 멈춘다 (예전에는 다음 자막이 시작된 뒤에야 멈춰, 이어 붙은 자막에서 다음 줄이 화면에 나왔다)
       }
     }
     if (isEnabled() && dubModeOn()) dubLoopTick(raw, paused);

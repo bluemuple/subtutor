@@ -29,18 +29,28 @@
     seek(ms) { window.__seeks.push(ms); fire('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEKING'); v.currentTime = ms / 1000; return Promise.resolve(); },
     scrub() {},
     play() { const p = v.play(); if (p && p.catch) p.catch(() => {}); },
-    pause() { v.pause(); },
+    pause() { setTimeout(() => v.pause(), 120); }, // 실제 플레이어처럼 멈춤 명령이 조금 늦게 먹는다
     on(ev, f) { (handlers[ev] = handlers[ev] || []).push(f); },
   };
   v.addEventListener('play', () => fire('@EVENT/PLAYER/PLAYBACK/MEDIA_RESUMED'));
   v.addEventListener('pause', () => fire('@EVENT/PLAYER/PLAYBACK/MEDIA_PAUSED'));
+  v.addEventListener('seeking', () => fire('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEKING'));
   v.addEventListener('seeked', () => fire('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEK_COMPLETE'));
   setInterval(() => { if (!v.paused) fire('@EVENT/PLAYER/TIMECODE'); }, 330);
+  // 실제 스트리밍 플레이어처럼 재생 중에 스스로 seeking/seeked 를 낸다(버퍼 틈 건너뛰기 등) — 사용자의 탐색이 아니다.
+  // 위치를 실제로 옮기면 시험용 영상의 디코더가 멈칫해 재생이 느려지므로, 이벤트만 낸다 (예전 코드는 이 이벤트마다 더빙을 끊었다)
+  setInterval(() => {
+    if (v.paused || v.seeking || v.readyState < 2) return;
+    window.__microSeeks = (window.__microSeeks || 0) + 1;
+    v.dispatchEvent(new Event('seeking'));
+    setTimeout(() => v.dispatchEvent(new Event('seeked')), 30);
+  }, 300);
   // React 가 DOM 요소에 붙이는 fiber 흉내: 페이지 스크립트(disney-page.js)가 video 의 조상에서 플레이어를 찾는다
   v.parentElement['__reactFiber$mock'] = { memoizedProps: { player }, memoizedState: null, return: null };
   // 재생 정보 응답 흉내: 페이지 스크립트가 JSON.parse 를 가로채 자막 목록(HLS)과 제목을 얻는다
-  JSON.parse('{"stream":{"sources":[{"complete":{"url":"https://www.disneyplus.com/mock/disney/master.m3u8"}}]}}');
-  JSON.parse('{"data":{"playerExperience":{"title":"Mock Moana","subtitle":""}}}');
+  const second = /mockdisney2$/.test(location.pathname);
+  JSON.parse('{"stream":{"sources":[{"complete":{"url":"https://www.disneyplus.com/mock/disney/' + (second ? 'master2' : 'master') + '.m3u8"}}]}}');
+  JSON.parse('{"data":{"playerExperience":{"title":"' + (second ? 'Mock Adjacent' : 'Mock Moana') + '","subtitle":""}}}');
 })();
 </script>
 </body>

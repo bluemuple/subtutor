@@ -29,6 +29,7 @@
   });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.items) post({ __subtutorWeb: 'event', event: 'items.changed' });
+    if (area === 'local' && changes.words) post({ __subtutorWeb: 'event', event: 'words.changed' });
   });
   const announce = () => post({ __subtutorWeb: 'event', event: 'ready', payload: { version } });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', announce);

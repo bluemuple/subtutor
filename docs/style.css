@@ -155,6 +155,28 @@ kbd { background: var(--kbd); border: 1px solid var(--switch-off); border-bottom
 .summary .nums { display: flex; justify-content: center; gap: 28px; margin: 18px 0 24px; }
 .summary .nums div b { display: block; font-size: 28px; }
 .summary .nums div { color: var(--muted); font-size: 13px; }
+/* 단어장 */
+.word-list { margin-top: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.word-row { display: grid; grid-template-columns: minmax(120px, 210px) minmax(0, 1fr) auto; gap: 4px 14px; padding: 10px 14px 10px 16px; border-bottom: 1px solid var(--row-line); align-items: center; }
+.word-row:last-child { border-bottom: none; }
+.word-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.word-w { font-size: 16px; color: var(--strong); overflow-wrap: anywhere; }
+.word-meaning { background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--accent2); font: inherit; font-size: 13px; padding: 2px 5px; margin-left: -6px; width: 100%; }
+.word-meaning:hover { border-color: var(--line); }
+.word-meaning:focus { outline: none; border-color: var(--accent); background: var(--sunken); }
+.word-ex { font-size: 14px; color: var(--text); min-width: 0; }
+.word-meta { color: var(--dim); font-size: 12px; margin-top: 2px; }
+.word-sent .hl { color: var(--yellow); font-weight: 700; }
+.word-del { background: none; border: none; color: var(--dim); font-size: 14px; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.word-del:hover { background: var(--shade); color: var(--red); }
+.word-front { text-align: center; padding: 18px 0 6px; }
+.word-big { font-size: 40px; font-weight: 800; color: var(--strong); overflow-wrap: anywhere; }
+.word-example { margin-top: 14px; font-size: 18px; line-height: 1.5; }
+.word-back { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); text-align: center; }
+.word-mean { font-size: 24px; font-weight: 700; color: var(--accent2); }
+.word-back .ko { margin-top: 8px; font-size: 15px; }
+.quiz-actions.center { justify-content: center; margin-top: 18px; }
+@media (max-width: 640px) { .word-row { grid-template-columns: minmax(0, 1fr) auto; } .word-ex { grid-column: 1 / -1; grid-row: 2; } .word-big { font-size: 32px; } }
 
 /* 설정 */
 .settings section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }

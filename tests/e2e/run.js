@@ -142,9 +142,10 @@ async function runDisney() {
       assert(p2.slope > 320 && p2.slope < 480, '0.5x: 두 배 빠르게 맞춰졌다 (≈400Hz/초): ' + p2.slope.toFixed(0));
     });
     await step('디즈니+(모의) 더빙 재생: 재생 위치가 0.5초 계단으로 와도 녹음을 되감지 않는다 (말머리 반복 없음)', async () => {
+      // 별표를 누르지 않아도 가장 최근 녹음(0.5배)이 더빙으로 골라져 있다
       const slowId = (await dubTakeData(1)).take.id;
-      await dp.click('.st-dub-take[data-take="' + slowId + '"] .st-dub-star');
-      await waitFor(() => dp.$('.st-dub-take.chosen'), 3000, 'disney take starred');
+      await waitFor(() => dp.$eval('.st-dub-take[data-take="' + slowId + '"]', (e) => e.classList.contains('chosen')), 3000, 'latest take starred automatically');
+      assert((await dp.$$('.st-dub-take.chosen')).length === 1, 'one starred take');
       await dp.keyboard.press('KeyR');
       await waitFor(() => dp.evaluate(() => !document.querySelector('.st-list > .st-dubbox')), 3000, 'disney dub mode closed');
       // 더빙 모드에서 ☆ 녹음이 반복 재생 중이었을 수 있다 → 멈추고 내 더빙이 꺼질 때까지 기다린 뒤 보통 시청처럼 앞에서부터
@@ -167,6 +168,53 @@ async function runDisney() {
       const mutedAt = tl.filter((x) => x[1]).map((x) => x[0]);
       assert(Math.min(...mutedAt) > 5.5 && Math.max(...mutedAt) < 8.8, 'muted only around the line: ' + Math.min(...mutedAt).toFixed(2) + '–' + Math.max(...mutedAt).toFixed(2));
       assert(tl.some((x) => x[0] > 8.9 && !x[1]) && tl.some((x) => x[0] < 5.4 && !x[1]), 'original sound before and after');
+    });
+    await step('디즈니+(모의) 새로고침해도 더빙한 대사는 내 녹음으로 나온다 (재생 위치를 0.3초마다 미세하게 고쳐도 깜빡이지 않음)', async () => {
+      await dp.reload({ waitUntil: 'domcontentloaded' });
+      await dp.waitForSelector('#st-panel', { timeout: 20000 });
+      await waitFor(() => dp.$('.st-row.st-dubbed'), 20000, 'dubbed line marked after reload');
+      await dp.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.muted = false; v.currentTime = 4.6; });
+      await sleep(600);
+      await dp.click('.st-brand'); // 재생 버튼을 누르듯 화면을 한 번 누른다 (브라우저 자동 재생 규칙)
+      await dp.evaluate(() => document.querySelector('video').play());
+      const tl = [];
+      const t0 = Date.now();
+      while (Date.now() - t0 < 4800) {
+        tl.push(await dp.evaluate(() => [document.querySelector('video').currentTime, document.querySelector('video').muted, document.querySelector('.st-ov-dub').classList.contains('on')]));
+        await sleep(80);
+      }
+      await dp.evaluate(() => document.querySelector('video').pause());
+      const on = tl.filter((x) => x[2]);
+      assert(on.length > 15, 'my dub played after reload: ' + on.length + ' samples');
+      const flips = tl.filter((x, k) => k && x[2] !== tl[k - 1][2]).length;
+      assert(flips === 2, '더빙이 한 번 켜지고 한 번 꺼진다: 바뀐 횟수 ' + flips);
+      const mutedAt = tl.filter((x) => x[1]).map((x) => x[0]);
+      assert(Math.min(...mutedAt) > 5.5 && Math.max(...mutedAt) < 8.8, 'muted only around the line: ' + Math.min(...mutedAt).toFixed(2) + '–' + Math.max(...mutedAt).toFixed(2));
+    });
+    await step('디즈니+(모의) 따라하기: 이어 붙은 자막에서도 멈춘 동안 따라 할 줄이 화면·패널에 남고, 그 자막 길이만큼 쉰 뒤 이어 간다', async () => {
+      await dp.goto('https://www.disneyplus.com/play/mockdisney2', { waitUntil: 'domcontentloaded' });
+      await dp.waitForSelector('#st-panel', { timeout: 20000 });
+      await waitFor(() => dp.$$eval('.st-row', (r) => r.length === 5), 20000, 'adjacent rows');
+      await dp.select('.st-shadow-sec', 'r1');
+      await dp.evaluate(() => { const v = document.querySelector('video'); v.muted = false; v.play(); });
+      await sleep(500);
+      await dp.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 2.6; });
+      await sleep(700);
+      await dp.keyboard.press('KeyW');
+      await waitFor(() => dp.$eval('.st-mode.st-shadow', (b) => b.classList.contains('on')), 3000, 'follow mode on (disney)');
+      await dp.evaluate(() => document.querySelector('video').play());
+      const at = await waitFor(() => dp.evaluate(() => { const v = document.querySelector('video'); return v.paused ? { t: v.currentTime, ov: document.querySelector('.st-ov-text').textContent, row: document.querySelector('.st-row.active') && document.querySelector('.st-row.active').dataset.i } : null; }), 8000, 'paused after line one');
+      const t0 = Date.now();
+      await sleep(600);
+      const mid = await dp.evaluate(() => ({ t: document.querySelector('video').currentTime, ov: document.querySelector('.st-ov-text').textContent, row: document.querySelector('.st-row.active') && document.querySelector('.st-row.active').dataset.i }));
+      assert(/Line one/.test(at.ov) && at.row === '0' && /Line one/.test(mid.ov) && mid.row === '0' && mid.t < 4.05, '멈춘 동안 따라 할 줄(1번)이 그대로: ' + JSON.stringify({ at, mid }));
+      await waitFor(() => dp.evaluate(() => !document.querySelector('video').paused), 8000, 'resumed by itself');
+      const waited = Date.now() - t0 + 600;
+      assert(waited >= 1500 && waited <= 3200, '1번 자막 길이(2초)만큼 쉰다: ' + waited + 'ms');
+      await sleep(500);
+      const after = await dp.evaluate(() => ({ t: document.querySelector('video').currentTime, ov: document.querySelector('.st-ov-text').textContent }));
+      assert(/Line two/.test(after.ov) && after.t < 5.4, '이어서 2번 자막을 처음부터: ' + JSON.stringify(after));
+      await dp.evaluate(() => { document.querySelector('video').pause(); const b = document.querySelector('.st-mode.st-shadow.on'); if (b) b.click(); });
     });
   } finally {
     await browser.close().catch(() => {});
@@ -336,6 +384,43 @@ async function runDisney() {
       assert(st.wpm > 0 && st.title === 'Mock Show', 'episode stat ' + JSON.stringify(st));
       const series = await sw.evaluate(async () => (await chrome.storage.local.get('stats')).stats.series['netflix:Mock Show']);
       assert(series && series.episodes.includes('12345') && series.words.frisbee === 1, 'series words ' + JSON.stringify(series && Object.keys(series.words).slice(0, 5)));
+    });
+    await step('단어 목록: 패널에 2칸 · 어려운 단어부터 · 쉬운 단어부터(아주 쉬운 단어 빼기) · 뜻 모두 보기/단어별 뜻(오른쪽) · ☆ 저장 → 단어장', async () => {
+      await page.click('.st-foot-words');
+      await waitFor(() => page.$('.st-wordview:not(.st-hidden) .st-word'), 3000, 'word view');
+      const v = await page.evaluate(() => {
+        const g = document.querySelector('.st-word-grid');
+        const cells = [...g.querySelectorAll('.st-word')];
+        const a = cells[0].getBoundingClientRect(), b = cells[1].getBoundingClientRect();
+        return { words: cells.map((e) => e.dataset.word), cols: getComputedStyle(g).gridTemplateColumns.split(' ').length, sideBySide: Math.abs(a.top - b.top) < 2 && b.left >= a.right - 1, listHidden: document.querySelector('.st-list').offsetParent === null, count: document.querySelector('.st-word-count').textContent };
+      });
+      assert(v.cols === 2 && v.sideBySide, 'two columns: ' + JSON.stringify(Object.assign({}, v, { words: v.words.length })));
+      assert(v.listHidden && v.count === '단어 ' + v.words.length + '개', 'word list replaces the subtitle list: ' + v.count);
+      assert(new Set(v.words).size === v.words.length, 'no duplicates');
+      assert(!v.words.includes('raffie') && !v.words.includes('rory') && v.words.includes("you're") && v.words.includes('really'), 'names left out, quoted words kept: ' + v.words.join(','));
+      assert(v.words.indexOf('frisbee') < v.words.indexOf('dog') && v.words.indexOf('dog') < v.words.indexOf('the'), 'hard words first: ' + v.words.slice(0, 8).join(','));
+      await page.select('.st-word-sort', 'easy');
+      const easy = await page.$$eval('.st-word', (x) => x.map((e) => e.dataset.word));
+      assert(['you', "you're", 'i', "i'm", "i've"].includes(easy[0]) && easy.indexOf('the') < easy.indexOf('frisbee'), 'easy words first: ' + easy.slice(0, 6).join(','));
+      await page.select('.st-word-sort', 'easyNoBasic');
+      const nb = await page.$$eval('.st-word', (x) => x.map((e) => e.dataset.word));
+      assert(!nb.includes('the') && !nb.includes('i') && !nb.includes('my') && nb.includes('frisbee') && nb.length < easy.length, 'very easy words left out: ' + nb.slice(0, 6).join(','));
+      await waitFor(async () => (await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings.wordSort)) === 'easyNoBasic', 3000, 'sort remembered');
+      await page.click('.st-word[data-word="frisbee"] .st-word-mean');
+      await waitFor(() => page.$eval('.st-word[data-word="frisbee"] .st-word-m', (e) => e.textContent === '[번역] frisbee'), 5000, 'one meaning (machine translation)');
+      assert((await page.$$('.st-word .st-word-m')).length === 1, 'only that word shows its meaning');
+      await page.click('.st-word-all');
+      await waitFor(() => page.$$eval('.st-word', (x) => x.every((e) => e.querySelector('.st-word-m') && /^\[번역\] /.test(e.querySelector('.st-word-m').textContent))), 8000, 'all meanings');
+      const pair = await page.$eval('.st-word[data-word="frisbee"]', (e) => { const w = e.querySelector('.st-word-w').getBoundingClientRect(), m = e.querySelector('.st-word-m').getBoundingClientRect(); return { right: m.left >= w.right - 1, top: Math.round(m.top - w.top) }; });
+      assert(pair.right && Math.abs(pair.top) < 10, 'meaning on the right of the word: ' + JSON.stringify(pair));
+      await page.screenshot({ path: path.join(TMP, 'shots', 'panel-words.png') });
+      await page.click('.st-word[data-word="frisbee"] .st-word-save');
+      const card = await waitFor(async () => { const w = await sw.evaluate(async () => (await chrome.storage.local.get('words')).words); return w && w.find((x) => x.word === 'frisbee'); }, 4000, 'word saved');
+      assert(card.meaning === '[번역] frisbee' && /catch a frisbee/.test(card.sentence) && card.source && card.source.platform === 'netflix' && card.source.videoId === '12345' && card.source.title === 'Mock Show', 'card: ' + JSON.stringify(card));
+      await waitFor(() => page.$eval('.st-word[data-word="frisbee"] .st-word-save', (b) => b.textContent === '★'), 2000, 'star shown');
+      await page.select('.st-word-sort', 'hard');
+      await page.click('.st-word-close');
+      await waitFor(() => page.evaluate(() => document.querySelector('.st-wordview').classList.contains('st-hidden') && document.querySelector('.st-list').offsetParent !== null), 2000, 'back to the subtitle list');
     });
     await step('⚙ 설정: 설명은 ⓘ 뒤에만, 누르면 근거 상자', async () => {
       await page.click('.st-head .st-icon');
@@ -659,6 +744,7 @@ async function runDisney() {
       const slow = await sw.evaluate(async () => { const o = await chrome.storage.local.get(null); const t = o['dubs:netflix:12345'].segs[0].takes[0]; return Object.assign({}, t, { mime: o['dubaudio:' + t.id].mime }); });
       assert(slow.recRate === 0.5 && Math.abs(slow.ms - 2500) < 150 && Math.abs(slow.clipStartMs - 5750) < 100 && slow.mime === 'audio/mpeg', '0.5x take squeezed back to the line length (≈2.5s) and aligned: ' + JSON.stringify(slow));
       assert(/0\.5배 녹음/.test(await page.$eval('.st-dub-take .st-dub-len', (e) => e.textContent)), 'take labelled as a 0.5x recording');
+      assert(await page.$eval('.st-dub-take', (e) => e.classList.contains('chosen')), 'the new take is starred without pressing ☆');
       await waitFor(async () => { const v = await vstate(); return !v.p && !v.m && Math.abs(v.r - 0.7) < 0.01; }, 5000, 'after recording the line loops again at 0.7 with sound');
       assert(await page.$eval('.st-dubbox', (b) => b.dataset.mic === 'closed'), 'microphone released');
       // 1배로 두 개 더 → 3개
@@ -674,6 +760,7 @@ async function runDisney() {
       await waitFor(async () => { const t = await dubTakes(); return t.length === 3 && !t.includes(three[1]) && !(await page.$('.st-dub-rec.on')); }, 20000, '4th take saved');
       dubFour = await dubTakes();
       assert(dubFour[0] === three[0] && dubFour[1] === three[2], 'starred take kept, oldest unstarred removed: ' + JSON.stringify({ three, four: dubFour }));
+      assert(await page.$eval('.st-dub-take[data-take="' + dubFour[2] + '"]', (e) => e.classList.contains('chosen')), 'the newest take becomes the dub');
       const audioKeys = await sw.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith('dubaudio:')));
       assert(audioKeys.length === 3 && !audioKeys.includes('dubaudio:' + three[1]), 'removed take audio deleted: ' + JSON.stringify(audioKeys));
       // 다른 줄을 누르면 더빙 칸이 그 줄 아래로 옮겨 가고, 고른 녹음 배속(1)은 그대로
@@ -689,14 +776,14 @@ async function runDisney() {
         await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubPlayback: false } }, {}));
         await page.click('.st-row[data-i="1"] .st-en');
         await waitFor(() => page.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox'); return b && b.previousElementSibling.dataset.i === '1'; }), 3000, 'back on row 1');
-        await page.click('.st-dub-take[data-take="' + dubFour[2] + '"] .st-dub-star');
+        await page.click('.st-dub-take[data-take="' + dubFour[1] + '"] .st-dub-star');
         await waitFor(async () => (await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings.dubPlayback)) === true, 3000, 'starring turns dub playback on');
         // 들어보기
-        await page.click('.st-dub-take[data-take="' + dubFour[2] + '"] .st-dub-play');
+        await page.click('.st-dub-take[data-take="' + dubFour[1] + '"] .st-dub-play');
         const pv = [];
         const tp = Date.now();
         while (Date.now() - tp < 4500) { pv.push(await page.evaluate(() => [document.querySelector('video').muted, document.querySelector('.st-ov-dub').dataset.take || ''])); await sleep(100); }
-        assert(pv.some((x) => x[0] && x[1] === dubFour[2]), 'preview plays that take with the original muted');
+        assert(pv.some((x) => x[0] && x[1] === dubFour[1]), 'preview plays that take with the original muted');
         // 닫으면 원래 배속으로, 보통 시청에서 그 구간만 내 녹음
         await page.keyboard.press('KeyR');
         await waitFor(() => page.evaluate(() => !document.querySelector('.st-list > .st-dubbox')), 3000, 'R closes dub mode');
@@ -711,7 +798,7 @@ async function runDisney() {
         await page.evaluate(() => document.querySelector('video').pause());
         const mutedAt = tl.filter((x) => x[1]).map((x) => x[0]);
         assert(mutedAt.length > 8 && Math.min(...mutedAt) >= 5.6 && Math.max(...mutedAt) <= 8.35, 'original muted only in the dubbed line: ' + JSON.stringify(tl.map((x) => [+x[0].toFixed(2), +x[1]])));
-        assert(tl.filter((x) => x[1]).every((x) => x[2] === dubFour[2]), 'plays the starred take');
+        assert(tl.filter((x) => x[1]).every((x) => x[2] === dubFour[1]), 'plays the starred take');
         assert(tl.some((x) => x[0] < 5.6 && !x[1]) && tl.some((x) => x[0] > 8.5 && !x[1]), 'original sound before and after');
         // ✕ 로 하나씩 지운다 (모두 지우기 버튼은 없다)
         await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 6.3; });
@@ -728,6 +815,39 @@ async function runDisney() {
       } finally {
         await page.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox .st-dub-close'); if (b) b.click(); }).catch(() => {});
         await sw.evaluate((w) => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubPlayback: true, dubRecRate: 1, web: w } }, {}), WEB_PREFS).catch(() => {});
+        await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.muted = true; }).catch(() => {});
+        await sleep(200);
+      }
+    });
+    await step('더빙 녹음 흐름 설정: 원래 소리 먼저 듣기 → 3·2·1 → 녹음 → 내 녹음 바로 들어보기 → 다음 자막으로 넘어가 녹음 준비', async () => {
+      try {
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubListenFirst: true, dubAutoPreview: true, dubAutoNext: true } }, {}));
+        await page.evaluate(() => { const v = document.querySelector('video'); v.muted = false; v.pause(); v.currentTime = 6.3; });
+        await sleep(500);
+        await page.keyboard.press('KeyR');
+        await waitFor(() => page.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox'); return b && b.previousElementSibling.dataset.i === '1'; }), 3000, 'dub section on row 1');
+        await page.click('.st-dub-rec');
+        const phases = [];
+        let last = '';
+        const t0 = Date.now();
+        while (Date.now() - t0 < 25000) {
+          const s = await page.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox'); const r = document.querySelector('.st-dub-rec'); return { btn: r ? r.textContent.trim() : '', muted: document.querySelector('video').muted, dub: document.querySelector('.st-ov-dub').dataset.take || '', row: b && b.previousElementSibling ? b.previousElementSibling.dataset.i : '' }; });
+          const ph = (/듣는/.test(s.btn) ? 'listen' : /^\d$/.test(s.btn) ? 'count' : /녹음 중/.test(s.btn) ? 'rec' : /저장/.test(s.btn) ? 'save' : s.dub ? 'preview' : 'idle') + '@' + s.row + (s.muted ? 'm' : '');
+          if (ph !== last) { phases.push(ph); last = ph; }
+          if (s.row === '2' && !s.dub && phases.some((x) => x.startsWith('preview'))) break;
+          await sleep(60);
+        }
+        const flow = phases.map((x) => x.split('@')[0]).filter((x) => x !== 'idle' && x !== 'save').filter((x, k, a) => !k || x !== a[k - 1]);
+        assert(flow.join('>') === 'listen>count>rec>preview', 'order: ' + phases.join(' → '));
+        assert(phases.includes('listen@1') && phases.includes('rec@1m') && phases.includes('preview@1m') && /@2$/.test(last), 'original heard, recorded and previewed with the original muted, then row 2: ' + phases.join(' → '));
+      } finally {
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false } }, {})).catch(() => {});
+        // 녹음을 지운다 (1번 줄로 더빙 칸을 옮겨 ✕)
+        await page.click('.st-row[data-i="1"] .st-en').catch(() => {});
+        await waitFor(() => page.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox'); return b && b.previousElementSibling.dataset.i === '1'; }), 3000, 'back on row 1').catch(() => {});
+        for (let k = 0; k < 4 && (await page.$('.st-dub-take .st-dub-del')); k++) { await page.click('.st-dub-take .st-dub-del').catch(() => {}); await sleep(300); }
+        await page.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox .st-dub-close'); if (b) b.click(); }).catch(() => {});
+        await waitFor(async () => (await sw.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith('dub')).length)) === 0, 4000, 'flow test dubs removed').catch(() => {});
         await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.muted = true; }).catch(() => {});
         await sleep(200);
       }
@@ -862,6 +982,10 @@ async function runDisney() {
       assert(await yt.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 'Shift+> left to YouTube');
       const layout = await yt.evaluate(() => ({ margin: getComputedStyle(document.querySelector('ytd-app')).marginRight, top: getComputedStyle(document.getElementById('st-panel')).top, videoRight: Math.round(document.querySelector('video').getBoundingClientRect().right) }));
       assert(layout.margin === '0px' && layout.top === '56px', 'panel overlays the page below the masthead: ' + JSON.stringify(layout));
+      // 홈에서 넘어온 것처럼 숨은 홈 페이지(ytd-browse)의 #secondary 가 문서 앞쪽에 있어도, 보이는 추천 영상 칸을 통째로 덮는다
+      const cover = await waitFor(() => yt.evaluate(() => { const sec = document.querySelector('ytd-watch-flexy #secondary').getBoundingClientRect(); const p = document.getElementById('st-panel').getBoundingClientRect(); return p.left <= sec.left + 0.5 && p.width > 400 ? { panelLeft: Math.round(p.left), secLeft: Math.round(sec.left), w: Math.round(p.width) } : null; }), 4000, 'panel covers the whole recommendations column')
+        .catch(async (e) => { throw new Error(e.message + ' ' + JSON.stringify(await yt.evaluate(() => ({ w: getComputedStyle(document.documentElement).getPropertyValue('--st-panel-w'), sec: Math.round(document.querySelector('ytd-watch-flexy #secondary').getBoundingClientRect().left), iw: innerWidth })))); });
+      void cover;
     });
     await step('유튜브: D 키 이동과 오버레이', async () => {
       await setTime(yt, 6.3, true);
@@ -1338,9 +1462,12 @@ async function runDisney() {
       assert(left.length === 0, 'no stored audio left: ' + left);
       // 삭제하면 지정 폴더의 MP3 파일과 비게 된 작품 폴더도 지워지고, 확인 창이 그 사실을 알린다
       assert(logs.some((l) => /\[web dialog\] 이 대사 1개를 삭제할까요\? PC 에 저장한 MP3 파일 1개도 함께 지웁니다/.test(l)), 'delete confirm names the MP3 file: ' + logs.filter((l) => /web dialog/.test(l)).slice(-1).join(''));
-      // 실패하면 남은 폴더 안에 무엇이 있는지까지 보여 준다 (예전에 가끔 실패했지만 원인을 볼 수 없었다)
-      const folders = await opt.evaluate(async () => { const sub = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [n, h] of sub.entries()) { if (h.kind === 'directory') { const inner = []; for await (const [m] of h.entries()) inner.push(m); out.push(n + '/[' + inner.join(', ') + ']'); } else out.push(n); } return out; });
-      assert(!folders.some((n) => /Mock Lecture/.test(n)), 'MP3 file and its emptied folder removed with the item: ' + JSON.stringify(folders) + ' toast=' + await web.$eval('#toast', (t) => t.textContent).catch(() => ''));
+      // 웹은 목록에서 먼저 빼고(바로 보이게) 확장 프로그램이 그다음에 파일을 지우므로, 폴더가 비워질 때까지 기다린다.
+      // 실패하면 남은 폴더 안에 무엇이 있는지까지 보여 준다
+      const listFolders = () => opt.evaluate(async () => { const sub = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [n, h] of sub.entries()) { if (h.kind === 'directory') { const inner = []; for await (const [m] of h.entries()) inner.push(m); out.push(n + '/[' + inner.join(', ') + ']'); } else out.push(n); } return out; });
+      await waitFor(async () => !(await listFolders()).some((n) => /Mock Lecture/.test(n)), 8000, 'MP3 file and its emptied folder removed with the item')
+        .catch(async (e) => { throw new Error(e.message + ': ' + JSON.stringify(await listFolders()) + ' toast=' + await web.$eval('#toast', (t) => t.textContent).catch(() => '')); });
+      await waitFor(() => web.$eval('#toast', (t) => /MP3 파일 1개 삭제/.test(t.textContent)), 5000, 'delete result says the MP3 file was removed');
     });
     await step('코멘트를 쓰면 저장되고 새로고침 후에도 남는다', async () => {
       const ta = await web.$('[data-id="netflix:12345:22000"] .comment');
@@ -1429,6 +1556,45 @@ async function runDisney() {
       assert(it.forgot === 1 && it.reviews === 1 && it.box === 'learning' && it.review && it.review.lapses === 1, 'stats ' + JSON.stringify({ forgot: it.forgot, reviews: it.reviews, box: it.box, review: it.review }));
       const reviews = await sw.evaluate(async () => (await chrome.storage.local.get('stats')).stats.reviews.length);
       assert(reviews >= 2, 'review log ' + reviews);
+    });
+    await step('웹 단어장: 패널에서 저장한 단어 → 카드(앞: 단어·예문, 뒤: 뜻) · 잘 모름은 10분 뒤 + 이번에 다시 · 알고 있어요는 1일 뒤 · 뜻 고치기 · 지우기', async () => {
+      const wordsNow = async () => (await sw.evaluate(async () => (await chrome.storage.local.get('words')).words)) || [];
+      await web.goto('http://localhost:8766/#/words', { waitUntil: 'load' });
+      await waitFor(() => web.$('.word-row[data-word="frisbee"]'), 8000, 'saved word listed');
+      const row = await web.$eval('.word-row[data-word="frisbee"]', (r) => ({ meaning: r.querySelector('.word-meaning').value, hl: r.querySelector('.word-sent .hl') && r.querySelector('.word-sent .hl').textContent, meta: r.querySelector('.word-meta').textContent }));
+      assert(row.meaning === '[번역] frisbee' && row.hl === 'frisbee' && /Mock Show/.test(row.meta), 'row: ' + JSON.stringify(row));
+      assert(await web.$eval('#count-words', (b) => b.textContent) === '1', 'due badge');
+      await web.click('.quiz-setup .btn.primary');
+      await waitFor(() => web.$('.word-card'), 4000, 'card');
+      const front = await web.$eval('.word-card', (c) => ({ big: c.querySelector('.word-big').textContent, hl: c.querySelector('.word-example .hl') && c.querySelector('.word-example .hl').textContent, back: !!c.querySelector('.word-back') }));
+      assert(front.big === 'frisbee' && front.hl === 'frisbee' && !front.back, 'front: the word and its sentence, meaning hidden: ' + JSON.stringify(front));
+      await web.screenshot({ path: path.join(TMP, 'shots', 'web-word-front.png') });
+      await web.keyboard.press('Space');
+      await waitFor(() => web.$eval('.word-card .word-mean', (e) => e.textContent === '[번역] frisbee'), 3000, 'back shows the meaning');
+      await web.screenshot({ path: path.join(TMP, 'shots', 'web-word-back.png') });
+      await web.keyboard.press('KeyZ');
+      const lapse = await waitFor(async () => { const w = (await wordsNow()).find((x) => x.word === 'frisbee'); return w && w.review && w.review.lapses === 1 ? w.review : null; }, 4000, 'forgot saved');
+      assert(lapse.level === 0 && lapse.due > Date.now() + 8 * 60000 && lapse.due < Date.now() + 12 * 60000, '잘 모름 → 10분 뒤: ' + JSON.stringify(lapse));
+      await waitFor(() => web.$eval('.word-card .quiz-top', (e) => /2 \/ 2/.test(e.textContent)), 3000, 'requeued in this session');
+      await web.keyboard.press('Space');
+      await waitFor(() => web.$('.word-card .word-back'), 3000, 'flipped again');
+      await web.keyboard.press('KeyC');
+      const know = await waitFor(async () => { const w = (await wordsNow()).find((x) => x.word === 'frisbee'); return w && w.review && w.review.level === 1 ? w.review : null; }, 4000, 'know saved');
+      assert(know.due > Date.now() + 23 * 3600000 && know.due < Date.now() + 25 * 3600000, '알고 있어요 → 1일 뒤: ' + JSON.stringify(know));
+      await waitFor(() => web.$('.summary'), 3000, 'summary');
+      await waitFor(() => web.$eval('#count-words', (b) => b.textContent === ''), 3000, 'nothing due now');
+      await web.click('.summary .btn.primary');
+      await waitFor(() => web.$('.word-row[data-word="frisbee"]'), 3000, 'back to the list');
+      assert(/1일 뒤/.test(await web.$eval('.word-row[data-word="frisbee"] .word-meta', (e) => e.textContent)), 'next review shown');
+      // 뜻 칸을 눌러 글자를 모두 고른 뒤 새 뜻을 친다 (이 puppeteer 는 clickCount:3 으로 전체 선택이 되지 않는다)
+      await web.click('.word-row[data-word="frisbee"] .word-meaning');
+      await web.$eval('.word-row[data-word="frisbee"] .word-meaning', (i) => i.select());
+      await web.keyboard.type('원반');
+      await web.keyboard.press('Enter');
+      await waitFor(async () => ((await wordsNow()).find((x) => x.word === 'frisbee') || {}).meaning === '원반', 3000, 'meaning edited');
+      await web.click('.word-row[data-word="frisbee"] .word-del');
+      await waitFor(async () => (await wordsNow()).length === 0, 3000, 'word removed');
+      await waitFor(() => web.evaluate(() => !document.querySelector('.word-row')), 3000, 'row gone');
     });
     await step('설정: 학습 기능 토글·ⓘ 근거·진행 상황·약점 단어·추천', async () => {
       await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });

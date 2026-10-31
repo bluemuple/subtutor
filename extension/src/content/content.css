@@ -24,6 +24,7 @@
 .st-status.st-err { color: #fca5a5; }
 .st-status button { margin-left: auto; background: #262626; border: 1px solid #3a3a3a; color: #ddd; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
 .st-list { flex: 1; overflow-y: auto; padding: 6px 0; overscroll-behavior: contain; }
+.st-list.st-hidden { display: none; }
 .st-list::-webkit-scrollbar { width: 8px; } .st-list::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
 .st-empty { padding: 30px 16px; color: #777; text-align: center; font-size: 13px; line-height: 1.6; }
 .st-row { display: flex; align-items: flex-start; gap: 6px; padding: 8px 8px 8px 13px; cursor: pointer; border-left: 3px solid transparent; }
@@ -127,6 +128,28 @@ u.st-kiwi { text-decoration: underline dotted #fbbf24; text-underline-offset: 3p
 .st-vocab-row { padding: 6px 0; border-bottom: 1px solid #222; }
 .st-vocab-meta { color: #8b8b9a; font-size: 11.5px; }
 .st-vocab-ex { color: #9a9aa8; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 단어 목록 (패널, 자막 목록 자리에 2칸) */
+.st-wordview { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.st-wordview.st-hidden { display: none; }
+.st-word-head { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 12px; border-bottom: 1px solid #262626; flex-wrap: nowrap; min-width: 0; }
+.st-word-head > * { flex: none; }
+.st-word-count { font-size: 12px; color: #c4b5fd; font-weight: 600; }
+.st-word-head .st-word-sort { flex: 0 1 auto; min-width: 0; max-width: 165px; background: #1c1c22; color: #ddd; border: 1px solid #333; border-radius: 6px; font: inherit; font-size: 11.5px; padding: 2px 4px; }
+.st-word-head .st-btn.on { background: #4c1d95; border-color: #7c3aed; color: #fff; }
+.st-word-head .st-dub-sp { flex: 1 1 0; min-width: 0; }
+.st-word-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 10px; padding: 4px 8px 10px 12px; align-content: start; overscroll-behavior: contain; }
+.st-word-grid::-webkit-scrollbar { width: 8px; } .st-word-grid::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+.st-word { display: flex; align-items: baseline; gap: 4px; padding: 5px 2px; border-bottom: 1px solid #1f1f24; min-width: 0; }
+.st-word-w { flex: none; max-width: 72%; font-weight: 600; color: #ececf1; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-word-m { flex: 1 1 auto; min-width: 0; color: #a5b4fc; font-size: 12px; word-break: keep-all; overflow-wrap: anywhere; }
+.st-word-sp { flex: 1; }
+.st-word-btn { all: unset; cursor: pointer; flex: none; font-size: 11px; line-height: 1.5; color: #8b8b9a; padding: 0 4px; border-radius: 5px; }
+.st-word-btn:hover { background: #26262c; color: #fff; }
+.st-word-mean.on { color: #a5b4fc; }
+.st-word-save { font-size: 13px; }
+.st-word-save.on { color: #fde047; }
+.st-word.saved .st-word-w { color: #fde68a; }
 
 /* 구석 상태 아이콘 (저장·녹음 알림) — 영상 오른쪽 위, 화면을 가리지 않게 작게 */
 .st-chip { position: fixed; left: 0; top: 0; transform: translateX(-100%); width: 26px; height: 26px; border-radius: 50%; background: rgba(12,12,14,.72); color: #fff; display: flex; align-items: center; justify-content: center; font: 700 14px/1 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; z-index: 2147482500; opacity: 0; pointer-events: none; transition: opacity .25s; box-shadow: 0 1px 4px rgba(0,0,0,.45); }
