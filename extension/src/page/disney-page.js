@@ -70,7 +70,7 @@
           while (hook && hs < 20 && !found) { found = playerFromObject(hook.memoizedState); hook = hook.next; hs++; }
         }
         if (!found && fiber.stateNode && typeof fiber.stateNode === 'object') found = playerFromObject(fiber.stateNode);
-        if (found) return found;
+        if (found) { playerVideo = video; return found; }
         fiber = fiber.return;
       }
     }
@@ -79,23 +79,26 @@
   const contentTime = (p) => { const ms = p && p.timeline && p.timeline.info && p.timeline.info.playheadPositionMs; return typeof ms === 'number' && isFinite(ms) ? ms : undefined; };
 
   let cached;
+  let playerVideo = null; // 플레이어를 찾은 <video> (위치를 읽은 바로 그 순간의 영상 시각을 같이 보낸다)
   let advancing = false;
+  // 진단용: 플레이어 이벤트가 실제로 몇 번 왔는지 (t=TIMECODE p=멈춤 r=다시 재생 s=시작 k=탐색 c=탐색 끝). 실제 디즈니+ 에서 이 이벤트가 오는지 확인할 수 없어 같이 보낸다
+  const evc = { t: 0, p: 0, r: 0, s: 0, k: 0, c: 0 };
   function sendTime(p, adv) {
     const ms = contentTime(p);
     if (ms === undefined) return;
-    post({ type: 'time', platform: 'disney', ms, advancing: adv });
+    post({ type: 'time', platform: 'disney', ms, advancing: adv, evc });
   }
   function player() {
     if (isPlayer(cached)) return cached;
     cached = findPlayer();
     if (cached && typeof cached.on === 'function') {
       try {
-        cached.on('@EVENT/PLAYER/TIMECODE', () => sendTime(cached, advancing));
-        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_PAUSED', () => { advancing = false; sendTime(cached, false); });
-        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_RESUMED', () => { advancing = true; sendTime(cached, true); });
-        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_STARTED', () => { advancing = true; sendTime(cached, true); });
-        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEKING', () => sendTime(cached, false));
-        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEK_COMPLETE', () => { sendTime(cached, advancing); post({ type: 'seeked', platform: 'disney' }); });
+        cached.on('@EVENT/PLAYER/TIMECODE', () => { evc.t++; sendTime(cached, advancing); });
+        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_PAUSED', () => { evc.p++; advancing = false; sendTime(cached, false); });
+        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_RESUMED', () => { evc.r++; advancing = true; sendTime(cached, true); });
+        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_STARTED', () => { evc.s++; advancing = true; sendTime(cached, true); });
+        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEKING', () => { evc.k++; sendTime(cached, false); });
+        cached.on('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEK_COMPLETE', () => { evc.c++; sendTime(cached, advancing); post({ type: 'seeked', platform: 'disney' }); });
       } catch (e) { /* ignore */ }
       sendTime(cached, advancing);
     }
@@ -103,6 +106,22 @@
   }
   // 이벤트가 드물 때를 대비한 주기적 시간 전송
   setInterval(() => { const p = isPlayer(cached) ? cached : null; if (p) sendTime(p, advancing); }, 500);
+  // 위치 값이 바뀌는 순간을 잡아 보낸다. 플레이어의 위치 값은 띄엄띄엄(계단으로) 바뀌어 바뀐 바로 그때가 가장 정확한데,
+  // 일정한 0.5초 간격으로만 읽으면 계단과 박자가 맞물려 늘 같은 만큼(최대 0.5초) 늦은 값만 읽게 된다 → 0.04초마다 보고, 바뀌었으면 그 순간의 영상 시각과 함께 보낸다
+  let lastPolled, lastEdgeAt = 0;
+  setInterval(() => {
+    const p = isPlayer(cached) ? cached : null;
+    if (!p) return;
+    const ms = contentTime(p);
+    if (ms === undefined || ms === lastPolled) return;
+    const first = lastPolled === undefined;
+    lastPolled = ms;
+    const t = performance.now();
+    if (first || t - lastEdgeAt < 200) return; // 매끈하게 바뀌는 값이면 0.2초에 한 번이면 충분하다
+    lastEdgeAt = t;
+    const v = playerVideo && playerVideo.isConnected ? playerVideo : null;
+    post({ type: 'time', platform: 'disney', ms, advancing: advancing || !!(v && !v.paused), evc, edge: 1, ct: v ? v.currentTime * 1000 : undefined });
+  }, 40);
 
   window.addEventListener('message', (e) => {
     if (e.source !== window || !e.data || e.data.__subtutor !== 'content') return;

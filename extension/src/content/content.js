@@ -53,7 +53,7 @@
     cues: [], koCues: [], enTrack: null, koTrack: null, runToken: 0, trackRun: 0,
     current: -1, lastShown: -1, prevIdx: -1, lastT: 0, lastPaused: null, lastDisplayIdx: -2,
     loop: false, loopIdx: -1, lastLoopSeekAt: 0,
-    pausedFor: -1, pausedAt: 0, shadowTimer: null, endTimer: null, resumeByUsUntil: 0, pauseByUsUntil: 0, seekByUsUntil: 0, lastSeekAt: 0, lastSeekTarget: NaN, playRequestedAt: 0, ensureTimer: null,
+    pausedFor: -1, pausedAt: 0, shadowTimer: null, endTimer: null, resumeByUsUntil: 0, pauseByUsUntil: 0, seekByUsUntil: 0, lastSeekAt: 0, lastSeekTarget: NaN, seekingAt: 0, userSeekAt: 0, lastCT: NaN, playRequestedAt: 0, ensureTimer: null,
     clip: null, capturing: null,
     saved: new Map(), meta: null,
     offsetMs: 0, offsetSource: '', alignSamples: [], lastNativeText: '',
@@ -73,6 +73,16 @@
   // ───────────── 유틸 ─────────────
   const now = () => performance.now();
   const wall = () => performance.timeOrigin + performance.now();
+  // 더빙 진단 기록: 더빙이 끊기거나 깜빡이면 ⚙ › 진단 정보로 최근 기록(재생 위치·플레이어 보고·영상 이벤트·더빙을 켜고 끈 까닭)을 복사해 보낼 수 있다
+  const dlog = [];
+  let dlLast = '';
+  function dl(msg) { dlog.push([now(), msg]); dlLast = msg; if (dlog.length > 2000) dlog.splice(0, dlog.length - 1500); }
+  function dlOnce(msg) { if (msg !== dlLast) dl(msg); } // 틱마다 같은 줄이 쌓이지 않게
+  function dlogText(sec) {
+    const end = now(), from = end - sec * 1000;
+    return dlog.filter(([t]) => t >= from).map(([t, m]) => ((t - end) / 1000).toFixed(2).padStart(7) + ' ' + m).join('\n');
+  }
+  const fx = (x, d) => (Number.isFinite(x) ? x.toFixed(d || 0) : '-');
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   function el(tag, attrs, children) {
     const n = document.createElement(tag);
@@ -192,10 +202,18 @@
       case 'master': onMaster(d.url); break;
       case 'meta': if (d.meta && d.meta.title && (!d.videoId || d.videoId === state.videoId)) { pageMeta = d.meta; setMeta(d.meta); } break;
       case 'time': {
-        A.shared.pageTime = { ms: d.ms, at: now(), advancing: !!d.advancing };
-        // 재생 중인 보고만으로 영상 요소 시계와 콘텐츠 시간의 차이를 잰다 (탐색 중·멈춘 동안의 값은 쓰지 않는다)
-        const v = adapter.usesPageTime && A.noteContentTime ? adapter.video() : null;
-        if (v && d.advancing && !v.paused && !v.seeking && Number.isFinite(d.ms)) A.noteContentTime(d.ms, v.currentTime * 1000, now());
+        const v = adapter.usesPageTime ? adapter.video() : null;
+        // 재생 중인지는 영상 요소로 본다. 플레이어의 '재생 중' 이벤트(MEDIA_RESUMED 등)는 실제 디즈니+ 에서 오지 않을 수 있는데(이름이 다르거나 우리가 붙기 전에 이미 재생 중),
+        // 예전에는 그 이벤트만 믿어 시계가 0.5초 계단이 됐고, 더빙이 보고 사이마다 "멈춤"으로 보여 0.4초 틀고 0.1초 끄기를 되풀이했다
+        const playing = !!(v && !v.paused && !v.seeking && v.readyState >= 2);
+        A.shared.pageTime = { ms: d.ms, at: now(), advancing: !!d.advancing || playing };
+        if (d.evc) A.shared.pageEv = d.evc;
+        // 재생 중인 보고만으로 영상 요소 시계와 콘텐츠 시간의 차이를 잰다 (멈춘 동안·크게 옮긴 직후 1초의 값은 쓰지 않는다)
+        // 위치 값이 바뀐 순간의 보고(edge)는 페이지 쪽에서 같은 순간에 읽은 영상 시각(ct)을 함께 준다 — 같은 영상 요소일 때만 그것을 쓴다
+        const ctNow = v ? v.currentTime * 1000 : NaN;
+        const ctAt = Number.isFinite(d.ct) && Math.abs(d.ct - ctNow) < 400 ? d.ct : ctNow;
+        if (playing && Number.isFinite(d.ms) && now() - state.seekingAt > 1000) A.noteContentTime(d.ms, ctAt, now());
+        if (adapter.usesPageTime) { const m = A.shared.ctMap; dl('time' + (d.edge ? '* ' : ' ') + 'ms=' + fx(d.ms) + ' adv=' + (d.advancing ? 1 : 0) + ' ct=' + fx(ctAt) + ' k=' + fx(m.k) + '/' + m.samples.length + (Number.isFinite(m.pending) ? ' pend=' + fx(m.pending) : '')); }
         break;
       }
       case 'navigate': checkVideo(); break;
@@ -247,9 +265,17 @@
     loadMeta();
     registerPlayer();
   }
+  const attachedVideos = new WeakSet();
   function attachVideo(v) {
     state.videoEl = v;
     if (!v) return;
+    { const all = A.qsaDeep('video'); dl('video attached ' + (all.indexOf(v) + 1) + '/' + all.length + ' ' + describeEl(v) + ' rs=' + v.readyState); }
+    if (attachedVideos.has(v)) { registerPlayer(); return; } // 같은 영상 요소에 감시를 두 번 붙이지 않는다
+    attachedVideos.add(v);
+    // 진단 기록: 영상 요소 이벤트 (더빙이 끊길 때 플레이어가 무엇을 했는지 보려고)
+    ['play', 'pause', 'waiting', 'playing', 'seeked', 'ratechange', 'volumechange', 'emptied', 'stalled'].forEach((type) => v.addEventListener(type, () => {
+      dl('ev ' + type + ' ct=' + fx(v.currentTime * 1000) + ' rs=' + v.readyState + (type === 'volumechange' ? ' muted=' + (v.muted ? 1 : 0) + ' vol=' + fx(v.volume, 2) + (state.dubPlay ? ' (dub)' : '') : '') + (type === 'ratechange' ? ' rate=' + v.playbackRate : ''));
+    }));
     v.addEventListener('play', () => {
       if (now() < state.resumeByUsUntil) { state.resumeByUsUntil = 0; return; }
       // 사용자가 직접 재생을 눌렀다: 쉐도잉 대기/자동 일시정지 상태를 푼다
@@ -262,8 +288,9 @@
     });
     v.addEventListener('seeking', () => {
       // 스트리밍 플레이어는 재생 중에 스스로 아주 작게 위치를 고친다(버퍼 틈 건너뛰기 등). 사람이 옮긴 것이 아니므로 아무것도 건드리지 않는다
-      // (디즈니+ 에서 이것을 탐색으로 보고 더빙을 멈췄다가 다시 트느라 0.3초마다 내 더빙·원래 소리가 번갈아 나왔다)
+      // (이것을 탐색으로 보면 그때마다 더빙을 멈췄다가 다시 튼다)
       const jump = Number.isFinite(state.lastCT) ? Math.abs(v.currentTime - state.lastCT) : Infinity;
+      dl('ev seeking ct=' + fx(v.currentTime * 1000) + ' jump=' + fx(jump * 1000) + ' ' + (jump < 0.75 ? 'small(ignored)' : now() < state.seekByUsUntil ? 'ours' : 'user'));
       if (jump < 0.75) return;
       state.seekingAt = now(); // 디즈니+ 는 이 뒤 새 위치를 알려 줄 때까지 예전 위치가 남는다 (dubTick 참고)
       if (now() < state.seekByUsUntil) return;
@@ -273,7 +300,7 @@
       clearTimeout(state.ensureTimer); // 사용자가 직접 옮겼으면, 우리가 걸어 둔 "그 자리에서 재생되는지 확인" 재시도가 다시 끌고 가지 않게 한다
       // 더빙: 옮긴 순간 지금 소리를 멈추고 시계를 새로 잰다 (디즈니+ 는 새 위치를 조금 늦게 알려 준다 → 아래 dubTick 에서 기다린다)
       state.userSeekAt = now();
-      stopDubPlay();
+      stopDubPlay('seek');
       if (dubClock) dubClock.reset();
     });
     registerPlayer();
@@ -787,7 +814,9 @@
   function setMeta(m) {
     if (!m || !m.title) return;
     state.meta = { title: String(m.title), episode: String(m.episode || '') };
-    if (ui.title) { ui.title.textContent = state.meta.title + (state.meta.episode ? ' · ' + state.meta.episode : ''); ui.title.title = ui.title.textContent; }
+    const name = state.meta.title + (state.meta.episode ? ' · ' + state.meta.episode : '');
+    if (ui.panel) ui.panel.dataset.title = name;
+    if (ui.status) ui.status.title = name;
   }
   async function loadMeta() {
     const token = state.runToken;
@@ -816,14 +845,15 @@
     document.documentElement.append(ui.nativeStyle);
 
     ui.panel = el('div', { id: 'st-panel', class: 'st-pf-' + adapter.name });
-    ui.title = el('div', { class: 'st-brand', text: 'SubTutor' });
+    // 맨 왼쪽: 내 더빙 재생 켬/끔 (예전에는 작품 이름이 있던 자리 — 이름은 상태줄에 마우스를 올리면 보인다)
+    ui.dubToggle = el('button', { class: 'st-dub-toggle', role: 'switch', onclick: () => setDubPlayback(settings.dubPlayback === false) }, [el('span', { class: 'st-dub-toggle-knob' }), el('span', { class: 'st-dub-toggle-text' })]);
     ui.btnAP = el('button', { class: 'st-mode', title: '자동 일시정지 (P): 자막이 끝나면 멈춥니다. F로 다시 듣기', onclick: () => setMode('autoPause', !settings.autoPause) }, 'AP');
     ui.btnShadow = el('button', { class: 'st-mode st-shadow', title: '따라하기 (W): 자막이 끝나면 그 자막 길이만큼 쉬었다가 다음 자막으로 이어 재생합니다', onclick: () => setMode('shadowing', !settings.shadowing) }, '따라하기');
     ui.shadowSec = el('select', { class: 'st-shadow-sec', title: '따라하기: 자막이 끝난 뒤 쉬는 시간', onchange: (e) => saveSettings(shadowPausePatch(e.target.value)) });
     shadowPauseOptions(false).forEach((g) => ui.shadowSec.append(g));
     ui.btnSettings = el('button', { class: 'st-icon', title: '설정', onclick: () => { ui.settings.classList.toggle('st-hidden'); syncSettingsForm(); } }, '⚙');
     ui.btnClose = el('button', { class: 'st-icon', title: '패널 닫기 (`)', onclick: () => setPanelOpen(false) }, '✕');
-    const head = el('div', { class: 'st-head' }, [ui.title, ui.btnAP, ui.btnShadow, ui.shadowSec, ui.btnSettings, ui.btnClose]);
+    const head = el('div', { class: 'st-head' }, [ui.dubToggle, ui.btnAP, ui.btnShadow, ui.shadowSec, ui.btnSettings, ui.btnClose]);
     ui.status = el('div', { class: 'st-status' });
     ui.list = el('div', { class: 'st-list' });
     ui.list.addEventListener('click', (e) => {
@@ -849,6 +879,7 @@
     ui.settings = buildSettings();
     ui.wordView = el('div', { class: 'st-wordview st-hidden' });
     ui.panel.append(head, ui.status, ui.list, ui.wordView, ui.settings, ui.foot);
+    if (state.meta) setMeta(state.meta); // 패널보다 제목을 먼저 알았으면 지금 붙인다
 
     ui.toggle = el('button', { id: 'st-toggle', title: 'SubTutor 자막 패널 열기 (`)', onclick: () => setPanelOpen(true) }, '‹');
     document.body.append(ui.panel, ui.toggle);
@@ -1043,8 +1074,24 @@
     updateModeUI();
     renderOverlay(true);
   }
+  // 패널 맨 위의 더빙 켬/끔: 켜면 ★ 로 고른 녹음이 있는 줄은 내 목소리, 끄면 원래 소리만
+  function setDubPlayback(on) {
+    saveSettings({ dubPlayback: !!on });
+    if (!on) stopDubPlay('toggle');
+    dl('toggle dubPlayback=' + !!on);
+  }
+  function updateDubToggle() {
+    if (!ui.dubToggle) return;
+    const on = settings.dubPlayback !== false;
+    const n = state.dubSegs.filter((s) => chosenTake(s)).length;
+    ui.dubToggle.classList.toggle('on', on);
+    ui.dubToggle.setAttribute('aria-checked', String(on));
+    ui.dubToggle.querySelector('.st-dub-toggle-text').textContent = on ? '더빙 켬' : '더빙 끔';
+    ui.dubToggle.title = (on ? '더빙 켬: 녹음한 줄(★)은 내 목소리로 재생합니다' : '더빙 끔: 원래 영상 소리만 재생합니다') + ' · 이 영상에서 더빙한 줄 ' + n + '개 · 누르면 ' + (on ? '끕니다' : '켭니다');
+  }
   function updateModeUI() {
     if (!ui.root) return;
+    updateDubToggle();
     ui.btnAP.classList.toggle('on', !!settings.autoPause);
     ui.btnShadow.classList.toggle('on', !!settings.shadowing);
     ui.ovModes.textContent = '';
@@ -1337,7 +1384,7 @@
       el('div', { class: 'st-btn-row' }, [
         el('button', { class: 'st-btn st-primary', onclick: () => bg({ type: 'openSite' }).catch(() => {}) }, '웹에서 저장 목록 · 퀴즈 열기'),
         el('button', { class: 'st-btn', onclick: () => setEnabled(false) }, '이 사이트에서 SubTutor 끄기'),
-        el('button', { class: 'st-btn', onclick: () => { f.diag.textContent = diagnostics(); navigator.clipboard && navigator.clipboard.writeText(f.diag.textContent).then(() => toast('진단 정보를 복사했습니다'), () => {}); } }, '진단 정보'),
+        el('button', { class: 'st-btn st-diag-btn', title: '지금 상태와 최근 40초의 더빙·재생 기록을 복사합니다 (문제가 생긴 직후에 누르세요)', onclick: copyDiagnostics }, '진단 정보'),
       ]),
       f.diag,
     );
@@ -1362,6 +1409,20 @@
     f.offset.value = state.offsetMs;
     f.offset.title = state.offsetMs ? (state.offsetSource === 'auto' ? '플랫폼 자막과 대조해 자동 감지한 값' : '직접 입력한 값') + ' · 자막이 소리보다 빠르면 음수' : '자막이 소리보다 빠르면 음수, 늦으면 양수. 플랫폼 자막이 켜져 있으면 자동 감지';
   }
+  function copyDiagnostics() {
+    const f = ui.form;
+    const text = diagnostics();
+    if (f && f.diag) f.diag.textContent = text;
+    const fallback = () => { // 클립보드 API 가 막히면 상자의 글을 골라 복사한다
+      try {
+        const r = document.createRange(); r.selectNodeContents(f.diag);
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+        toast(document.execCommand('copy') ? '진단 정보를 복사했습니다' : '복사하지 못했습니다 — 상자의 글을 직접 복사하세요', 3000);
+      } catch (e) { toast('복사하지 못했습니다 — 상자의 글을 직접 복사하세요', 3000); }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => toast('진단 정보를 복사했습니다 (최근 40초 기록 포함) — 그대로 붙여 넣어 보내 주세요', 3000), fallback);
+    else fallback();
+  }
   function diagnostics() {
     const v = adapter.video();
     return [
@@ -1373,9 +1434,12 @@
       'offset=' + state.offsetMs + ' (' + state.offsetSource + ') samples=' + JSON.stringify(state.alignSamples),
       'meta=' + JSON.stringify(state.meta) + ' status=' + state.statusText,
       'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + shadowPauseValue() + ' audio=' + settings.audioMode + ' rate=' + state.rate + ' clearance=' + state.clearanceCur,
+      'clock ' + (adapter.usesPageTime ? 'k=' + fx(A.shared.ctMap.k) + ' samples=' + A.shared.ctMap.samples.length + ' resets=' + A.shared.ctMap.resets + ' precise=' + A.preciseClock() + ' playerEvents=' + JSON.stringify(A.shared.pageEv) + ' report=' + fx(A.shared.pageTime.ms) + ' (' + fx(now() - A.shared.pageTime.at) + 'ms ago, adv=' + A.shared.pageTime.advancing + ')' : 'video element') + ' raw=' + fx(rawMs()) + ' videosDeep=' + A.qsaDeep('video').length + (v ? ' muted=' + v.muted + ' vol=' + fx(v.volume, 2) + ' rate=' + v.playbackRate : ''),
       'dub segs=' + state.dubSegs.length + ' chosen=' + state.dubSegs.filter((s) => chosenTake(s)).length + ' playback=' + (settings.dubPlayback !== false) + ' play=' + (state.dubPlay ? state.dubPlay.take.id + '@' + state.dubPlay.offset.toFixed(2) : '-') + ' rec=' + (state.dubRec ? state.dubRec.phase : '-') + ' ladder=' + (state.dubLadder ? state.dubLadder.step : '-') + ' mic=' + (state.dubMic ? 'open' : 'closed') + ' ctx=' + (dubCtx ? dubCtx.state : '-') + ' resyncs=' + dubRestartsTotal,
       'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' clip=' + JSON.stringify(state.clip) + ' capturing=' + !!state.capturing + ' tabId=' + state.tabId,
       'layout panel=' + !!(settings.panelOpen && state.active) + ' videoRight=' + (v ? Math.round(v.getBoundingClientRect().right) : '-') + '/' + window.innerWidth + ' fit=' + (fit.el ? describeEl(fit.el) : '-') + ' shadowRoots=' + (adapter.deep ? A.deepRoots().length - 1 : 0) + ' nativeHidden=' + nativeHiddenCount() + ' cueEl=' + (adapter.nativeCueSelector ? A.qsaDeep(adapter.nativeCueSelector).map(describeEl).slice(0, 2).join(',') : '-'),
+      '── 최근 40초 기록 (초 · 0 = 복사한 순간) ──',
+      dlogText(40) || '(기록 없음)',
     ].join('\n');
   }
 
@@ -1458,6 +1522,7 @@
     if (prev && +prev.dataset.i !== i) prev.classList.remove('active');
     if (i < 0 || !ui.rows[i]) return;
     ui.rows[i].classList.add('active');
+    if (dubModeOn()) return; // 더빙 모드에서는 목록이 지금 줄을 따라 움직이지 않는다 — 스크롤은 더빙 칸에 맡긴다 (placeDubBox)
     if (force || now() - state.userScrollAt > 4000) {
       const row = ui.rows[i];
       const top = row.offsetTop - ui.list.clientHeight / 2 + row.offsetHeight / 2;
@@ -1966,6 +2031,7 @@
   }
   // 목록: 더빙 녹음이 있는 줄에 🎙 (★ 로 고른 구간은 진하게 + 왼쪽 노란 줄)
   function markDubRows() {
+    updateDubToggle();
     if (!ui.rows || !ui.rows.length) return;
     const has = new Map();
     for (const s of state.dubSegs) if (s.takes.length) has.set(s.cueStart, has.get(s.cueStart) === 'chosen' || chosenTake(s) ? 'chosen' : 'takes');
@@ -2035,9 +2101,13 @@
     if (!row) return;
     if (row.nextSibling !== ui.dubbox) row.after(ui.dubbox);
     ui.dubbox.classList.remove('st-hidden');
-    if (scroll) {
-      const L = ui.list, top = ui.rows[i].offsetTop - 6, bottom = ui.dubbox.offsetTop + ui.dubbox.offsetHeight + 6;
-      if (top < L.scrollTop || bottom > L.scrollTop + L.clientHeight) L.scrollTo({ top: Math.max(0, Math.min(top, bottom - L.clientHeight)), behavior: 'auto' });
+    // 칸이 패널 안에 다 보이는 동안은 목록을 움직이지 않는다 (줄을 넘길 때마다 조금씩 움직이면 정신없고 녹음 버튼을 누르기 힘들다).
+    // 칸 아랫변이 패널 바닥에 닿거나 구간 첫 줄이 위로 가려졌을 때만 구간 첫 줄을 패널 맨 위로 한 번에 올린다.
+    // scroll: true = 줄을 옮겼을 때(늘 적용), 'auto' = 칸 내용만 바뀌었을 때(방금 손으로 스크롤했으면 건드리지 않는다)
+    if (scroll === true || (scroll === 'auto' && now() - state.userScrollAt > 4000)) {
+      const L = ui.list, lr = L.getBoundingClientRect();
+      const rowTop = ui.rows[i].getBoundingClientRect().top, boxBottom = ui.dubbox.getBoundingClientRect().bottom;
+      if (lr.height > 0 && (rowTop < lr.top || boxBottom > lr.bottom)) L.scrollTo({ top: Math.max(0, L.scrollTop + rowTop - lr.top - 6), behavior: 'smooth' });
     }
   }
   // 더빙 모드에서는 그 구간만 계속 반복한다 (① 의 배속 버튼으로 고른 속도로)
@@ -2326,25 +2396,37 @@
     }
     return null;
   }
-  let dubLastRaw = NaN, dubStall = 0;
+  let dubLastRaw = NaN, dubLastCT = NaN, dubStall = 0, dubLogTick = 0, dubLastTgt = '';
   function dubTick(raw, paused) {
     const v = adapter.video();
     const rate = (v && v.playbackRate) || 1;
-    // 재생 중인데 위치가 그대로면 멈춘 것으로 본다: 디즈니+ 는 탐색 직후 새 위치를 조금 늦게 알려 주고(그사이 예전 위치가 남는다), 버퍼링 때도 그렇다
-    dubStall = !paused && raw === dubLastRaw ? dubStall + 1 : 0;
-    dubLastRaw = raw;
+    // 재생 중인데 영상 위치가 그대로면 멈춘 것(버퍼링·탐색 대기)으로 본다. 판단은 영상 요소의 시계로 한다 —
+    // 디즈니+ 가 알려 주는 위치는 0.5초마다 끊어서 오므로, 그것으로 판단하면 보고 사이마다 "멈춤"이 되어 더빙을 끊었다 다시 틀었다
+    const ct = v ? v.currentTime : NaN;
+    const same = Number.isFinite(ct) ? ct === dubLastCT : raw === dubLastRaw;
+    dubStall = !paused && same ? dubStall + 1 : 0;
+    dubLastRaw = raw; dubLastCT = ct;
     // 디즈니+ 는 재생 위치를 0.5초쯤 간격으로 끊어서 알려 줘, 그대로 쓰면 시각이 톱니처럼 뒤로 튄다.
     // 예전에는 그때마다 녹음을 되감아 "Na-naice to-to" 처럼 말머리가 반복됐다 → 최근 1.5초의 중앙값으로 고른 시계를 쓴다
     const t = dubClock ? dubClock.update(raw, now(), paused || dubStall >= 3, rate) : raw;
-    // 디즈니+: 사용자가 옮긴 뒤 플레이어가 새 위치를 알려 줄 때까지는 예전 위치가 계속 흘러간다 → 그동안은 더빙을 시작하지도 이어 가지도 않는다
-    const staleAfterSeek = adapter.usesPageTime && state.seekingAt > 0 && A.shared.pageTime.at < state.seekingAt && now() - state.seekingAt < 1500;
+    // 디즈니+: 정밀 시계(영상 요소 시각 + 차이)를 아직 못 쓰면, 사용자가 옮긴 뒤 플레이어가 새 위치를 알려 줄 때까지 예전 위치가 계속 흘러간다
+    // → 그동안은 더빙을 시작하지도 이어 가지도 않는다 (정밀 시계는 옮기는 즉시 새 위치를 따라가므로 기다리지 않는다)
+    const staleAfterSeek = adapter.usesPageTime && !A.preciseClock() && state.seekingAt > 0 && A.shared.pageTime.at < state.seekingAt && now() - state.seekingAt < 1500;
     const tgt = paused || dubStall >= 6 || staleAfterSeek ? null : dubTarget(t); // 0.24초 넘게 멈춰 있으면 더빙도 멈춘다 (영상이 다시 흐르면 그 자리부터)
     const cur = state.dubPlay;
+    // 진단 기록: 더빙할 구간에 들고 날 때, 그리고 더빙 중에는 0.24초마다 시계 상태를 남긴다
+    const tgtId = tgt ? tgt.take.id : '';
+    if (tgtId !== dubLastTgt || ((cur || tgt) && ++dubLogTick % 6 === 0)) {
+      const pos = cur && dubCtx ? (cur.offset + (dubCtx.currentTime - cur.ctxAt) * cur.rate) * 1000 : NaN;
+      dl((tgtId !== dubLastTgt ? 'tgt ' + (tgtId || 'none') : 's') + ' raw=' + fx(raw) + ' t=' + fx(t) + ' ct=' + fx(ct * 1000) + ' p=' + (paused ? 1 : 0) + ' stall=' + dubStall + (staleAfterSeek ? ' stale' : '') +
+        (cur ? ' want=' + fx(t - cur.take.clipStartMs) + ' pos=' + fx(pos) + ' miss=' + (cur.miss || 0) : '') + (v ? ' m=' + (v.muted ? 1 : 0) + ' rs=' + v.readyState : '') + (adapter.usesPageTime ? ' precise=' + (A.preciseClock() ? 1 : 0) : ''));
+      dubLastTgt = tgtId;
+    }
     if (!tgt) {
       if (cur) {
         const beyond = t >= cur.take.clipStartMs + cur.take.ms - 40 || t < cur.take.clipStartMs - 300;
         cur.miss = (cur.miss || 0) + 1;
-        if (paused || beyond || cur.miss >= 4) stopDubPlay(); // 잠깐 빈 틱 하나로 끊었다 다시 틀면 소리가 깜빡인다
+        if (paused || beyond || cur.miss >= 4) stopDubPlay(paused ? 'paused' : beyond ? 'beyond' : 'miss:' + (dubStall >= 6 ? 'stall' : staleAfterSeek ? 'stale' : 'nowin')); // 잠깐 빈 틱 하나로 끊었다 다시 틀면 소리가 깜빡인다
       }
       return;
     }
@@ -2356,19 +2438,20 @@
       const d = want - pos;
       // 정말 어긋났을 때만(탐색·버퍼링) 다시 맞춘다: 큰 점프는 바로, 0.45초 넘는 어긋남은 세 번 연달아일 때. 작은 흔들림에 되감으면 같은 소리가 반복된다
       cur.off = Math.abs(d) > 0.45 ? (cur.off || 0) + 1 : 0;
-      if (Math.abs(d) > 1.5 || cur.off >= 3 || Math.abs(cur.rate - rate) > 0.01) { dubRestartsTotal++; startDubSource(tgt, want, rate, true); }
+      if (Math.abs(d) > 1.5 || cur.off >= 3 || Math.abs(cur.rate - rate) > 0.01) { dubRestartsTotal++; startDubSource(tgt, want, rate, true, 'd=' + fx(d * 1000) + (Math.abs(cur.rate - rate) > 0.01 ? ' rate' : '')); }
       else if (cur.videoEl && !cur.videoEl.muted) cur.videoEl.muted = true; // 플레이어가 소리를 되살리면 다시 끈다
       return;
     }
     if (dubStall > 0) return; // 새 더빙은 위치가 실제로 흐를 때만 시작한다 (탐색 직후 예전 위치로 잘못 시작하지 않게)
     startDubSource(tgt, want, rate, false);
   }
-  function startDubSource(tgt, offsetSec, rate, isRestart) {
+  function startDubSource(tgt, offsetSec, rate, isRestart, why) {
     const buf = dubReady.get(tgt.take.id);
-    if (!buf) { dubBuffer(tgt.take.id); return; } // 디코딩이 끝나면 다음 틱에 시작한다
+    if (!buf) { dubBuffer(tgt.take.id); dlOnce('dub wait decode ' + tgt.take.id + (dubBroken.has(tgt.take.id) ? ' (broken)' : '')); return; } // 디코딩이 끝나면 다음 틱에 시작한다
     if (offsetSec >= buf.duration - 0.04) return;
     const ctx = dubAudioCtx();
     if (ctx.state !== 'running') { // 소리를 낼 수 없으면 원래 소리를 끄지 않는다 (페이지를 한 번 누르면 풀린다)
+      dlOnce('dub wait audio ' + ctx.state);
       if (!dubLockHinted) { dubLockHinted = true; chip('info', '🎙 내 더빙을 들으려면 화면을 한 번 누르세요 (브라우저가 클릭 전에는 소리를 막습니다)', 6000); }
       return;
     }
@@ -2388,12 +2471,30 @@
       if (!dubGuarded.has(v)) { dubGuarded.add(v); v.addEventListener('volumechange', () => { const p = state.dubPlay; if (p && p.videoEl === v && !v.muted) v.muted = true; }); }
     }
     const restarts = isRestart && prev ? (prev.restarts || 0) + 1 : 0;
+    dl('dub ' + (isRestart ? 'restart ' + (why || '') : 'start') + ' take=' + tgt.take.id + ' at=' + fx(at * 1000) + ' rate=' + rate);
+    if (!isRestart) noteDubBlink(tgt.take.id);
     state.dubPlay = { seg: tgt.seg, take: tgt.take, src, ctxAt: ctx.currentTime, offset: at, rate, restoreMuted, videoEl: v, restarts, off: 0 };
     if (ui.ovDub) { ui.ovDub.classList.add('on'); ui.ovDub.dataset.take = tgt.take.id; ui.ovDub.dataset.restarts = String(restarts); }
   }
-  function stopDubPlay() {
+  // 깜빡임 감지: 멈춘 까닭이 탐색·멈춤·구간 끝이 아닌데 1초 안에 같은 녹음을 다시 틀면 한 번의 "깜빡임"이다. 5초 안에 두 번이면 기록하고 알린다
+  let dubLastStop = null, dubBlinkToastAt = -1e9;
+  const dubBlinks = [];
+  function noteDubBlink(takeId) {
+    const s = dubLastStop, t = now();
+    if (!s || s.take !== takeId || t - s.at > 1000 || /^(seek|paused|beyond)/.test(s.reason)) return;
+    dubBlinks.push(t);
+    while (dubBlinks.length && t - dubBlinks[0] > 5000) dubBlinks.shift();
+    if (dubBlinks.length < 2) return;
+    dl('FLICKER ' + dubBlinks.length + ' blinks in 5s (last stop: ' + s.reason + ')');
+    if (t - dubBlinkToastAt > 60000) { dubBlinkToastAt = t; toast('🐞 내 더빙이 자꾸 끊깁니다. ⚙ 설정 › 진단 정보를 누르면 기록이 복사돼요 — 붙여 넣어 보내 주세요', 8000); }
+  }
+  function stopDubPlay(reason) {
     const p = state.dubPlay;
     if (!p) return;
+    // 부른 곳을 기록한다 (까닭을 넘기지 않은 곳은 함수 이름으로)
+    const why = reason || ((/\n[^\n]*\n\s*at (?:Object\.)?([\w$.]+)/.exec(new Error().stack || '') || [])[1] || 'other');
+    dl('dub stop ' + why + ' take=' + p.take.id);
+    dubLastStop = { take: p.take.id, at: now(), reason: why };
     state.dubPlay = null;
     try { p.src.stop(); } catch (e) { /* ignore */ }
     if (p.videoEl) p.videoEl.muted = p.restoreMuted;
@@ -2423,14 +2524,14 @@
     const nowRate = L ? L.rates[L.step] : state.dubLoopRate;
     box.append(el('div', { class: 'st-dub-step' }, [
       el('span', { class: 'st-dub-n' }, '1'),
-      withProps(el('button', { class: 'st-btn st-mini st-dub-ladder' + (L ? ' on' : ''), title: '설정한 단계대로 한 번씩: ' + ladderRates().map(rateText).join(' → ') + '배', onclick: runDubLadder }, L ? '◼ 멈춤' : '▶ 배속 연습'), { disabled: !!R }),
+      withProps(el('button', { class: 'st-btn st-mini st-dub-ladder' + (L ? ' on' : ''), 'data-key': 'J', title: '설정한 단계대로 한 번씩: ' + ladderRates().map(rateText).join(' → ') + '배 (J)', onclick: runDubLadder }, L ? '◼ 멈춤' : '▶ 배속 연습'), { disabled: !!R }),
     ].concat(dubPracticeRates().map((x) => withProps(el('button', { class: 'st-dub-rate st-dub-play-rate' + (Math.abs(x - nowRate) < 0.005 ? ' on' : ''), 'data-rate': rateText(x), title: rateText(x) + '배속으로 이 구간 반복', onclick: () => setDubLoopRate(x) }, rateText(x)), { disabled: busy })))));
     // ② 녹음 · 녹음 배속
     const recRate = dubRecRate();
     const recLabel = !R ? '● 녹음' : (R.phase === 'listen' ? '듣는 중…' : (R.phase === 'count' ? String(R.count) : (R.phase === 'rec' ? '◼ 녹음 중' : (R.phase === 'save' ? '저장 중…' : '마이크…'))));
     box.append(el('div', { class: 'st-dub-step' }, [
       el('span', { class: 'st-dub-n' }, '2'),
-      withProps(el('button', { class: 'st-btn st-mini st-dub-rec' + (R ? ' on' : ''), title: rateText(recRate) + '배속으로 녹음 (원래 소리는 끄고, 다시 누르면 취소)', onclick: recordDubTake }, recLabel), { disabled: !!L || !!(R && R.phase === 'save') }),
+      withProps(el('button', { class: 'st-btn st-mini st-dub-rec' + (R ? ' on' : ''), 'data-key': 'K', title: rateText(recRate) + '배속으로 녹음 (K · 원래 소리는 끄고, 다시 누르면 취소)', onclick: recordDubTake }, recLabel), { disabled: !!L || !!(R && R.phase === 'save') }),
     ].concat(dubRecRates().map((x) => withProps(el('button', { class: 'st-dub-rate st-dub-rec-rate' + (Math.abs(x - recRate) < 0.005 ? ' on' : ''), 'data-rate': rateText(x), title: rateText(x) + '배속으로 녹음' + (x !== 1 ? ' — 저장할 때 원래 속도로 맞춥니다' : ''), onclick: () => setDubRecRate(x) }, rateText(x)), { disabled: busy })))));
     // ③ 녹음 목록 (있을 때만)
     if (seg && seg.takes.length) {
@@ -2449,7 +2550,7 @@
         })),
       ]));
     }
-    if (box.parentElement) placeDubBox(false);
+    if (box.parentElement) placeDubBox('auto');
   }
 
   // ───────────── 단어 목록 (패널) ─────────────
@@ -2631,7 +2732,7 @@
     }
     if (isEnabled() && dubModeOn()) dubLoopTick(raw, paused);
     if (isEnabled() && (state.dubPlay || state.dubPreview || state.dubSegs.length)) dubTick(raw, paused);
-    else if (state.dubPlay) stopDubPlay();
+    else if (state.dubPlay) stopDubPlay('disabled');
     if (paused !== state.lastPaused) { state.lastPaused = paused; renderOverlay(true); }
     else renderOverlay(false);
     if (state.watched.size && now() - state.statsSavedAt > 20000) saveEpisodeStats(false);
@@ -2651,8 +2752,14 @@
   // Shift 와 함께: < 한 단계 느리게 · > 한 단계 빠르게. 단계는 설정 › 속도 사다리의 배속을 그대로 쓴다.
   // 유튜브는 Shift+< , Shift+> 가 이미 유튜브 자체 기능이라 건드리지 않는다 (두 번 적용되는 것을 막는다).
   const SHIFT_ACTIONS = RATE_UI ? { Comma: () => stepRate(-1), Period: () => stepRate(1) } : {};
+  // 더빙 칸이 열려 있을 때만: J ▶ 배속 연습 · K ● 녹음 (버튼과 같다 — 한 번 더 누르면 멈춤/취소). 그 밖에서는 플레이어에 그대로 넘긴다 (유튜브는 J·K 가 자체 단축키)
+  const DUB_KEYS = {
+    KeyJ: () => { if (!state.dubRec) runDubLadder(); },
+    KeyK: () => { if (!state.dubLadder && !(state.dubRec && state.dubRec.phase === 'save')) recordDubTake(); },
+  };
   function keyAction(e) {
     if (e.code === 'Comma' || e.code === 'Period') return (e.shiftKey && SHIFT_ACTIONS[e.code]) || null;
+    if (DUB_KEYS[e.code]) return dubModeOn() ? DUB_KEYS[e.code] : null;
     return KEY_ACTIONS[e.code] || null;
   }
   function shouldHandleKey(e) {

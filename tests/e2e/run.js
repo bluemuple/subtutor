@@ -89,7 +89,10 @@ async function runDisney() {
       await waitFor(() => dp.$$eval('.st-row', (r) => r.length === 10), 20000, 'disney rows');
       const status = await dp.$eval('.st-status', (e) => e.textContent);
       assert(/영어 10줄/.test(status) && /한국어 10줄 연결/.test(status), 'status: ' + status);
-      await waitFor(() => dp.$eval('.st-brand', (e) => /Mock Moana/.test(e.textContent)), 8000, 'disney title');
+      await waitFor(() => dp.$eval('#st-panel', (e) => /Mock Moana/.test(e.dataset.title || '')), 8000, 'disney title');
+      // 패널 맨 위 왼쪽은 작품 이름 대신 더빙 켬/끔 (이름은 상태줄에 마우스를 올리면 보인다)
+      const head = await dp.$eval('.st-head', (h) => ({ first: h.firstElementChild.className, text: h.firstElementChild.textContent, brand: !!h.querySelector('.st-brand'), tip: document.querySelector('.st-status').title }));
+      assert(/st-dub-toggle/.test(head.first) && /더빙 켬/.test(head.text) && !head.brand && /Mock Moana/.test(head.tip), 'dub toggle where the title was: ' + JSON.stringify(head));
     });
     await step('디즈니+(모의): 오른쪽 컨트롤 묶음 맨 앞에 배속 버튼, 바로 오른쪽에 ST 버튼', async () => {
       await waitFor(() => dp.$('.st-rate'), 8000, 'rate control (disney)');
@@ -175,7 +178,7 @@ async function runDisney() {
       await waitFor(() => dp.$('.st-row.st-dubbed'), 20000, 'dubbed line marked after reload');
       await dp.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.muted = false; v.currentTime = 4.6; });
       await sleep(600);
-      await dp.click('.st-brand'); // 재생 버튼을 누르듯 화면을 한 번 누른다 (브라우저 자동 재생 규칙)
+      await dp.click('.st-status'); // 재생 버튼을 누르듯 화면을 한 번 누른다 (브라우저 자동 재생 규칙)
       await dp.evaluate(() => document.querySelector('video').play());
       const tl = [];
       const t0 = Date.now();
@@ -190,6 +193,50 @@ async function runDisney() {
       assert(flips === 2, '더빙이 한 번 켜지고 한 번 꺼진다: 바뀐 횟수 ' + flips);
       const mutedAt = tl.filter((x) => x[1]).map((x) => x[0]);
       assert(Math.min(...mutedAt) > 5.5 && Math.max(...mutedAt) < 8.8, 'muted only around the line: ' + Math.min(...mutedAt).toFixed(2) + '–' + Math.max(...mutedAt).toFixed(2));
+    });
+    await step('디즈니+(모의) 플레이어가 재생·위치 이벤트를 하나도 주지 않아도(실제 디즈니+): R 은 지금 줄에서 열리고, 내 더빙은 한 번 켜지고 한 번 꺼진다 (0.4초마다 깜빡이지 않음) · 진단 기록 · 맨 위 "더빙 끔"이면 원래 소리만', async () => {
+      await dp.goto('https://www.disneyplus.com/play/mockdisney1?events=none', { waitUntil: 'domcontentloaded' });
+      await dp.waitForSelector('#st-panel', { timeout: 20000 });
+      await waitFor(() => dp.$('.st-row.st-dubbed'), 20000, 'dubbed line marked (quiet player)');
+      await dp.click('.st-status'); // 사용자 동작 한 번 (자동 재생 규칙)
+      await dp.evaluate(() => { const v = document.querySelector('video'); v.muted = false; v.currentTime = 0.2; v.play(); });
+      await sleep(1300);
+      await dp.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 6.3; });
+      await sleep(700);
+      await dp.keyboard.press('KeyR');
+      const row = await waitFor(() => dp.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox'); return b && b.previousElementSibling.dataset.i; }), 3000, 'dub section (quiet player)');
+      assert(row === '1', '6.3초(2번 줄)에서 R → 2번 줄 아래 (예전에는 시계가 0.45초 늦게 잡혀 1번 줄에 열렸다): ' + row);
+      await dp.keyboard.press('KeyR');
+      await waitFor(() => dp.evaluate(() => !document.querySelector('.st-list > .st-dubbox')), 3000, 'dub mode closed (quiet)');
+      await dp.evaluate(() => document.querySelector('video').pause());
+      await waitFor(() => dp.evaluate(() => !document.querySelector('.st-ov-dub').classList.contains('on') && !document.querySelector('video').muted), 3000, 'dub off while paused (quiet)');
+      // 0.02초마다 [위치, 음소거, 내 더빙 캡슐] 을 기록하며 4.6초부터 4.8초 동안 재생
+      const run = () => dp.evaluate(() => new Promise((res) => {
+        const v = document.querySelector('video'), ov = document.querySelector('.st-ov-dub'), tl = [];
+        const timer = setInterval(() => tl.push([v.currentTime, v.muted, ov.classList.contains('on')]), 20);
+        v.muted = false; v.currentTime = 4.6; v.play();
+        setTimeout(() => { clearInterval(timer); v.pause(); res(tl); }, 4800);
+      }));
+      const flipsOf = (tl) => tl.filter((x, k) => k && x[2] !== tl[k - 1][2]);
+      const tl = await run();
+      const on = tl.filter((x) => x[2]);
+      assert(on.length > 80 && flipsOf(tl).length === 2, '내 더빙이 한 번 켜지고 한 번 꺼진다: on ' + on.length + ' samples, 바뀐 곳 ' + flipsOf(tl).map((x) => x[0].toFixed(2) + (x[2] ? '+' : '-')).join(' '));
+      const mutedAt = tl.filter((x) => x[1]).map((x) => x[0]);
+      assert(Math.min(...mutedAt) > 5.5 && Math.max(...mutedAt) < 8.6, 'muted only around the line: ' + Math.min(...mutedAt).toFixed(2) + '–' + Math.max(...mutedAt).toFixed(2));
+      // ⚙ › 진단 정보: 시계 상태 + 최근 40초 기록 (켜고 끈 까닭), 깜빡임 표시 없음
+      const diag = await dp.evaluate(() => { const b = [...document.querySelectorAll('.st-settings button')].find((x) => x.textContent === '진단 정보'); b.click(); return document.querySelector('.st-settings .st-diag').textContent; });
+      const clockLine = diag.split('\n').find((l) => l.startsWith('clock')) || '';
+      assert(/precise=true/.test(clockLine) && /playerEvents=\{"t":0,"p":0,"r":0,"s":0/.test(clockLine), 'clock line: ' + clockLine);
+      assert(/최근 40초 기록/.test(diag) && /dub start take=/.test(diag) && /dub stop beyond/.test(diag) && /time\* ms=/.test(diag) && !/FLICKER/.test(diag), 'log: ' + diag.split('\n').filter((l) => /dub |FLICKER/.test(l)).join(' | '));
+      // 맨 위 "더빙 끔" → 원래 소리만, 다시 켜면 내 더빙
+      await dp.click('.st-dub-toggle');
+      await waitFor(() => dp.$eval('.st-dub-toggle', (b) => !b.classList.contains('on') && /더빙 끔/.test(b.textContent)), 2000, 'dub toggle off');
+      const off = await run();
+      assert(off.every((x) => !x[2] && !x[1]), '더빙 끔: 내 더빙도 음소거도 없다');
+      await dp.click('.st-dub-toggle');
+      await waitFor(() => dp.$eval('.st-dub-toggle', (b) => b.classList.contains('on') && /더빙 켬/.test(b.textContent)), 2000, 'dub toggle on');
+      const again = await run();
+      assert(again.filter((x) => x[2]).length > 80 && flipsOf(again).length === 2, '다시 켜면 내 더빙 (한 번 켜지고 한 번 꺼짐): ' + flipsOf(again).length);
     });
     await step('디즈니+(모의) 따라하기: 이어 붙은 자막에서도 멈춘 동안 따라 할 줄이 화면·패널에 남고, 그 자막 길이만큼 쉰 뒤 이어 간다', async () => {
       await dp.goto('https://www.disneyplus.com/play/mockdisney2', { waitUntil: 'domcontentloaded' });
@@ -296,7 +343,14 @@ async function runDisney() {
       assert(r.params.showAllSubDubTracks === true, 'showAllSubDubTracks');
     });
     await step('제목/에피소드가 플레이어 API에서 읽힌다', async () => {
-      await waitFor(() => page.$eval('.st-brand', (e) => /Mock Show/.test(e.textContent) && /S1:E2/.test(e.textContent)), 8000, 'title');
+      await waitFor(() => page.$eval('#st-panel', (e) => /Mock Show/.test(e.dataset.title || '') && /S1:E2/.test(e.dataset.title || '')), 8000, 'title');
+      // 맨 위 왼쪽의 더빙 켬/끔: 누르면 설정이 바뀌고 다시 누르면 돌아온다
+      const dubPlaybackSaved = () => sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings.dubPlayback);
+      assert(await page.$eval('.st-head > :first-child', (b) => b.classList.contains('st-dub-toggle') && b.classList.contains('on') && b.getAttribute('aria-checked') === 'true'), 'dub toggle on by default');
+      await page.click('.st-dub-toggle');
+      await waitFor(async () => (await page.$eval('.st-dub-toggle', (b) => !b.classList.contains('on') && /더빙 끔/.test(b.textContent))) && (await dubPlaybackSaved()) === false, 3000, 'toggle off');
+      await page.click('.st-dub-toggle');
+      await waitFor(async () => (await page.$eval('.st-dub-toggle', (b) => b.classList.contains('on') && /더빙 켬/.test(b.textContent))) && (await dubPlaybackSaved()) === true, 3000, 'toggle on again');
     });
     await step('플랫폼 기본 자막이 숨겨진다', async () => {
       const vis = await page.$eval('.player-timedtext', (e) => getComputedStyle(e).visibility);
@@ -852,6 +906,59 @@ async function runDisney() {
         await sleep(200);
       }
     });
+    await step('더빙 칸: J 배속 연습 · K 녹음 (한 번 더 누르면 멈춤·취소) · 칸 밖의 J·K 는 플레이어 몫 · 줄을 넘겨도 칸이 보이면 목록은 그대로, 칸이 패널 바닥에 닿을 때만 그 줄을 맨 위로', async () => {
+      const vp = page.viewport();
+      try {
+        await page.evaluate(() => { window.__jk = []; document.addEventListener('keydown', (e) => { if (e.code === 'KeyJ' || e.code === 'KeyK') window.__jk.push(e.code); }); const v = document.querySelector('video'); v.pause(); v.muted = false; v.currentTime = 2.3; });
+        await sleep(400);
+        await page.keyboard.press('KeyJ'); await page.keyboard.press('KeyK');
+        await sleep(200);
+        assert((await page.evaluate(() => window.__jk.join(','))) === 'KeyJ,KeyK', 'outside dub mode J/K reach the player: ' + await page.evaluate(() => window.__jk.join(',')));
+        await page.setViewport({ width: 1400, height: 560 }); // 목록이 스크롤되도록 낮은 창
+        await sleep(400);
+        await page.keyboard.press('KeyR');
+        await waitFor(() => page.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox'); return b && b.previousElementSibling.dataset.i === '0'; }), 3000, 'dub section on row 0');
+        const badge = await page.evaluate(() => [getComputedStyle(document.querySelector('.st-dub-ladder'), '::after').content, getComputedStyle(document.querySelector('.st-dub-rec'), '::after').content].join(' '));
+        assert(badge === '"J" "K"', 'key hints on the buttons: ' + badge);
+        await page.keyboard.press('KeyJ');
+        await waitFor(() => page.$('.st-dub-ladder.on'), 2000, 'J starts the ladder');
+        await page.keyboard.press('KeyJ');
+        await waitFor(async () => !(await page.$('.st-dub-ladder.on')), 2000, 'J again stops it');
+        await page.keyboard.press('KeyK');
+        await waitFor(() => page.$('.st-dub-rec.on'), 3000, 'K starts recording');
+        await sleep(300);
+        await page.keyboard.press('KeyK');
+        await waitFor(async () => !(await page.$('.st-dub-rec.on')), 4000, 'K again cancels');
+        assert((await page.$$('.st-dub-take')).length === 0, 'the cancelled recording is not saved');
+        assert((await page.evaluate(() => window.__jk.length)) === 2, 'in dub mode J/K are ours, not the player\'s');
+        const geo = () => page.evaluate(() => {
+          const L = document.querySelector('.st-list'), lr = L.getBoundingClientRect(), b = document.querySelector('.st-list > .st-dubbox'), rows = [...document.querySelectorAll('.st-row.st-dub-on')];
+          const last = rows[rows.length - 1], next = last.nextElementSibling === b ? b.nextElementSibling : null;
+          return { st: Math.round(L.scrollTop), max: L.scrollHeight - L.clientHeight, row: +rows[0].dataset.i, rowTop: Math.round(rows[0].getBoundingClientRect().top - lr.top), boxBottom: Math.round(b.getBoundingClientRect().bottom - lr.top), h: Math.round(lr.height), nextH: next ? Math.round(next.getBoundingClientRect().height) : 0 };
+        });
+        let g = await geo();
+        assert(g.max > 150, 'the list scrolls in this window: ' + JSON.stringify(g));
+        const moves = [];
+        for (let k = 0; k < 9 && g.row < 9; k++) {
+          const before = g;
+          await page.click('.st-dub-next');
+          await waitFor(async () => (await geo()).row === before.row + 1, 3000, 'moved to the next line');
+          await sleep(700); // 부드러운 스크롤이 끝나기를 기다린다
+          g = await geo();
+          moves.push({ row: g.row, moved: g.st !== before.st, need: before.boxBottom + before.nextH > before.h, rowTop: g.rowTop, boxBottom: g.boxBottom, h: g.h, st: g.st, max: g.max });
+        }
+        const bad = moves.filter((m) => m.moved !== m.need || (m.moved && !(m.rowTop >= 0 && m.rowTop <= 14) && !(m.st >= m.max - 1 && m.boxBottom <= m.h + 1)) || (!m.moved && !(m.rowTop >= -1 && m.boxBottom <= m.h + 1)));
+        assert(!bad.length && moves.filter((m) => m.moved).length >= 1 && moves.filter((m) => !m.moved).length >= 3, '칸이 바닥에 닿을 때만 그 줄을 맨 위로: ' + JSON.stringify(moves));
+        // 그 구간을 반복 재생하는 동안에도 목록은 움직이지 않는다
+        const st0 = (await geo()).st;
+        await sleep(2500);
+        assert((await geo()).st === st0, 'list stays still while the line loops');
+      } finally {
+        await page.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox .st-dub-close'); if (b) b.click(); const v = document.querySelector('video'); v.pause(); v.muted = true; }).catch(() => {});
+        await page.setViewport(vp).catch(() => {});
+        await sleep(400);
+      }
+    });
     await step('다른 에피소드로 넘어가면 그 에피소드 자막을 불러오고, 패널은 지금 줄을 바로 선택한다 (방금 손으로 스크롤했어도)', async () => {
       try {
         await page.evaluate(() => document.querySelectorAll('.st-row').forEach((r) => r.setAttribute('data-old', '1')));
@@ -972,7 +1079,7 @@ async function runDisney() {
       const status = await yt.$eval('.st-status', (e) => e.textContent);
       assert(/영어 10줄/.test(status) && !/자동 생성/.test(status), 'manual track preferred: ' + status);
       assert(/한국어 10줄 연결 \(유튜브 번역\)/.test(status), 'tlang merged: ' + status);
-      await waitFor(() => yt.$eval('.st-brand', (e) => /Mock Lecture Title/.test(e.textContent) && /Mock Channel/.test(e.textContent)), 8000, 'yt title');
+      await waitFor(() => yt.$eval('#st-panel', (e) => /Mock Lecture Title/.test(e.dataset.title || '') && /Mock Channel/.test(e.dataset.title || '')), 8000, 'yt title');
       const placed = await yt.evaluate(() => { const b = document.querySelector('.st-ctl'); return b && b.nextElementSibling.classList.contains('ytp-subtitles-button'); });
       assert(placed, 'control button before CC button');
       // 유튜브에는 자체 배속 메뉴와 Shift+< , Shift+> 가 이미 있어 우리 배속 버튼·단축키를 넣지 않는다

@@ -6,18 +6,25 @@ globalThis.SubTutorAdapters = (() => {
   'use strict';
 
   // MAIN world 페이지 스크립트가 보내주는 시간(디즈니+)
-  const shared = { pageTime: { ms: 0, at: 0, advancing: false }, ctMap: { samples: [], k: NaN } };
+  const shared = { pageTime: { ms: 0, at: 0, advancing: false }, ctMap: { samples: [], k: NaN, pending: NaN, resets: 0 }, pageEv: null };
   // 디즈니+: 플레이어가 알려 주는 재생 위치(콘텐츠 시간)는 띄엄띄엄·내림값으로 와서 늦다. 영상 요소의 currentTime 은
   // 콘텐츠 시간과 다른 기준(MediaSource)이지만 매끈하고 정확하므로, 둘의 차이 k 를 알아 두고 콘텐츠 시간 = currentTime + k 로 쓴다.
   // 보고값은 내림이라 늘 실제보다 작거나 같다 → 최근 12초 동안의 가장 큰 차이가 실제에 가장 가깝다. 3초 넘게 어긋나면(기준이 바뀜) 새로 잰다
+  // 크게 어긋난 값 하나(탐색 직후의 낡은 보고 등)로 시계가 뒤틀리지 않게, 다음 보고도 같은 쪽일 때만 새로 잰다
   function noteContentTime(ms, ctMs, at) {
     const m = shared.ctMap;
     const k = ms - ctMs;
-    if (m.samples.length && Math.abs(k - m.k) > 3000) m.samples = [];
+    if (m.samples.length && Math.abs(k - m.k) > 3000) {
+      if (!(Math.abs(k - m.pending) < 1000)) { m.pending = k; return; }
+      m.samples = [];
+      m.resets++;
+    }
+    m.pending = NaN;
     m.samples.push([at, k]);
     while (m.samples.length > 1 && at - m.samples[0][0] > 12000) m.samples.shift();
     m.k = Math.max(...m.samples.map((x) => x[1]));
   }
+  const preciseClock = () => shared.ctMap.samples.length >= 2 && Number.isFinite(shared.ctMap.k);
 
   // MAIN world 와의 요청/응답
   const page = {
@@ -210,11 +217,13 @@ globalThis.SubTutorAdapters = (() => {
     timeMs() {
       const p = shared.pageTime;
       if (!p.at) return NaN;
-      const v0 = pickVideo();
-      if (v0 && shared.ctMap.samples.length >= 2 && Number.isFinite(shared.ctMap.k) && Number.isFinite(v0.currentTime)) return v0.currentTime * 1000 + shared.ctMap.k;
-      if (!p.advancing) return p.ms;
-      // 보고 사이를 이어 붙일 때 배속을 곱한다 — 0.5배로 재생하면 위치도 0.5배로 흐른다 (예전에는 1배로 가정해 앞서 갔다가 되돌아왔다)
       const v = pickVideo();
+      if (v && preciseClock() && Number.isFinite(v.currentTime)) return v.currentTime * 1000 + shared.ctMap.k;
+      // 아직 차이를 모르면 마지막 보고에서 이어 붙인다. 흐르는지는 영상 요소로 본다 — 플레이어의 재생 이벤트는 오지 않을 수 있다
+      // (예전에는 그 이벤트만 믿어, 이벤트가 없으면 위치가 0.5초마다 계단처럼만 움직였다)
+      const flowing = v ? !v.paused && !v.seeking && v.readyState >= 2 : p.advancing;
+      if (!flowing) return p.ms;
+      // 보고 사이를 이어 붙일 때 배속을 곱한다 — 0.5배로 재생하면 위치도 0.5배로 흐른다 (예전에는 1배로 가정해 앞서 갔다가 되돌아왔다)
       const rate = v && v.playbackRate > 0 ? v.playbackRate : 1;
       return p.ms + (performance.now() - p.at) * rate;
     },
@@ -305,5 +314,5 @@ globalThis.SubTutorAdapters = (() => {
     return a;
   }
 
-  return { shared, page, detect, pickVideo, findButton, qsaDeep, deepRoots, noteContentTime };
+  return { shared, page, detect, pickVideo, findButton, qsaDeep, deepRoots, noteContentTime, preciseClock };
 })();

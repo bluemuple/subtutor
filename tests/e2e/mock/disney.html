@@ -22,7 +22,10 @@
   const v = document.getElementById('v');
   const STEP = 500;
   const handlers = {};
-  const fire = (ev) => (handlers[ev] || []).forEach((f) => { try { f(); } catch (e) { /* ignore */ } });
+  // ?events=none : 플레이어가 재생·멈춤·TIMECODE 이벤트를 하나도 알려 주지 않는 경우 (실제 디즈니+ 에서 이벤트 이름이 다르거나, 우리가 붙기 전에 이미 재생 중이었을 때).
+  // 그러면 페이지 스크립트는 0.5초마다 위치만 읽고 '재생 중' 표시는 늘 꺼져 있다
+  const QUIET = /[?&]events=none\b/.test(location.search);
+  const fire = (ev) => { if (QUIET) return; (handlers[ev] || []).forEach((f) => { try { f(); } catch (e) { /* ignore */ } }); };
   window.__seeks = [];
   const player = {
     timeline: { info: { get playheadPositionMs() { return Math.floor((v.currentTime * 1000) / STEP) * STEP; } } },
