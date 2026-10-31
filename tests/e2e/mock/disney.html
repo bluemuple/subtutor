@@ -24,12 +24,35 @@
   const handlers = {};
   // ?events=none : 플레이어가 재생·멈춤·TIMECODE 이벤트를 하나도 알려 주지 않는 경우 (실제 디즈니+ 에서 이벤트 이름이 다르거나, 우리가 붙기 전에 이미 재생 중이었을 때).
   // 그러면 페이지 스크립트는 0.5초마다 위치만 읽고 '재생 중' 표시는 늘 꺼져 있다
-  const QUIET = /[?&]events=none\b/.test(location.search);
-  const fire = (ev) => { if (QUIET) return; (handlers[ev] || []).forEach((f) => { try { f(); } catch (e) { /* ignore */ } }); };
+  // ?real=1 : 실제 디즈니+ 에서 진단 기록으로 확인한 동작 (2026-10-31)
+  //  - 재생·TIMECODE 이벤트 없음, 탐색 이벤트만 온다
+  //  - 탐색할 때마다 영상 요소의 currentTime 이 20초에서 다시 시작한다 (콘텐츠 시간과의 차이가 탐색마다 바뀐다)
+  //  - 앞쪽 키프레임에서 재생을 시작해 목표보다 최대 0.6초 일찍 시작할 수 있고, 탐색 직후 잠깐은 위치 값으로 목표를 알려 준다
+  //  - 위치 값은 0.265초 계단으로 바뀐다
+  const REAL = /[?&]real=1\b/.test(location.search);
+  const QUIET = REAL || /[?&]events=none\b/.test(location.search);
+  const fire = (ev) => { if (QUIET && !(REAL && /SEEK/.test(ev))) return; (handlers[ev] || []).forEach((f) => { try { f(); } catch (e) { /* ignore */ } }); };
+  let base = 0, anchorCt = 0, target = NaN, targetUntil = 0; // REAL: 콘텐츠 시간 = base + (currentTime - anchorCt)
+  const contentMs = () => (REAL ? base + (v.currentTime - anchorCt) * 1000 : v.currentTime * 1000);
+  window.__contentMs = contentMs;
   window.__seeks = [];
   const player = {
-    timeline: { info: { get playheadPositionMs() { return Math.floor((v.currentTime * 1000) / STEP) * STEP; } } },
-    seek(ms) { window.__seeks.push(ms); fire('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEKING'); v.currentTime = ms / 1000; return Promise.resolve(); },
+    timeline: { info: { get playheadPositionMs() {
+      if (!REAL) return Math.floor((v.currentTime * 1000) / STEP) * STEP;
+      if (performance.now() < targetUntil) return target;
+      return base + Math.floor((contentMs() - base) / 265) * 265;
+    } } },
+    seek(ms) {
+      window.__seeks.push(ms);
+      fire('@EVENT/PLAYER/PLAYBACK/MEDIA_SEEKING');
+      if (!REAL) { v.currentTime = ms / 1000; return Promise.resolve(); }
+      const wasPaused = v.paused;
+      v.pause();
+      base = ms - (ms % 600); anchorCt = 20; target = ms; targetUntil = performance.now() + 300;
+      v.currentTime = 20;
+      if (!wasPaused) { const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+      return Promise.resolve();
+    },
     scrub() {},
     play() { const p = v.play(); if (p && p.catch) p.catch(() => {}); },
     pause() { setTimeout(() => v.pause(), 120); }, // 실제 플레이어처럼 멈춤 명령이 조금 늦게 먹는다
@@ -43,13 +66,14 @@
   // 실제 스트리밍 플레이어처럼 재생 중에 스스로 seeking/seeked 를 낸다(버퍼 틈 건너뛰기 등) — 사용자의 탐색이 아니다.
   // 위치를 실제로 옮기면 시험용 영상의 디코더가 멈칫해 재생이 느려지므로, 이벤트만 낸다 (예전 코드는 이 이벤트마다 더빙을 끊었다)
   setInterval(() => {
-    if (v.paused || v.seeking || v.readyState < 2) return;
+    if (REAL || v.paused || v.seeking || v.readyState < 2) return; // 실제 디즈니+ 기록에는 재생 중 미세 탐색이 없었다
     window.__microSeeks = (window.__microSeeks || 0) + 1;
     v.dispatchEvent(new Event('seeking'));
     setTimeout(() => v.dispatchEvent(new Event('seeked')), 30);
   }, 300);
   // React 가 DOM 요소에 붙이는 fiber 흉내: 페이지 스크립트(disney-page.js)가 video 의 조상에서 플레이어를 찾는다
   v.parentElement['__reactFiber$mock'] = { memoizedProps: { player }, memoizedState: null, return: null };
+  window.__player = player;
   // 재생 정보 응답 흉내: 페이지 스크립트가 JSON.parse 를 가로채 자막 목록(HLS)과 제목을 얻는다
   const second = /mockdisney2$/.test(location.pathname);
   JSON.parse('{"stream":{"sources":[{"complete":{"url":"https://www.disneyplus.com/mock/disney/' + (second ? 'master2' : 'master') + '.m3u8"}}]}}');

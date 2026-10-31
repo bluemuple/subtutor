@@ -6,23 +6,42 @@ globalThis.SubTutorAdapters = (() => {
   'use strict';
 
   // MAIN world 페이지 스크립트가 보내주는 시간(디즈니+)
-  const shared = { pageTime: { ms: 0, at: 0, advancing: false }, ctMap: { samples: [], k: NaN, pending: NaN, resets: 0 }, pageEv: null };
-  // 디즈니+: 플레이어가 알려 주는 재생 위치(콘텐츠 시간)는 띄엄띄엄·내림값으로 와서 늦다. 영상 요소의 currentTime 은
-  // 콘텐츠 시간과 다른 기준(MediaSource)이지만 매끈하고 정확하므로, 둘의 차이 k 를 알아 두고 콘텐츠 시간 = currentTime + k 로 쓴다.
-  // 보고값은 내림이라 늘 실제보다 작거나 같다 → 최근 12초 동안의 가장 큰 차이가 실제에 가장 가깝다. 3초 넘게 어긋나면(기준이 바뀜) 새로 잰다
-  // 크게 어긋난 값 하나(탐색 직후의 낡은 보고 등)로 시계가 뒤틀리지 않게, 다음 보고도 같은 쪽일 때만 새로 잰다
+  const shared = { pageTime: { ms: 0, at: 0, advancing: false }, ctMap: { samples: [], k: NaN, cand: null, resets: 0, gen: 0 }, pageEv: null };
+  // 디즈니+: 플레이어가 알려 주는 재생 위치(콘텐츠 시간)는 0.265초쯤 계단으로 바뀌어 늦다. 영상 요소의 currentTime 은 매끈하지만 기준이 다르다 —
+  // 실제 디즈니+ 는 탐색할 때마다 currentTime 을 20초에서 다시 시작한다(진단 기록, 2026-10-31). 그래서 둘의 차이 k 는 탐색 사이에서만 일정하다:
+  // 탐색할 때마다 버리고(resetContentTime), 위치 값이 바뀐 순간의 보고 두 개가 0.15초 안으로 맞으면 다시 쓴다.
+  // 탐색 직후에는 예전 위치나 목표 위치를 알려 주는 보고가 섞이므로 하나만으로는 믿지 않는다. 같은 무리 안에서는 가장 큰 차이(가장 덜 늦은 보고)를 쓴다
+  function resetContentTime() { const m = shared.ctMap; m.samples = []; m.k = NaN; m.cand = null; }
   function noteContentTime(ms, ctMs, at) {
     const m = shared.ctMap;
     const k = ms - ctMs;
-    if (m.samples.length && Math.abs(k - m.k) > 3000) {
-      if (!(Math.abs(k - m.pending) < 1000)) { m.pending = k; return; }
-      m.samples = [];
-      m.resets++;
+    if (m.samples.length && Math.abs(k - m.k) <= 300) {
+      m.samples.push([at, k]);
+      // 최근 3초 안에서 가장 큰 차이를 쓴다. 앞서 나간 값(탐색 직후 목표 위치를 알려 준 보고 같은 것)이 끼었으면,
+      // 최근 0.9초의 값들이 모두 그보다 0.12초 넘게 작아지는 순간 버린다
+      while (m.samples.length > 2 && at - m.samples[0][0] > 3000) m.samples.shift();
+      const recent = m.samples.filter((x) => at - x[0] <= 900);
+      if (recent.length >= 3) {
+        const rmax = Math.max(...recent.map((x) => x[1]));
+        if (Math.max(...m.samples.map((x) => x[1])) - rmax > 120) m.samples = m.samples.filter((x) => x[1] <= rmax + 50);
+      }
+      const prev = m.k;
+      m.k = Math.max(...m.samples.map((x) => x[1]));
+      if (Math.abs(m.k - prev) > 100) m.gen++; // 시계가 눈에 띄게 움직였다 → 더빙 위치를 다시 맞춘다
+      m.cand = null;
+      return 'add';
     }
-    m.pending = NaN;
-    m.samples.push([at, k]);
-    while (m.samples.length > 1 && at - m.samples[0][0] > 12000) m.samples.shift();
-    m.k = Math.max(...m.samples.map((x) => x[1]));
+    // 처음이거나 지금 값과 크게 다르다: 후보로 두고, 다음 보고도 같은 쪽(0.15초 안)이면 그 둘로 새로 시작한다
+    if (m.cand && Math.abs(k - m.cand[1]) <= 150) {
+      if (m.samples.length) m.resets++;
+      m.samples = [m.cand, [at, k]];
+      m.k = Math.max(m.cand[1], k);
+      m.cand = null;
+      m.gen++; // 시계를 새로 잡았다 — 더빙은 이 순간 한 번 위치를 다시 맞춘다
+      return 'new';
+    }
+    m.cand = [at, k];
+    return 'cand';
   }
   const preciseClock = () => shared.ctMap.samples.length >= 2 && Number.isFinite(shared.ctMap.k);
 
@@ -314,5 +333,5 @@ globalThis.SubTutorAdapters = (() => {
     return a;
   }
 
-  return { shared, page, detect, pickVideo, findButton, qsaDeep, deepRoots, noteContentTime, preciseClock };
+  return { shared, page, detect, pickVideo, findButton, qsaDeep, deepRoots, noteContentTime, resetContentTime, preciseClock };
 })();

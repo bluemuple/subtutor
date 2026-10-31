@@ -53,7 +53,7 @@
     cues: [], koCues: [], enTrack: null, koTrack: null, runToken: 0, trackRun: 0,
     current: -1, lastShown: -1, prevIdx: -1, lastT: 0, lastPaused: null, lastDisplayIdx: -2,
     loop: false, loopIdx: -1, lastLoopSeekAt: 0,
-    pausedFor: -1, pausedAt: 0, shadowTimer: null, endTimer: null, resumeByUsUntil: 0, pauseByUsUntil: 0, seekByUsUntil: 0, lastSeekAt: 0, lastSeekTarget: NaN, seekingAt: 0, userSeekAt: 0, lastCT: NaN, playRequestedAt: 0, ensureTimer: null,
+    pausedFor: -1, pausedAt: 0, shadowTimer: null, endTimer: null, resumeByUsUntil: 0, pauseByUsUntil: 0, seekByUsUntil: 0, lastSeekAt: 0, lastSeekTarget: NaN, seekingAt: 0, userSeekAt: 0, lastCT: NaN, seekTarget: null, ourSeeksPending: 0, lastEdgeAt: -1e9, freshReportAt: 0, lastPauseEvAt: -1e9, playRequestedAt: 0, ensureTimer: null,
     clip: null, capturing: null,
     saved: new Map(), meta: null,
     offsetMs: 0, offsetSource: '', alignSamples: [], lastNativeText: '',
@@ -203,17 +203,25 @@
       case 'meta': if (d.meta && d.meta.title && (!d.videoId || d.videoId === state.videoId)) { pageMeta = d.meta; setMeta(d.meta); } break;
       case 'time': {
         const v = adapter.usesPageTime ? adapter.video() : null;
-        // 재생 중인지는 영상 요소로 본다. 플레이어의 '재생 중' 이벤트(MEDIA_RESUMED 등)는 실제 디즈니+ 에서 오지 않을 수 있는데(이름이 다르거나 우리가 붙기 전에 이미 재생 중),
+        // 재생 중인지는 영상 요소로 본다. 플레이어의 '재생 중' 이벤트(MEDIA_RESUMED 등)는 실제 디즈니+ 에서 오지 않는다(진단 기록: 재생 이벤트 0번).
         // 예전에는 그 이벤트만 믿어 시계가 0.5초 계단이 됐고, 더빙이 보고 사이마다 "멈춤"으로 보여 0.4초 틀고 0.1초 끄기를 되풀이했다
         const playing = !!(v && !v.paused && !v.seeking && v.readyState >= 2);
-        A.shared.pageTime = { ms: d.ms, at: now(), advancing: !!d.advancing || playing };
-        if (d.evc) A.shared.pageEv = d.evc;
-        // 재생 중인 보고만으로 영상 요소 시계와 콘텐츠 시간의 차이를 잰다 (멈춘 동안·크게 옮긴 직후 1초의 값은 쓰지 않는다)
-        // 위치 값이 바뀐 순간의 보고(edge)는 페이지 쪽에서 같은 순간에 읽은 영상 시각(ct)을 함께 준다 — 같은 영상 요소일 때만 그것을 쓴다
         const ctNow = v ? v.currentTime * 1000 : NaN;
-        const ctAt = Number.isFinite(d.ct) && Math.abs(d.ct - ctNow) < 400 ? d.ct : ctNow;
-        if (playing && Number.isFinite(d.ms) && now() - state.seekingAt > 1000) A.noteContentTime(d.ms, ctAt, now());
-        if (adapter.usesPageTime) { const m = A.shared.ctMap; dl('time' + (d.edge ? '* ' : ' ') + 'ms=' + fx(d.ms) + ' adv=' + (d.advancing ? 1 : 0) + ' ct=' + fx(ctAt) + ' k=' + fx(m.k) + '/' + m.samples.length + (Number.isFinite(m.pending) ? ' pend=' + fx(m.pending) : '')); }
+        const ctAt = Number.isFinite(d.ct) && Math.abs(d.ct - ctNow) < 400 ? d.ct : ctNow; // 위치가 바뀐 순간 페이지 쪽에서 함께 읽은 영상 시각 (같은 영상 요소일 때만)
+        // 우리가 옮긴 탐색이 끝나기 전, 그리고 끝난 직후 0.6초 동안 목표에서 2초 넘게 떨어진 보고는 옮기기 전의 낡은 위치다
+        // (진단 기록: 79.85초로 옮긴 뒤 83.6초 보고) → 버린다. 그 뒤에도 먼 보고는 사용자가 다른 곳으로 옮긴 것이므로 받아들인다
+        const tgt = state.seekTarget;
+        const fresh = tgt && (tgt.doneAt ? now() - tgt.doneAt < 600 : now() - tgt.at < 2500);
+        if (adapter.usesPageTime && fresh && Number.isFinite(d.ms) && Math.abs(d.ms - tgt.ms) > 2000) { dl('time(stale) ms=' + fx(d.ms) + ' target=' + fx(tgt.ms) + ' ct=' + fx(ctAt)); break; }
+        A.shared.pageTime = { ms: d.ms, at: now(), advancing: !!d.advancing || playing };
+        if (v && !v.seeking) state.freshReportAt = now(); // 탐색이 끝난 뒤의 보고 — 어림 시계는 이것부터 믿는다 (진단 기록: 탐색이 끝난 순간의 값이 이미 정확)
+        if (d.evc) A.shared.pageEv = d.evc;
+        // 영상 시각과 콘텐츠 시간의 차이(정밀 시계)는 재생 중, 위치 값이 바뀐 순간의 보고(edge)로만 잰다 — 0.5초 간격 보고는 계단 하나만큼 늦을 수 있다.
+        // 그런 보고가 2초 넘게 없으면(위치가 매끈하게 바뀌는 플레이어) 아무 보고나 쓴다
+        if (d.edge) state.lastEdgeAt = now();
+        let note = '';
+        if (adapter.usesPageTime && playing && Number.isFinite(d.ms) && (d.edge || now() - state.lastEdgeAt > 2000)) note = A.noteContentTime(d.ms, ctAt, now());
+        if (adapter.usesPageTime) { const m = A.shared.ctMap; dl('time' + (d.edge ? '* ' : ' ') + 'ms=' + fx(d.ms) + ' ct=' + fx(ctAt) + ' k=' + fx(m.k) + '/' + m.samples.length + (note ? ' ' + note : '') + (playing ? '' : ' (not playing)')); }
         break;
       }
       case 'navigate': checkVideo(); break;
@@ -283,6 +291,7 @@
       if (state.shadowTimer || state.pausedFor >= 0) { clearShadow(); state.pausedFor = -1; }
     });
     v.addEventListener('pause', () => {
+      state.lastPauseEvAt = now();
       // 우리가 play() 를 건 직후의 pause 는 플레이어의 되돌림이므로 재시도를 유지하고, 그 밖의 pause 는 사용자의 뜻으로 보고 재시도를 멈춘다
       if (now() - state.playRequestedAt > 400 && now() > state.pauseByUsUntil) clearTimeout(state.ensureTimer);
     });
@@ -290,10 +299,25 @@
       // 스트리밍 플레이어는 재생 중에 스스로 아주 작게 위치를 고친다(버퍼 틈 건너뛰기 등). 사람이 옮긴 것이 아니므로 아무것도 건드리지 않는다
       // (이것을 탐색으로 보면 그때마다 더빙을 멈췄다가 다시 튼다)
       const jump = Number.isFinite(state.lastCT) ? Math.abs(v.currentTime - state.lastCT) : Infinity;
-      dl('ev seeking ct=' + fx(v.currentTime * 1000) + ' jump=' + fx(jump * 1000) + ' ' + (jump < 0.75 ? 'small(ignored)' : now() < state.seekByUsUntil ? 'ours' : 'user'));
-      if (jump < 0.75) return;
+      // 우리가 옮긴 탐색인가: 디즈니+ 는 우리 탐색 한 번에 seeking 이 한 번 온다 → 우리가 요청한 횟수만큼만 우리 것으로 센다
+      // (바로 뒤에 사용자가 옮긴 것을 우리 것으로 착각하면, 낡은 보고를 거르는 기준이 남아 시계가 2초 넘게 어긋났다)
+      if (now() >= state.seekByUsUntil) state.ourSeeksPending = 0;
+      const ours = now() < state.seekByUsUntil && (!adapter.usesPageTime || state.ourSeeksPending > 0);
+      if (state.ourSeeksPending > 0) state.ourSeeksPending--;
+      if (adapter.usesPageTime) {
+        // 디즈니+: 탐색할 때마다 영상 시각이 20초에서 다시 시작해 시각의 차이로는 얼마나 옮겼는지 알 수 없고, 콘텐츠 시간과의 차이도 바뀐다 → 차이를 새로 잰다.
+        // 디즈니+ 의 탐색은 늘 멈춤(pause) 바로 뒤에 온다(진단 기록). 우리 탐색도, 0.75초 넘게 움직인 것도, 멈춤 뒤도 아니면 플레이어 안쪽의 작은 조정으로 보고 건드리지 않는다
+        if (!ours && jump < 0.75 && now() - state.lastPauseEvAt > 300) { dl('ev seeking ct=' + fx(v.currentTime * 1000) + ' jump=' + fx(jump * 1000) + ' micro(ignored)'); return; }
+        dl('ev seeking ct=' + fx(v.currentTime * 1000) + ' jump=' + fx(jump * 1000) + ' ' + (ours ? 'ours' : 'user') + ' (clock re-measured)');
+        A.resetContentTime();
+        if (dubClock) dubClock.reset();
+      } else {
+        dl('ev seeking ct=' + fx(v.currentTime * 1000) + ' jump=' + fx(jump * 1000) + ' ' + (jump < 0.75 ? 'small(ignored)' : ours ? 'ours' : 'user'));
+        if (jump < 0.75) return;
+      }
       state.seekingAt = now(); // 디즈니+ 는 이 뒤 새 위치를 알려 줄 때까지 예전 위치가 남는다 (dubTick 참고)
-      if (now() < state.seekByUsUntil) return;
+      if (ours) return;
+      state.seekTarget = null; // 사용자가 플레이어에서 직접 옮겼다 — 우리가 옮긴 목표는 더 이상 기준이 아니다
       state.holding = false;
       state.lastSeekAt = now();
       clearShadow(); state.pausedFor = -1;
@@ -302,6 +326,13 @@
       state.userSeekAt = now();
       stopDubPlay('seek');
       if (dubClock) dubClock.reset();
+    });
+    // 디즈니+: 우리가 옮긴 탐색이 끝나면 새 시계가 잡힐 때까지는 목표 위치에서부터 센다 (시작 시각을 탐색이 끝난 순간으로)
+    v.addEventListener('seeked', () => {
+      const t = state.seekTarget;
+      if (!adapter.usesPageTime || !t || now() - t.at > 3000) return;
+      if (!t.doneAt) t.doneAt = now();
+      if (!A.preciseClock()) A.shared.pageTime = { ms: t.ms, at: now(), advancing: false };
     });
     registerPlayer();
   }
@@ -1434,7 +1465,7 @@
       'offset=' + state.offsetMs + ' (' + state.offsetSource + ') samples=' + JSON.stringify(state.alignSamples),
       'meta=' + JSON.stringify(state.meta) + ' status=' + state.statusText,
       'modes loop=' + state.loop + ' ap=' + settings.autoPause + ' shadow=' + settings.shadowing + '/' + shadowPauseValue() + ' audio=' + settings.audioMode + ' rate=' + state.rate + ' clearance=' + state.clearanceCur,
-      'clock ' + (adapter.usesPageTime ? 'k=' + fx(A.shared.ctMap.k) + ' samples=' + A.shared.ctMap.samples.length + ' resets=' + A.shared.ctMap.resets + ' precise=' + A.preciseClock() + ' playerEvents=' + JSON.stringify(A.shared.pageEv) + ' report=' + fx(A.shared.pageTime.ms) + ' (' + fx(now() - A.shared.pageTime.at) + 'ms ago, adv=' + A.shared.pageTime.advancing + ')' : 'video element') + ' raw=' + fx(rawMs()) + ' videosDeep=' + A.qsaDeep('video').length + (v ? ' muted=' + v.muted + ' vol=' + fx(v.volume, 2) + ' rate=' + v.playbackRate : ''),
+      'clock ' + (adapter.usesPageTime ? 'k=' + fx(A.shared.ctMap.k) + ' samples=' + A.shared.ctMap.samples.length + ' resets=' + A.shared.ctMap.resets + ' precise=' + A.preciseClock() + (A.shared.ctMap.cand ? ' cand=' + fx(A.shared.ctMap.cand[1]) : '') + ' playerEvents=' + JSON.stringify(A.shared.pageEv) + ' report=' + fx(A.shared.pageTime.ms) + ' (' + fx(now() - A.shared.pageTime.at) + 'ms ago, adv=' + A.shared.pageTime.advancing + ')' + (state.seekTarget ? ' lastSeek=' + fx(state.seekTarget.ms) + ' (' + fx(now() - state.seekTarget.at) + 'ms ago)' : '') : 'video element') + ' raw=' + fx(rawMs()) + ' videosDeep=' + A.qsaDeep('video').length + (v ? ' muted=' + v.muted + ' vol=' + fx(v.volume, 2) + ' rate=' + v.playbackRate : ''),
       'dub segs=' + state.dubSegs.length + ' chosen=' + state.dubSegs.filter((s) => chosenTake(s)).length + ' playback=' + (settings.dubPlayback !== false) + ' play=' + (state.dubPlay ? state.dubPlay.take.id + '@' + state.dubPlay.offset.toFixed(2) : '-') + ' rec=' + (state.dubRec ? state.dubRec.phase : '-') + ' ladder=' + (state.dubLadder ? state.dubLadder.step : '-') + ' mic=' + (state.dubMic ? 'open' : 'closed') + ' ctx=' + (dubCtx ? dubCtx.state : '-') + ' resyncs=' + dubRestartsTotal,
       'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' clip=' + JSON.stringify(state.clip) + ' capturing=' + !!state.capturing + ' tabId=' + state.tabId,
       'layout panel=' + !!(settings.panelOpen && state.active) + ' videoRight=' + (v ? Math.round(v.getBoundingClientRect().right) : '-') + '/' + window.innerWidth + ' fit=' + (fit.el ? describeEl(fit.el) : '-') + ' shadowRoots=' + (adapter.deep ? A.deepRoots().length - 1 : 0) + ' nativeHidden=' + nativeHiddenCount() + ' cueEl=' + (adapter.nativeCueSelector ? A.qsaDeep(adapter.nativeCueSelector).map(describeEl).slice(0, 2).join(',') : '-'),
@@ -1667,6 +1698,10 @@
     state.seekByUsUntil = now() + 1500;
     state.lastSeekAt = now();
     state.lastSeekTarget = ms;
+    state.seekTarget = { ms: Math.max(0, ms), at: now(), doneAt: 0 };
+    state.ourSeeksPending++;
+    // 디즈니+: 탐색하면 영상 시각과 콘텐츠 시간의 차이가 바뀐다 → 새로 잴 때까지는 목표 위치를 지금 위치로 쓴다 (예전 시계로 계산하면 10초씩 어긋났다)
+    if (adapter.usesPageTime) { A.resetContentTime(); A.shared.pageTime = { ms: Math.max(0, ms), at: now(), advancing: false }; dl('seek to ' + fx(ms)); }
     adapter.seek(Math.max(0, ms));
     if (state.rate !== 1) state.rateReapplyUntil = now() + 2500; // 일부 플레이어는 탐색 뒤 속도를 되돌린다
   }
@@ -2119,13 +2154,25 @@
   }
   function dubLoopTick(raw, paused) {
     if (!dubModeOn() || paused || state.dubRec || state.dubLadder || state.dubPreview || state.capturing || state.clip) return;
+    // 디즈니+: 옮긴 직후 시계를 새로 재는 동안(최대 2.5초)에는 되감지 않는다. 예전에는 옮기기 전의 시계로 "구간 밖"이라 보고 0.5초마다 다시 옮겨,
+    // 다음 줄의 첫 0.4초만 끝없이 되풀이됐다 (진단 기록 2026-10-31)
+    if (adapter.usesPageTime && !A.preciseClock() && now() - state.seekingAt < 2500) return;
     const r = currentDubRange();
     if (!r) return;
-    if ((raw >= r.endMs + settings.tailMs || raw < r.startMs - settings.leadMs - 2500) && now() - state.lastLoopSeekAt > 500) {
+    const before = raw < r.startMs - settings.leadMs - 2500;
+    if ((raw >= r.endMs + settings.tailMs || before) && now() - state.lastLoopSeekAt > 500) {
+      // 구간 앞에서의 되감기가 5초 안에 두 번이면 시계가 어긋난 것이다 → 더 되감지 않는다 (끝없는 되풀이를 막는 안전장치)
+      if (before) {
+        dubEarlySeeks = dubEarlySeeks.filter((x) => now() - x < 5000);
+        if (dubEarlySeeks.length >= 2) { dlOnce('loop guard: still before the range (raw=' + fx(raw) + ')'); return; }
+        dubEarlySeeks.push(now());
+      }
       state.lastLoopSeekAt = now();
+      dl('loop seek (' + (before ? 'before range' : 'end') + ') raw=' + fx(raw));
       seekTo(r.startMs - settings.leadMs);
     }
   }
+  let dubEarlySeeks = [];
   function setDubLoopRate(x) {
     if (state.dubRec) return;
     stopDubPreview();
@@ -2396,7 +2443,7 @@
     }
     return null;
   }
-  let dubLastRaw = NaN, dubLastCT = NaN, dubStall = 0, dubLogTick = 0, dubLastTgt = '';
+  let dubLastRaw = NaN, dubLastCT = NaN, dubStall = 0, dubLogTick = 0, dubLastTgt = '', dubClockGen = 0, dubPendingMute = null;
   function dubTick(raw, paused) {
     const v = adapter.video();
     const rate = (v && v.playbackRate) || 1;
@@ -2408,12 +2455,21 @@
     dubLastRaw = raw; dubLastCT = ct;
     // 디즈니+ 는 재생 위치를 0.5초쯤 간격으로 끊어서 알려 줘, 그대로 쓰면 시각이 톱니처럼 뒤로 튄다.
     // 예전에는 그때마다 녹음을 되감아 "Na-naice to-to" 처럼 말머리가 반복됐다 → 최근 1.5초의 중앙값으로 고른 시계를 쓴다
+    // 디즈니+ 시계를 새로 잡았으면(탐색 뒤) 고른 시계도 처음부터 — 예전 값과 섞으면 바로잡힌 위치가 1.5초에 걸쳐 천천히 따라온다
+    if (adapter.usesPageTime && A.shared.ctMap.gen !== dubClockGen) { dubClockGen = A.shared.ctMap.gen; if (dubClock) dubClock.reset(); }
     const t = dubClock ? dubClock.update(raw, now(), paused || dubStall >= 3, rate) : raw;
     // 디즈니+: 정밀 시계(영상 요소 시각 + 차이)를 아직 못 쓰면, 사용자가 옮긴 뒤 플레이어가 새 위치를 알려 줄 때까지 예전 위치가 계속 흘러간다
     // → 그동안은 더빙을 시작하지도 이어 가지도 않는다 (정밀 시계는 옮기는 즉시 새 위치를 따라가므로 기다리지 않는다)
-    const staleAfterSeek = adapter.usesPageTime && !A.preciseClock() && state.seekingAt > 0 && A.shared.pageTime.at < state.seekingAt && now() - state.seekingAt < 1500;
+    // (디즈니+ 는 탐색마다 시계를 새로 잰다. 정밀 시계가 잡히기 전이라도 탐색이 끝난 뒤의 보고가 하나 오면 그것으로 시작하고, 정밀 시계가 잡히는 순간 위치를 다시 맞춘다)
+    const staleAfterSeek = adapter.usesPageTime && !A.preciseClock() && state.seekingAt > 0 && state.freshReportAt < state.seekingAt && now() - state.seekingAt < 1500;
     const tgt = paused || dubStall >= 6 || staleAfterSeek ? null : dubTarget(t); // 0.24초 넘게 멈춰 있으면 더빙도 멈춘다 (영상이 다시 흐르면 그 자리부터)
     const cur = state.dubPlay;
+    // 디즈니+: 우리가 옮긴 뒤 새 시계를 기다리는 동안 더빙할 구간 안이면 원래 소리를 미리 꺼 둔다 (기다리는 사이 원어민 목소리가 새어 나오지 않게).
+    // 우리가 옮긴 탐색만 — 그때는 어림 시계가 옮긴 목표 위치라 믿을 만하다. 사용자가 플레이어에서 옮겼으면 어림 시계는 옮기기 전 위치라 엉뚱한 곳에서 소리를 끈다
+    const ourTarget = state.seekTarget && now() - state.seekTarget.at < 3000;
+    const waitMute = !!(staleAfterSeek && ourTarget && !paused && v && dubTarget(t));
+    if (waitMute) { if (!dubPendingMute || dubPendingMute.v !== v) dubPendingMute = { v, restore: cur && cur.videoEl === v ? cur.restoreMuted : v.muted }; if (!v.muted) v.muted = true; }
+    else if (dubPendingMute && !cur && !tgt) releasePendingMute();
     // 진단 기록: 더빙할 구간에 들고 날 때, 그리고 더빙 중에는 0.24초마다 시계 상태를 남긴다
     const tgtId = tgt ? tgt.take.id : '';
     if (tgtId !== dubLastTgt || ((cur || tgt) && ++dubLogTick % 6 === 0)) {
@@ -2426,7 +2482,10 @@
       if (cur) {
         const beyond = t >= cur.take.clipStartMs + cur.take.ms - 40 || t < cur.take.clipStartMs - 300;
         cur.miss = (cur.miss || 0) + 1;
-        if (paused || beyond || cur.miss >= 4) stopDubPlay(paused ? 'paused' : beyond ? 'beyond' : 'miss:' + (dubStall >= 6 ? 'stall' : staleAfterSeek ? 'stale' : 'nowin')); // 잠깐 빈 틱 하나로 끊었다 다시 틀면 소리가 깜빡인다
+        if (paused || beyond || cur.miss >= 4) {
+          stopDubPlay(paused ? 'paused' : beyond ? 'beyond' : 'miss:' + (dubStall >= 6 ? 'stall' : staleAfterSeek ? 'stale' : 'nowin')); // 잠깐 빈 틱 하나로 끊었다 다시 틀면 소리가 깜빡인다
+          if (waitMute) v.muted = true; // 새 시계를 기다리는 동안에는 원래 소리를 계속 꺼 둔다
+        }
       }
       return;
     }
@@ -2438,12 +2497,20 @@
       const d = want - pos;
       // 정말 어긋났을 때만(탐색·버퍼링) 다시 맞춘다: 큰 점프는 바로, 0.45초 넘는 어긋남은 세 번 연달아일 때. 작은 흔들림에 되감으면 같은 소리가 반복된다
       cur.off = Math.abs(d) > 0.45 ? (cur.off || 0) + 1 : 0;
-      if (Math.abs(d) > 1.5 || cur.off >= 3 || Math.abs(cur.rate - rate) > 0.01) { dubRestartsTotal++; startDubSource(tgt, want, rate, true, 'd=' + fx(d * 1000) + (Math.abs(cur.rate - rate) > 0.01 ? ' rate' : '')); }
+      // 디즈니+ 시계가 새로 잡힌 순간에는 0.12초만 어긋나도 다시 맞춘다 (잡히기 전 어림값으로 시작했으면 그만큼 어긋나 있다)
+      const clockMoved = adapter.usesPageTime && cur.gen !== A.shared.ctMap.gen;
+      if (clockMoved) cur.gen = A.shared.ctMap.gen;
+      if (Math.abs(d) > 1.5 || cur.off >= 3 || (clockMoved && Math.abs(d) > 0.12) || Math.abs(cur.rate - rate) > 0.01) { dubRestartsTotal++; startDubSource(tgt, want, rate, true, 'd=' + fx(d * 1000) + (clockMoved ? ' clock' : '') + (Math.abs(cur.rate - rate) > 0.01 ? ' rate' : '')); }
       else if (cur.videoEl && !cur.videoEl.muted) cur.videoEl.muted = true; // 플레이어가 소리를 되살리면 다시 끈다
       return;
     }
     if (dubStall > 0) return; // 새 더빙은 위치가 실제로 흐를 때만 시작한다 (탐색 직후 예전 위치로 잘못 시작하지 않게)
     startDubSource(tgt, want, rate, false);
+  }
+  function releasePendingMute() {
+    const p = dubPendingMute;
+    dubPendingMute = null;
+    if (p && p.v) p.v.muted = p.restore;
   }
   function startDubSource(tgt, offsetSec, rate, isRestart, why) {
     const buf = dubReady.get(tgt.take.id);
@@ -2452,13 +2519,15 @@
     const ctx = dubAudioCtx();
     if (ctx.state !== 'running') { // 소리를 낼 수 없으면 원래 소리를 끄지 않는다 (페이지를 한 번 누르면 풀린다)
       dlOnce('dub wait audio ' + ctx.state);
+      releasePendingMute(); // 내 더빙을 낼 수 없으면 원래 소리는 들려준다
       if (!dubLockHinted) { dubLockHinted = true; chip('info', '🎙 내 더빙을 들으려면 화면을 한 번 누르세요 (브라우저가 클릭 전에는 소리를 막습니다)', 6000); }
       return;
     }
     const prev = state.dubPlay;
     const v = adapter.video();
     if (prev && prev.src) { try { prev.src.stop(); } catch (e) { /* ignore */ } }
-    const restoreMuted = prev && prev.videoEl === v ? prev.restoreMuted : (v ? v.muted : false);
+    const restoreMuted = prev && prev.videoEl === v ? prev.restoreMuted : (dubPendingMute && dubPendingMute.v === v ? dubPendingMute.restore : (v ? v.muted : false));
+    dubPendingMute = null;
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.playbackRate.value = rate;
@@ -2473,7 +2542,7 @@
     const restarts = isRestart && prev ? (prev.restarts || 0) + 1 : 0;
     dl('dub ' + (isRestart ? 'restart ' + (why || '') : 'start') + ' take=' + tgt.take.id + ' at=' + fx(at * 1000) + ' rate=' + rate);
     if (!isRestart) noteDubBlink(tgt.take.id);
-    state.dubPlay = { seg: tgt.seg, take: tgt.take, src, ctxAt: ctx.currentTime, offset: at, rate, restoreMuted, videoEl: v, restarts, off: 0 };
+    state.dubPlay = { seg: tgt.seg, take: tgt.take, src, ctxAt: ctx.currentTime, offset: at, rate, restoreMuted, videoEl: v, restarts, off: 0, gen: A.shared.ctMap.gen };
     if (ui.ovDub) { ui.ovDub.classList.add('on'); ui.ovDub.dataset.take = tgt.take.id; ui.ovDub.dataset.restarts = String(restarts); }
   }
   // 깜빡임 감지: 멈춘 까닭이 탐색·멈춤·구간 끝이 아닌데 1초 안에 같은 녹음을 다시 틀면 한 번의 "깜빡임"이다. 5초 안에 두 번이면 기록하고 알린다

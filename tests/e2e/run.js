@@ -83,6 +83,11 @@ async function runDisney() {
     await sw.evaluate(() => chrome.storage.local.clear());
     await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { koMode: 'always' } }, {}));
     const dp = await browser.newPage();
+    // 탭이 죽으면(렌더러 충돌) 다음 단계들이 'Target closed / detached Frame' 으로 줄줄이 실패한다 → 원인을 남긴다
+    dp.on('error', (e) => console.log('  [디즈니+ 탭 충돌] ' + e.message));
+    dp.on('pageerror', (e) => console.log('  [디즈니+ 페이지 오류] ' + e.message));
+    dp.on('close', () => console.log('  [디즈니+ 탭 닫힘]'));
+    browser.on('disconnected', () => console.log('  [디즈니+ 브라우저 연결 끊김]'));
     await dp.goto('https://www.disneyplus.com/play/mockdisney1', { waitUntil: 'domcontentloaded' });
     await step('디즈니+(모의): HLS 자막 10줄과 한국어가 연결되고 제목을 읽는다', async () => {
       await dp.waitForSelector('#st-panel', { timeout: 20000 });
@@ -238,6 +243,52 @@ async function runDisney() {
       const again = await run();
       assert(again.filter((x) => x[2]).length > 80 && flipsOf(again).length === 2, '다시 켜면 내 더빙 (한 번 켜지고 한 번 꺼짐): ' + flipsOf(again).length);
     });
+    await step('디즈니+(실제처럼: 탐색마다 영상 시각이 20초에서 다시 시작 · 재생 이벤트 없음 · 0.265초 계단 · 키프레임에서 일찍 시작): 녹음 → 들어보기 → 다음 줄로 넘어가도 그 줄을 끝까지 재생하고 끝에서만 되감는다 (0.5초마다 되감지 않음) · 앞 줄 더빙이 새 줄에서 나오지 않는다 · 옮긴 뒤 시계 오차 0.1초 안', async () => {
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubAutoPreview: true, dubAutoNext: true } }, {}));
+      try {
+        await dp.goto('https://www.disneyplus.com/play/mockdisney1?real=1', { waitUntil: 'domcontentloaded' });
+        await dp.waitForSelector('#st-panel', { timeout: 20000 });
+        await waitFor(() => dp.$$eval('.st-row', (r) => r.length === 10), 20000, 'rows (real-like)');
+        await dp.click('.st-status'); // 사용자 동작 한 번 (자동 재생 규칙)
+        await dp.evaluate(() => { document.querySelector('video').muted = false; window.__player.play(); });
+        await sleep(1500);
+        await dp.evaluate(() => window.__player.seek(6300)); // 디즈니+ 플레이어로 옮긴다 → 영상 시각은 20초에서 다시 시작
+        await sleep(300);
+        await dp.evaluate(() => window.__player.pause());
+        await sleep(900);
+        await dp.keyboard.press('KeyR');
+        const row = await waitFor(() => dp.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox'); return b && b.previousElementSibling.dataset.i; }), 3000, 'dub box (real-like)');
+        assert(row === '1', '6.3초에서 R → 2번 줄 (탐색 뒤 시계를 새로 잰다, 예전 시계면 20초 근처 줄): ' + row);
+        await sleep(400);
+        await dp.keyboard.press('KeyK'); // 녹음 → 내 녹음 들어보기 → 다음 줄로
+        await waitFor(() => dp.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox'); return b && b.previousElementSibling.dataset.i === '2'; }), 30000, 'recorded, previewed and moved on to row 2')
+          .catch(async (e) => { throw new Error(e.message + ' toast=' + await dp.$eval('.st-toast', (t) => t.textContent).catch(() => '')); });
+        const take = await sw.evaluate(async () => { const o = await chrome.storage.local.get(null); const seg = o['dubs:disney:mockdisney1'].segs.find((x) => x.cueStart === 6000); return seg.takes.find((t) => t.id === seg.chosen); });
+        assert(Math.abs(take.clipStartMs - 5750) < 150 && Math.abs(take.ms - 2500) < 150, '녹음이 2번 줄에 맞는다: ' + JSON.stringify(take));
+        // 다음 줄(10~12초)을 6초 동안 본다: [경과 ms, 콘텐츠 ms, 탐색 횟수, 내 더빙 녹음 id]
+        const tl = await dp.evaluate(() => new Promise((res) => {
+          const out = [], ov = document.querySelector('.st-ov-dub'), t0 = performance.now();
+          const timer = setInterval(() => out.push([Math.round(performance.now() - t0), Math.round(window.__contentMs()), window.__seeks.length, ov.classList.contains('on') ? ov.dataset.take : '']), 50);
+          setTimeout(() => { clearInterval(timer); res(out); }, 6000);
+        }));
+        const seekAt = tl.filter((x, k) => k && x[2] !== tl[k - 1][2]).map((x) => x[0]);
+        const gaps = seekAt.slice(1).map((x, k) => x - seekAt[k]);
+        assert(seekAt.length <= 3 && gaps.every((g) => g > 1500), '줄 끝에서만 되감는다 (예전에는 0.5초마다): ' + seekAt.join(','));
+        assert(Math.max(...tl.map((x) => x[1])) > 11900, '3번 줄을 끝까지 재생한다: ' + tl.filter((x, k) => k % 8 === 0).map((x) => x[1]).join(' '));
+        assert(!tl.some((x) => x[3] === take.id && x[1] > 9000), '앞 줄 더빙이 새 줄에서 나오지 않는다');
+        // 사용자가 디즈니+ 에서 직접 옮겨도 1.4초 뒤에는 시계가 0.1초 안으로 맞는다
+        await dp.keyboard.press('KeyR');
+        await sleep(300);
+        await dp.evaluate(() => { window.__player.seek(14100); window.__player.play(); });
+        await sleep(1400);
+        const acc = await dp.evaluate(() => { const b = [...document.querySelectorAll('.st-settings button')].find((x) => x.textContent === '진단 정보'); b.click(); const c = window.__contentMs(); const line = document.querySelector('.st-settings .st-diag').textContent.split('\n').find((l) => l.startsWith('clock')) || ''; return { c: Math.round(c), raw: +(/raw=(-?\d+)/.exec(line) || [])[1], precise: /precise=true/.test(line), line }; });
+        assert(acc.precise && Math.abs(acc.raw - acc.c) < 100, '옮긴 뒤 시계: ' + JSON.stringify(acc));
+      } finally {
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubAutoPreview: false, dubAutoNext: false } }, {})).catch(() => {});
+        await dp.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox .st-dub-close'); if (b) b.click(); window.__player.pause(); }).catch(() => {});
+        await sleep(300);
+      }
+    });
     await step('디즈니+(모의) 따라하기: 이어 붙은 자막에서도 멈춘 동안 따라 할 줄이 화면·패널에 남고, 그 자막 길이만큼 쉰 뒤 이어 간다', async () => {
       await dp.goto('https://www.disneyplus.com/play/mockdisney2', { waitUntil: 'domcontentloaded' });
       await dp.waitForSelector('#st-panel', { timeout: 20000 });
@@ -272,6 +323,14 @@ async function runDisney() {
 (async () => {
   ensureFixtures();
   const servers = await start({ mockRoot: path.join(__dirname, 'mock'), docsRoot: path.join(ROOT, 'docs'), key: fs.readFileSync(path.join(TMP, 'key.pem')), cert: fs.readFileSync(path.join(TMP, 'cert.pem')) });
+  // E2E_ONLY=disney : 모의 디즈니+ 부분만 (디즈니+ 시계를 고칠 때 빠르게 되풀이하려고)
+  if (process.env.E2E_ONLY === 'disney') {
+    try { await runDisney(); } catch (e) { console.log('✖ 치명적 오류: ' + (e && e.stack || e)); results.push({ name: 'disney', ok: false }); }
+    const bad = results.filter((r) => !r.ok);
+    console.log('\n결과: ' + (results.length - bad.length) + '/' + results.length + ' 통과' + (bad.length ? ' — 실패: ' + bad.map((b) => b.name).join(', ') : ''));
+    servers.close();
+    process.exit(bad.length ? 1 : 0);
+  }
   const userDataDir = path.join(TMP, 'profile-' + Date.now());
   const browser = await puppeteer.launch({
     headless: HEADLESS,
