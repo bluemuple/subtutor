@@ -1718,8 +1718,8 @@
   // ── 아이폰 동기화 (SubTutor Pocket): 대사·단어장·보관 MP3 를 Supabase 로 올린다. 아이폰 앱이 같은 계정으로 내려받는다 ──
   // 기본 접속 정보: 본인 Supabase 프로젝트(supabase/schema.sql 참고)를 만들면 아래 두 상수에 넣는다.
   // 그러면 웹·아이폰 모두 이메일·비밀번호만 입력하면 된다 (anon 키는 공개용 키 — RLS 가 본인 데이터만 지킨다)
-  const SUPA_DEFAULT_URL = '';
-  const SUPA_DEFAULT_KEY = '';
+  const SUPA_DEFAULT_URL = 'https://fovhngfqueolqhemymqa.supabase.co';
+  const SUPA_DEFAULT_KEY = 'sb_publishable_vfA8_n_-kbOoBuTSKahwwg_G-0cPMfN'; // publishable 키 — 공개용 (데이터는 RLS 로 본인 것만)
   const supa = {
     url: localStorage.getItem('st.supaUrl') || SUPA_DEFAULT_URL,
     key: localStorage.getItem('st.supaKey') || SUPA_DEFAULT_KEY,
@@ -1728,12 +1728,26 @@
     auto: localStorage.getItem('st.supaAuto') !== '0',       // 자동 동기화 (기본 켬)
     lastAt: +(localStorage.getItem('st.supaLastAt') || 0),   // 마지막 올리기 (자동이든 버튼이든)
     token: null, userId: null, exp: 0, busy: false,
+    advOpen: false, // "고급" 펼침 — 설정 화면이 다시 그려져도 유지
   };
   // 이미 올라간 오디오 id (자동 동기화 때 새 소리만 올리려고 기억해 둔다)
   const supaUploaded = new Set(JSON.parse(localStorage.getItem('st.supaUp') || '[]'));
   const saveSupaUploaded = () => { try { localStorage.setItem('st.supaUp', JSON.stringify(Array.from(supaUploaded))); } catch (e) { /* 용량 초과면 다음에 다시 올린다 */ } };
   const supaSafeName = (x) => String(x).replace(/[^A-Za-z0-9._-]/g, '_'); // 아이폰 앱 Item.safeName 과 같은 규칙이어야 한다
   function supaBase() { return supa.url.trim().replace(/\/+$/, ''); }
+  // Supabase 의 흔한 영어 오류를 한글로
+  function supaKo(m) {
+    const s = String(m || '');
+    if (/Invalid login credentials/i.test(s)) return '이메일 또는 비밀번호가 틀렸습니다';
+    if (/already registered|already exists/i.test(s)) return '이미 가입된 이메일입니다 — "로그인"을 누르세요';
+    const pw = /Password should be at least (\d+)/i.exec(s);
+    if (pw) return '비밀번호는 ' + pw[1] + '자 이상이어야 합니다';
+    if (/Signups not allowed/i.test(s)) return '새 가입이 꺼져 있습니다 — 이미 만든 계정으로 "로그인"하세요';
+    if (/Email not confirmed/i.test(s)) return '이메일 확인이 켜진 설정입니다 — Supabase 에서 Confirm email 을 끄세요';
+    if (/rate limit/i.test(s)) return '요청이 너무 잦습니다 — 잠시 뒤에 다시 해 보세요';
+    if (/validate email|invalid format|email address .* invalid/i.test(s)) return '이메일 형식이 올바르지 않습니다';
+    return s;
+  }
   async function supaFetch(path, opts) {
     let r;
     try { r = await fetch(supaBase() + path, opts); }
@@ -1741,7 +1755,7 @@
     if (!r.ok) {
       let msg = '';
       try { const j = await r.json(); msg = j.error_description || j.msg || j.message || j.error || ''; } catch (e) { /* 본문 없음 */ }
-      throw new Error(msg || ('HTTP ' + r.status));
+      throw new Error(supaKo(msg) || ('HTTP ' + r.status));
     }
     return r;
   }
@@ -1804,8 +1818,9 @@
     saveSupaUploaded();
     // 2) 대사 목록 upsert (아이폰 앱이 읽는 컬럼으로)
     if (onStep) onStep('대사 목록 올리는 중…');
+    if (!supa.userId) throw new Error('로그인 정보가 없습니다 — 다시 로그인하세요');
     const rows = state.items.map((it) => { const r = effRange(it); return {
-      id: it.id, title: it.title || '', episode: it.episode || '', platform: it.platform || '',
+      user_id: supa.userId, id: it.id, title: it.title || '', episode: it.episode || '', platform: it.platform || '',
       text: it.text || '', translation: it.translation || '',
       start_ms: Math.round(r.startMs || 0), end_ms: Math.round(r.endMs || 0), saved_at: it.savedAt || 0,
       box: it.box || 'learning', comment: it.comment || '', tags: it.tags || [],
@@ -1817,7 +1832,7 @@
     let wordCount = 0;
     if (state.words.length) {
       if (onStep) onStep('단어장 올리는 중…');
-      const ws = state.words.map((w) => ({ word: w.word, meaning: w.meaning || '', sentence: w.sentence || '', sentence_ko: w.sentenceKo || '', review: w.review || {}, saved_at: w.savedAt || 0 }));
+      const ws = state.words.map((w) => ({ user_id: supa.userId, word: w.word, meaning: w.meaning || '', sentence: w.sentence || '', sentence_ko: w.sentenceKo || '', review: w.review || {}, saved_at: w.savedAt || 0 }));
       await supaFetch('/rest/v1/words', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' }, H), body: JSON.stringify(ws) });
       wordCount = ws.length;
     }
@@ -1876,7 +1891,7 @@
     return el('section', null, [
       el('h3', null, ['아이폰 동기화 (SubTutor Pocket)', infoBtn('phoneSync')]),
       el('p', { class: 'count' }, '여기 저장한 대사·단어장·보관 소리를 Supabase 로 올리면, 아이폰 앱이 같은 계정으로 내려받아 인터넷 없이도 듣습니다. 한 번 로그인하면 유지됩니다.'),
-      haveDefaults ? el('details', { class: 'supa-adv' }, [el('summary', null, '고급 — 다른 Supabase 서버 쓰기'), urlKeyRow]) : urlKeyRow,
+      haveDefaults ? el('details', { class: 'supa-adv', open: supa.advOpen, ontoggle: (e) => { supa.advOpen = e.target.open; } }, [el('summary', null, '고급 — 다른 Supabase 서버 쓰기'), urlKeyRow]) : urlKeyRow,
       el('div', { class: 'row supa-row' }, [input('supa-email', '이메일', 'email', 'email'), pass, loginBtn, signupBtn, pushBtn, outBtn]),
       autoSw,
       line,

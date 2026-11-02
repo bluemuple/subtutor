@@ -59,7 +59,7 @@ struct RootView: View {
         VStack(spacing: 14) {
             Image(systemName: "icloud.and.arrow.down").font(.system(size: 44)).foregroundStyle(.secondary)
             Text("아직 받아 온 대사가 없습니다").font(.headline)
-            Text("맥의 SubTutor 웹 › 설정 › 아이폰 동기화에서 올린 뒤,\n여기 설정에서 같은 계정으로 로그인하고 동기화를 누르세요.")
+            Text("맥의 SubTutor 웹 › 설정 › 아이폰 동기화에서 회원가입한 뒤,\n여기 설정에서 같은 이메일·비밀번호로 로그인하면 자동으로 받아 옵니다.")
                 .multilineTextAlignment(.center).font(.subheadline).foregroundStyle(.secondary)
             Button("설정 열기") { showSettings = true }.buttonStyle(.borderedProminent)
         }

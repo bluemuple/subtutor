@@ -6,11 +6,25 @@ import Foundation
 // 기본 접속 정보: 본인 Supabase 프로젝트(저장소의 supabase/schema.sql)를 만들면 여기에 넣는다.
 // 그러면 앱에서는 이메일·비밀번호만 입력하면 된다. anon 키는 공개용 키 — 데이터는 RLS 로 본인 것만 열린다.
 enum SupaDefaults {
-    static let url = ""   // 예: https://xxxx.supabase.co
-    static let key = ""   // anon public 키
+    static let url = "https://fovhngfqueolqhemymqa.supabase.co"
+    static let key = "sb_publishable_vfA8_n_-kbOoBuTSKahwwg_G-0cPMfN"   // publishable 키 (공개용)
 }
 
 enum SupaError: LocalizedError {
+    // Supabase 의 흔한 영어 오류를 한글로
+    static func korean(_ code: Int, _ body: String) -> String {
+        var msg = body
+        if let d = body.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+            msg = (o["error_description"] ?? o["msg"] ?? o["message"] ?? o["error"]).map { "\($0)" } ?? body
+        }
+        let m = msg.lowercased()
+        if m.contains("invalid login credentials") { return "이메일 또는 비밀번호가 틀렸습니다" }
+        if m.contains("email not confirmed") { return "이메일 확인이 켜진 설정입니다 — Supabase 에서 Confirm email 을 끄세요" }
+        if m.contains("refresh token") { return "로그인이 풀렸습니다 — 다시 로그인하세요" }
+        if m.contains("rate limit") { return "요청이 너무 잦습니다 — 잠시 뒤에 다시 해 보세요" }
+        if m.contains("object not found") || m.contains("not_found") { return "서버에 소리 파일이 없습니다 — 맥 웹에서 \"아이폰으로 올리기 (전체)\"를 누르세요" }
+        return "HTTP \(code) \(msg.prefix(140))"
+    }
     case badConfig
     case http(Int, String)
     case notSignedIn
@@ -18,7 +32,7 @@ enum SupaError: LocalizedError {
         switch self {
         case .badConfig: return "Supabase 주소와 anon 키를 먼저 넣으세요"
         case .notSignedIn: return "로그인이 필요합니다"
-        case .http(let code, let body): return "HTTP \(code) \(body.prefix(140))"
+        case .http(let code, let body): return SupaError.korean(code, body)
         }
     }
 }
@@ -29,7 +43,10 @@ final class Supa {
     private var refreshToken: String? = UserDefaults.standard.string(forKey: "refreshToken")
     private var userId: String? = UserDefaults.standard.string(forKey: "supaUserId")
 
-    static func describe(_ error: Error) -> String { (error as? LocalizedError)?.errorDescription ?? String(describing: error) }
+    static func describe(_ error: Error) -> String {
+        if let u = error as? URLError { return u.code == .notConnectedToInternet ? "인터넷에 연결돼 있지 않습니다" : "서버에 닿지 못했습니다 (\(u.code.rawValue))" }
+        return (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+    }
 
     private func base(_ url: String) throws -> URL {
         let t = url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -41,7 +58,8 @@ final class Supa {
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.setValue(key, forHTTPHeaderField: "apikey")
-        req.setValue("Bearer \(token ?? key)", forHTTPHeaderField: "Authorization")
+        // 로그인한 뒤에만 사용자 토큰을 보낸다 — 새 publishable 키(sb_publishable_…)는 JWT 가 아니라 Bearer 로 보내면 안 된다
+        if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         for (k, v) in extra { req.setValue(v, forHTTPHeaderField: k) }
         if let json {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")

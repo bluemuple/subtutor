@@ -11,6 +11,8 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const EXT = path.join(ROOT, 'extension');
 const TMP = path.join(__dirname, '.tmp');
 const HEADLESS = process.env.HEADFUL ? false : true;
+// 웹·앱 코드에 실제 Supabase 주소가 기본값으로 들어 있다 — 테스트 크롬은 그 서버에 절대 닿지 못하게 막는다 (모의 서버는 127.0.0.1:8769)
+const NO_REAL_SUPABASE = 'MAP *.supabase.co 127.0.0.1:9';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 async function step(name, fn) {
@@ -64,7 +66,7 @@ async function runDisney() {
     userDataDir,
     args: [
       '--disable-extensions-except=' + EXT, '--load-extension=' + EXT,
-      '--host-resolver-rules=MAP www.disneyplus.com 127.0.0.1:8443, MAP translate.googleapis.com 127.0.0.1:8443, MAP clients5.google.com 127.0.0.1:8443',
+      '--host-resolver-rules=MAP www.disneyplus.com 127.0.0.1:8443, MAP translate.googleapis.com 127.0.0.1:8443, MAP clients5.google.com 127.0.0.1:8443, ' + NO_REAL_SUPABASE,
       '--ignore-certificate-errors', '--autoplay-policy=no-user-gesture-required', '--mute-audio',
       '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
       '--use-file-for-fake-audio-capture=' + path.join(TMP, 'mic-sweep.wav'),
@@ -329,7 +331,7 @@ async function runSites() {
   const browser = await puppeteer.launch({
     headless: HEADLESS,
     userDataDir,
-    args: ['--disable-extensions-except=' + EXT, '--load-extension=' + EXT, '--host-resolver-rules=' + hosts.map((h) => 'MAP ' + h + ' 127.0.0.1:8443').join(', '),
+    args: ['--disable-extensions-except=' + EXT, '--load-extension=' + EXT, '--host-resolver-rules=' + hosts.map((h) => 'MAP ' + h + ' 127.0.0.1:8443').concat(NO_REAL_SUPABASE).join(', '),
       '--ignore-certificate-errors', '--autoplay-policy=no-user-gesture-required', '--mute-audio', '--no-first-run', '--window-size=1400,900'],
     acceptInsecureCerts: true,
     defaultViewport: { width: 1400, height: 900 },
@@ -516,7 +518,7 @@ async function runSites() {
     userDataDir,
     args: [
       '--disable-extensions-except=' + EXT, '--load-extension=' + EXT,
-      '--host-resolver-rules=MAP www.netflix.com 127.0.0.1:8443, MAP www.youtube.com 127.0.0.1:8443, MAP translate.googleapis.com 127.0.0.1:8443, MAP clients5.google.com 127.0.0.1:8443',
+      '--host-resolver-rules=MAP www.netflix.com 127.0.0.1:8443, MAP www.youtube.com 127.0.0.1:8443, MAP translate.googleapis.com 127.0.0.1:8443, MAP clients5.google.com 127.0.0.1:8443, ' + NO_REAL_SUPABASE,
       '--ignore-certificate-errors', '--autoplay-policy=no-user-gesture-required', '--mute-audio',
       '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--no-first-run', '--window-size=1400,900',
     ],
@@ -2469,13 +2471,20 @@ async function runSites() {
       // 이 시점엔 보관 오디오 항목이 없을 수 있으니(캡처 스텝들은 자기 정리를 한다) 하나 심어 소리 업로드까지 본다
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'web.items.import', payload: { items: [{ id: 'netflix:12345:2000', platform: 'netflix', videoId: '12345', title: 'Mock Show', episode: 'S1:E1', text: 'Hello there, welcome to the test.', translation: '', startMs: 2000, endMs: 4000, savedAt: Date.now(), box: 'learning', audio: { ms: 2500, leadMs: 250, mime: 'audio/mpeg' } }] } }, {}));
       await sw.evaluate(() => chrome.storage.local.set({ ['audio:netflix:12345:2000']: 'SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAA' + 'QUFB'.repeat(300) }));
+      // 코드 기본값은 실제 Supabase 다 — 주소·키는 페이지가 뜨기 전에 모의 서버로 넣어 두고, 유저처럼 이메일·비밀번호만 입력한다
+      await w3.evaluateOnNewDocument(() => { try { localStorage.setItem('st.supaUrl', 'http://127.0.0.1:8769'); localStorage.setItem('st.supaKey', 'test-anon'); } catch (e) { /* ignore */ } });
       await w3.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
-      await w3.waitForSelector('.supa-url');
-      const type = async (sel, txt) => { await w3.click(sel, { clickCount: 3 }); await w3.type(sel, txt); };
-      await type('.supa-url', 'http://127.0.0.1:8769');
-      await type('.supa-key', 'test-anon');
-      await type('.supa-email', 'me@test.local');
-      await type('.supa-pass', 'pass1234');
+      await w3.waitForSelector('.supa-email', { visible: true });
+      await sleep(1500); // 설정 화면은 데이터를 다 불러온 뒤 한 번 더 그려진다 (그때 입력 중인 칸이 새로 만들어진다)
+      const type = async (sel, txt) => { await w3.$eval(sel, (e) => { e.value = ''; }); await w3.type(sel, txt); };
+      for (let k = 0; ; k++) {
+        await type('.supa-email', 'me@test.local');
+        await type('.supa-pass', 'pass1234');
+        const f = await w3.evaluate(() => ({ url: document.querySelector('.supa-url').value, email: document.querySelector('.supa-email').value, pass: document.querySelector('.supa-pass').value }));
+        if (f.email === 'me@test.local' && f.pass === 'pass1234') { assert(f.url === 'http://127.0.0.1:8769', 'sign up only against the mock, got ' + f.url); break; }
+        if (k >= 2) throw new Error('login form kept resetting ' + JSON.stringify(f));
+        await sleep(800);
+      }
       await w3.click('.supa-signup');
       await waitFor(() => w3.$eval('.supa-line', (e) => /^올렸습니다/.test(e.textContent)), 60000, 'signup logs in and uploads')
         .catch(async (e) => {

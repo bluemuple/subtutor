@@ -157,7 +157,7 @@
 1. supabase.com 에서 무료 프로젝트를 만듭니다.
 2. SQL Editor 에 `supabase/schema.sql` 전체를 붙여 넣어 실행합니다.
 3. Authentication › Sign In / Up 에서 "Confirm email" 을 끄고, 혼자 쓸 거라면 가입 후 "Allow new users to sign up" 도 꺼 둡니다.
-4. 프로젝트 URL 과 anon public 키를 `docs/app.js` 의 `SUPA_DEFAULT_URL/KEY` 와 `ios/SubTutorPocket/Supa.swift` 의 `SupaDefaults` 에 넣으면, 웹·앱 모두 **이메일·비밀번호만** 입력하면 됩니다(안 넣으면 설정에 URL·키 입력칸이 보입니다). anon 키는 공개용 키이고 데이터는 RLS 로 본인 것만 열립니다.
+4. 프로젝트 URL 과 publishable 키(`sb_publishable_…`, 예전 프로젝트는 anon public 키)를 `docs/app.js` 의 `SUPA_DEFAULT_URL/KEY` 와 `ios/SubTutorPocket/Supa.swift` 의 `SupaDefaults` 에 넣으면(이 저장소에는 이미 들어가 있음), 웹·앱 모두 **이메일·비밀번호만** 입력하면 됩니다(안 넣으면 설정에 URL·키 입력칸이 보입니다). anon 키는 공개용 키이고 데이터는 RLS 로 본인 것만 열립니다.
 
 **아이폰에 설치 (맥 필요)**
 ```bash
