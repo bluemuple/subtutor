@@ -35,3 +35,4 @@ targets:
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: GS6J5UAF55   # bluemuple 개발자 팀 (유료 계정 — 설치한 앱은 프로필 만료일까지 작동)

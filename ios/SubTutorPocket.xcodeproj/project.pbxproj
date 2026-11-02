@@ -87,6 +87,7 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					D2BA158C78C414BCB891ADF1 = {
+						DevelopmentTeam = GS6J5UAF55;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -252,6 +253,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = GS6J5UAF55;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SubTutorPocket/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -271,6 +273,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = GS6J5UAF55;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SubTutorPocket/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
