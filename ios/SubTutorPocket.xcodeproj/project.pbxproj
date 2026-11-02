@@ -8,25 +8,31 @@
 
 /* Begin PBXBuildFile section */
 		1323D62688FAEEEF26AB8F03 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42D839C6360102AB3B1B0031 /* Recorder.swift */; };
+		27B73B5F99E23F6D46882B55 /* SpeakView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAC451B0DFFF79E294F3B0A9 /* SpeakView.swift */; };
 		2DD7BC9BDC4CB71CEC22FE02 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F3AA3450C084B6F61852D7 /* App.swift */; };
 		354EA9B31C589DF24C432266 /* Supa.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD1507BD343791BF824B6E3A /* Supa.swift */; };
 		4FFD2729DBDF94A6DDC29A8E /* SpeechCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = 487D7ECDD8EF476C639E6821 /* SpeechCheck.swift */; };
 		505729B7CB191412B471CD5B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3D33C23CC85CBC4CA0871232 /* Assets.xcassets */; };
+		7852A931B5D893771D066950 /* Speak.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BD6D31E6FD4075C3722D007 /* Speak.swift */; };
 		7B53F2A6F71C0DD1BC8E04B0 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E5F795CEF222287575E670B /* Models.swift */; };
 		B31F15CE508A52681255ED58 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = A150A796813AD78C0F45DB60 /* Views.swift */; };
+		D6FE86A79CEA1C2B85AB602A /* speakPrompts.json in Resources */ = {isa = PBXBuildFile; fileRef = 9E9A280FCAC318DF88DF6D21 /* speakPrompts.json */; };
 		DD21EAAD8417DE5A1A75427F /* Player.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E8E47D9C5A9CA1A878FA9F6 /* Player.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		03263BEFD80E578C64B4FDA8 /* SubTutorPocket.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SubTutorPocket.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3BD6D31E6FD4075C3722D007 /* Speak.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Speak.swift; sourceTree = "<group>"; };
 		3D33C23CC85CBC4CA0871232 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		3E8E47D9C5A9CA1A878FA9F6 /* Player.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Player.swift; sourceTree = "<group>"; };
 		42D839C6360102AB3B1B0031 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		487D7ECDD8EF476C639E6821 /* SpeechCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCheck.swift; sourceTree = "<group>"; };
 		51F3AA3450C084B6F61852D7 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		6E5F795CEF222287575E670B /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		9E9A280FCAC318DF88DF6D21 /* speakPrompts.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = speakPrompts.json; sourceTree = "<group>"; };
 		A150A796813AD78C0F45DB60 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
 		BD1507BD343791BF824B6E3A /* Supa.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Supa.swift; sourceTree = "<group>"; };
+		DAC451B0DFFF79E294F3B0A9 /* SpeakView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakView.swift; sourceTree = "<group>"; };
 		ED216312B0C51736E6BB7852 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -40,6 +46,9 @@
 				6E5F795CEF222287575E670B /* Models.swift */,
 				3E8E47D9C5A9CA1A878FA9F6 /* Player.swift */,
 				42D839C6360102AB3B1B0031 /* Recorder.swift */,
+				3BD6D31E6FD4075C3722D007 /* Speak.swift */,
+				9E9A280FCAC318DF88DF6D21 /* speakPrompts.json */,
+				DAC451B0DFFF79E294F3B0A9 /* SpeakView.swift */,
 				487D7ECDD8EF476C639E6821 /* SpeechCheck.swift */,
 				BD1507BD343791BF824B6E3A /* Supa.swift */,
 				A150A796813AD78C0F45DB60 /* Views.swift */,
@@ -124,6 +133,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				505729B7CB191412B471CD5B /* Assets.xcassets in Resources */,
+				D6FE86A79CEA1C2B85AB602A /* speakPrompts.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -138,6 +148,8 @@
 				7B53F2A6F71C0DD1BC8E04B0 /* Models.swift in Sources */,
 				DD21EAAD8417DE5A1A75427F /* Player.swift in Sources */,
 				1323D62688FAEEEF26AB8F03 /* Recorder.swift in Sources */,
+				7852A931B5D893771D066950 /* Speak.swift in Sources */,
+				27B73B5F99E23F6D46882B55 /* SpeakView.swift in Sources */,
 				4FFD2729DBDF94A6DDC29A8E /* SpeechCheck.swift in Sources */,
 				354EA9B31C589DF24C432266 /* Supa.swift in Sources */,
 				B31F15CE508A52681255ED58 /* Views.swift in Sources */,

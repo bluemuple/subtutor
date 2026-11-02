@@ -19,6 +19,7 @@ struct SubTutorPocketApp: App {
         _store = StateObject(wrappedValue: s)
         _player = StateObject(wrappedValue: p)
         _recorder = StateObject(wrappedValue: r)
+        Store.sharedForSpeak = s                      // 입트기 지연 올리기가 로그인 정보를 읽는다
         try? FileManager.default.createDirectory(at: Store.audioDir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: Store.recDir, withIntermediateDirectories: true)
     }
@@ -29,6 +30,7 @@ struct SubTutorPocketApp: App {
                 .environmentObject(store)
                 .environmentObject(player)
                 .environmentObject(recorder)
+                .environmentObject(SpeakStore.shared)
                 .task { await store.autoSyncIfDue() }                 // 켜면 자동 동기화 (10분에 한 번)
                 .onChange(of: scenePhase) { ph in                     // 백그라운드에서 돌아와도
                     if ph == .active { Task { await store.autoSyncIfDue() } }

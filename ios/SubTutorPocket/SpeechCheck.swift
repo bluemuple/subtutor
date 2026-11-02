@@ -34,7 +34,7 @@ enum SpeechCheck {
 
     static func check(url: URL, reference: String) async -> SpeechResult? {
         guard await authorize() else { return nil }
-        guard let heard = await recognize(url), !heard.isEmpty else { return nil }
+        guard let heard = await recognize(url, timeout: 20), !heard.isEmpty else { return nil }
         let (score, missed) = compare(reference: reference, heard: heard)
         return SpeechResult(score: score, heard: heard, missed: missed)
     }
@@ -53,7 +53,7 @@ enum SpeechCheck {
         }
     }
 
-    private static func recognize(_ url: URL) async -> String? {
+    static func recognize(_ url: URL, timeout: Double = 20) async -> String? {
         // 뉴질랜드 영어 인식기가 있으면 그것을, 없으면 미국 영어
         let nz = SFSpeechRecognizer(locale: Locale(identifier: "en-NZ"))
         let rec = (nz?.isAvailable == true ? nz : nil) ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
@@ -67,7 +67,7 @@ enum SpeechCheck {
                 if let result, result.isFinal { once.resume(result.bestTranscription.formattedString) }
                 else if error != nil { once.resume(nil) }
             }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 20) { _ = rec; task.cancel(); once.resume(nil) }   // 20초 넘으면 포기
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { _ = rec; task.cancel(); once.resume(nil) }   // 제한 시간 넘으면 포기
         }
     }
 

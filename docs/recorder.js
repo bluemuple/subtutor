@@ -105,6 +105,42 @@ window.SubTutorRecorder = (() => {
     };
   }
 
+  // 입트기용 긴 녹음: 멈춤·재개(멈춘 시간은 길이에서 뺀다) + 파형용 analyser
+  async function session() {
+    const s = await getStream();
+    const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'].find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+    const rec = new MediaRecorder(s, mime ? { mimeType: mime } : undefined);
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const done = new Promise((resolve) => { rec.onstop = () => resolve(new Blob(chunks, { type: rec.mimeType || mime || 'audio/webm' })); });
+    let activeMs = 0;
+    let segStart = Date.now();
+    rec.start(250);
+    let ctx = null, analyser = null;
+    try {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = ctx.createMediaStreamSource(s);
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      src.connect(analyser);
+    } catch (e) { /* 파형 없이도 녹음은 된다 */ }
+    return {
+      analyser,
+      get state() { return rec.state; },
+      get activeMs() { return rec.state === 'recording' ? activeMs + (Date.now() - segStart) : activeMs; },
+      pause() { if (rec.state === 'recording') { activeMs += Date.now() - segStart; try { rec.pause(); } catch (e) { /* ignore */ } } },
+      resume() { if (rec.state === 'paused') { segStart = Date.now(); try { rec.resume(); } catch (e) { /* ignore */ } } },
+      async stop() {
+        if (rec.state === 'recording') activeMs += Date.now() - segStart;
+        if (rec.state !== 'inactive') rec.stop();
+        const blob = await done;
+        if (ctx) { try { ctx.close(); } catch (e) { /* ignore */ } }
+        releaseMic();
+        return { blob, durationMs: activeMs };
+      },
+    };
+  }
+
   let currentAudio = null;
   function stop() {
     if (currentAudio) { try { currentAudio.pause(); } catch (e) { /* ignore */ } currentAudio = null; }
@@ -122,5 +158,5 @@ window.SubTutorRecorder = (() => {
       a.play().catch(finish);
     });
   }
-  return { list, listAll, add, remove, clearItem, clearAll, start, play, stop, releaseMic, micOpen: () => !!(stream && stream.active), MAX };
+  return { list, listAll, add, remove, clearItem, clearAll, start, session, play, stop, releaseMic, micOpen: () => !!(stream && stream.active), MAX };
 })();

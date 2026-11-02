@@ -2534,6 +2534,122 @@ async function runSites() {
       }
     });
 
+    // ── 입트기 (말하기 유창성 연습, 웹) — 확장 프로그램 없이도 도는 화면이라 새 탭에서 ──
+    let w4 = null;
+    await step('입트기(웹): 기본 프롬프트 48 + 줄 붙여넣기(번호 떼고·중복 버림) · 편집·지우기 · 자유 말하기(가짜 마이크) 녹음이 기록 줄로 · 별점·메모', async () => {
+      w4 = await browser.newPage();
+      await w4.evaluateOnNewDocument(() => { try {
+        localStorage.setItem('st.supaUrl', 'http://127.0.0.1:8769');
+        localStorage.setItem('st.supaKey', 'test-anon');
+        localStorage.setItem('st.supaRefresh', 'rt-speak');
+        localStorage.setItem('st.speak', JSON.stringify({ stages: [1, 1] }));   // 줄여 말하기 단계를 1초·1초로 (설정에서 바꿀 수 있는 값)
+      } catch (e) { /* ignore */ } });
+      await w4.goto('http://localhost:8766/#/speak', { waitUntil: 'load' });
+      await w4.waitForSelector('.speak-p', { visible: true });
+      const base = await w4.evaluate(() => ({
+        n: JSON.parse(localStorage.getItem('st.speak')).prompts.length,
+        groups: document.querySelectorAll('.speak-group').length,
+      }));
+      assert(base.n >= 48, '기본 프롬프트가 내장된다: ' + base.n);
+      assert(base.groups >= 9, '짧게/길게 묶음 제목: ' + base.groups);
+      // 줄 붙여넣기 → 1줄 1프롬프트 (번호·글머리표 제거, 중복 무시)
+      await w4.evaluate(() => { [...document.querySelectorAll('.speak-head .btn')].find((b) => b.textContent === '＋ 추가').click(); });
+      await w4.type('.speak-import textarea', '1. Custom one?\n- Custom two!\ncustom ONE?');
+      await w4.evaluate(() => document.querySelector('.speak-import .btn.primary').click());
+      let mine = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).prompts.filter((x) => x.cat === 'mine'));
+      assert(mine.length === 2 && mine[0].text === 'Custom one?' && mine[1].text === 'Custom two!', '3줄 → 2개 (번호 떼고 중복 버림): ' + JSON.stringify(mine.map((x) => x.text)));
+      // 편집: 이름 고치기 + 지우기(지움 표식)
+      await w4.evaluate(() => { [...document.querySelectorAll('.speak-head .btn')].find((b) => b.textContent === '✎ 편집').click(); });
+      await w4.evaluate((id) => {
+        const card = document.querySelector('[data-sp="' + id + '"]');
+        const input = card.querySelector('input');
+        input.value = 'Custom one, edited?';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }, mine[0].id);
+      await w4.evaluate((id) => { document.querySelector('[data-sp="' + id + '"] .btn.danger').click(); }, mine[1].id);
+      await w4.evaluate(() => { [...document.querySelectorAll('.speak-head .btn')].find((b) => b.textContent === '편집 끝').click(); });
+      mine = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).prompts.filter((x) => x.cat === 'mine'));
+      assert(mine[0].text === 'Custom one, edited?' && mine[1].deleted === true, '편집·지우기: ' + JSON.stringify([mine[0].text, mine[1].deleted]));
+      assert(await w4.evaluate((id) => !document.querySelector('[data-sp="' + id + '"]'), mine[1].id), '지운 프롬프트는 목록에서 빠진다');
+      // 자유 말하기: 가짜 마이크로 1.2초쯤 녹음
+      await w4.evaluate((id) => { document.querySelector('[data-sp="' + id + '"] .p-head').click(); }, mine[0].id);
+      await w4.evaluate((id) => { [...document.querySelector('[data-sp="' + id + '"]').querySelectorAll('.speak-bigbtns .btn')].find((b) => b.textContent.includes('자유')).click(); }, mine[0].id);
+      await w4.waitForSelector('.speak-rec', { visible: true });
+      await new Promise((r) => setTimeout(r, 1300));
+      await w4.evaluate(() => document.querySelector('.speak-rec .rbtn.stop').click());
+      await waitFor(() => w4.evaluate(() => !document.querySelector('.speak-rec')), 8000, 'free recording saves and closes');
+      await waitFor(() => w4.evaluate(() => document.querySelectorAll('.speak-take').length >= 1), 5000, 'take row appears');
+      const t1 = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes[0]);
+      assert(t1.mode === 'free' && t1.durMs >= 900, '자유 녹음 길이: ' + Math.round(t1.durMs) + 'ms');
+      // 별점 4 + 메모
+      await w4.evaluate(() => { document.querySelectorAll('.speak-take .speak-stars button')[3].click(); });
+      await w4.evaluate(() => { document.querySelector('.speak-take .icon[title="메모"]').click(); });
+      await w4.evaluate(() => {
+        const ta = document.querySelector('.speak-take .t-memo');
+        ta.value = '막힌 데: rules 설명';
+        ta.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      const t1b = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes[0]);
+      assert(t1b.rating === 4 && t1b.memo === '막힌 데: rules 설명', '별점·메모 저장: ' + JSON.stringify([t1b.rating, t1b.memo]));
+      // 재생 단추가 생긴다 (오디오가 이 브라우저에 있다)
+      assert(await w4.evaluate(() => !!document.querySelector('.speak-take .icon[title="재생"]')), '오디오가 있어 ▶ 가 보인다');
+    });
+
+    await step('입트기(웹) 줄여 말하기: 1초 단계를 넘기면 원형 타이머에 +N초가 올라가고(주황), 멈추면 "N초 초과" → 다음 단계는 일찍 멈춰 "N초 부족" · 기록 줄에 목표와 초과/부족', async () => {
+      const mine = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).prompts.filter((x) => x.cat === 'mine' && !x.deleted));
+      await w4.evaluate((id) => { const c = document.querySelector('[data-sp="' + id + '"]'); if (!c.classList.contains('open')) c.querySelector('.p-head').click(); }, mine[0].id);
+      await w4.evaluate((id) => { [...document.querySelector('[data-sp="' + id + '"]').querySelectorAll('.speak-bigbtns .btn')].find((b) => b.textContent.includes('줄여')).click(); }, mine[0].id);
+      await w4.waitForSelector('.speak-rec .speak-ring', { visible: true });
+      await new Promise((r) => setTimeout(r, 1900));   // 1초 목표를 넘긴다
+      const over = await w4.evaluate(() => ({ clock: document.querySelector('.speak-rec .r-clock').textContent, overLen: document.querySelector('.speak-rec .ring-over').getAttribute('stroke-dasharray') }));
+      assert(/^\+\d+$/.test(over.clock), '넘긴 시간이 +N 으로 보인다: ' + over.clock);
+      assert(parseFloat(over.overLen) > 0, '주황 띠가 같은 방향으로 덧칠된다: ' + over.overLen);
+      await w4.evaluate(() => document.querySelector('.speak-rec .rbtn.stop').click());
+      await waitFor(() => w4.evaluate(() => { const r = document.querySelector('.speak-rec .r-result'); return r && r.style.display !== 'none' && !!r.querySelector('b'); }), 8000, 'stage result shows');
+      const r1 = await w4.evaluate(() => document.querySelector('.speak-rec .r-result b').textContent);
+      assert(/초과/.test(r1), '1단계 결과가 "초과": ' + r1);
+      // 다음 단계(1초)를 일찍 멈춰 "부족"
+      await w4.evaluate(() => { [...document.querySelectorAll('.speak-rec .r-result .btn')].find((b) => b.textContent.startsWith('다음 단계')).click(); });
+      await waitFor(() => w4.evaluate(() => /2\/2/.test(document.querySelector('.speak-rec .r-stage').textContent) && document.querySelector('.speak-rec .r-result').style.display === 'none'), 8000, 'stage 2 starts');
+      await new Promise((r) => setTimeout(r, 420));
+      await w4.evaluate(() => document.querySelector('.speak-rec .rbtn.stop').click());
+      await waitFor(() => w4.evaluate(() => { const r = document.querySelector('.speak-rec .r-result'); const b = r && r.querySelector('b'); return r && r.style.display !== 'none' && b && /2단계/.test(b.textContent); }), 8000, 'stage 2 result shows');
+      const r2 = await w4.evaluate(() => document.querySelector('.speak-rec .r-result b').textContent);
+      assert(/부족/.test(r2), '2단계(일찍 멈춤) 결과가 "부족": ' + r2);
+      await w4.evaluate(() => { [...document.querySelectorAll('.speak-rec .r-result .btn')].find((b) => b.textContent === '끝내기').click(); });
+      await waitFor(() => w4.evaluate(() => !document.querySelector('.speak-rec')), 5000, 'session closes');
+      const steps = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes.filter((t) => t.mode === 'step'));
+      assert(steps.length === 2 && steps.every((t) => t.targetS === 1), '줄여 기록 2개(목표 1초): ' + JSON.stringify(steps.map((t) => Math.round(t.durMs))));
+      const badges = await w4.evaluate(() => [...document.querySelectorAll('.speak-take .t-over, .speak-take .t-under')].map((x) => x.textContent));
+      assert(badges.some((x) => /초과/.test(x)) && badges.some((x) => /부족/.test(x)), '기록 줄에 초과·부족 배지: ' + JSON.stringify(badges));
+    });
+
+    await step('입트기(웹) 동기화: 바뀐 프롬프트·기록만 모의 Supabase 로(오디오 없음), 폰에서 고친 프롬프트는 updated_at 비교로 받아 온다', async () => {
+      try {
+        await w4.evaluate(() => { [...document.querySelectorAll('.speak-head .btn')].find((b) => b.textContent === '동기화').click(); });
+        await waitFor(() => w4.evaluate(() => /동기화 끝/.test(document.querySelector('.speak-sync').textContent)), 15000, 'speak sync finishes');
+        const st = await supaState();
+        assert(st.speakPrompts.length === 2, '바뀐 프롬프트만 올라간다 (내장 48개는 안 올라감): ' + st.speakPrompts.length);
+        assert(st.speakPrompts.some((x) => x.deleted === true), '지움 표식도 올라간다');
+        assert(st.speakTakes.length === 3 && st.speakTakes.every((x) => typeof x.dur_ms === 'number'), '기록 3개가 정보만 올라간다: ' + st.speakTakes.length);
+        const edited = st.speakPrompts.find((x) => !x.deleted);
+        assert(edited.text === 'Custom one, edited?', '고친 글이 올라갔다: ' + edited.text);
+        const rated = st.speakTakes.find((x) => x.rating === 4);
+        assert(rated && rated.memo === '막힌 데: rules 설명' && rated.mode === 'free', '별점·메모·모드가 올라갔다');
+        // 폰에서 고쳤다 치고(더 새 updated_at) → 받아 오기
+        const phoneAt = new Date(Date.now() + 1500).toISOString();
+        await fetch('http://127.0.0.1:8769/rest/v1/speak_prompts?id=eq.' + encodeURIComponent(edited.id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'Edited on phone', updated_at: phoneAt }) });
+        await w4.evaluate(() => { [...document.querySelectorAll('.speak-head .btn')].find((b) => b.textContent === '동기화').click(); });
+        await waitFor(() => w4.evaluate((id) => {
+          const p = JSON.parse(localStorage.getItem('st.speak')).prompts.find((x) => x.id === id);
+          return p && p.text === 'Edited on phone';
+        }, edited.id), 15000, 'phone edit pulled');
+        assert(await w4.evaluate((id) => document.querySelector('[data-sp="' + id + '"] .p-text').textContent === 'Edited on phone', edited.id), '받아 온 글이 화면에도 보인다');
+      } finally {
+        await w4.close().catch(() => {});
+      }
+    });
+
     const errors = logs.filter((l) => /error/i.test(l) && !/favicon|ERR_|net::/i.test(l));
     if (errors.length) console.log('  콘솔 오류:\n   ' + errors.slice(0, 10).join('\n   '));
     await runDisney();

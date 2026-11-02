@@ -54,7 +54,7 @@ final class Supa {
         return u
     }
 
-    private func request(_ url: URL, key: String, method: String = "GET", token: String? = nil, json: [String: Any]? = nil, extra: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+    private func request(_ url: URL, key: String, method: String = "GET", token: String? = nil, json: Any? = nil, extra: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.setValue(key, forHTTPHeaderField: "apikey")
@@ -156,6 +156,32 @@ final class Supa {
             t = try await refresh(url: url, key: key)
             _ = try await request(c.url!, key: key, method: "PATCH", token: t, json: body, extra: ["Prefer": "return=minimal"])
         }
+    }
+
+    // ── 입트기 표 (speak_prompts · speak_takes): 바뀐 행 upsert + updated_at 으로 걸러 받기 ──
+    // user_id 는 보내지 않는다 — 스키마 기본값 auth.uid() 가 채운다
+    func upsertRows(url: String, key: String, table: String, rows: [[String: Any]]) async throws {
+        guard !rows.isEmpty else { return }
+        let u = try base(url).appendingPathComponent("rest/v1/\(table)")
+        let extra = ["Prefer": "resolution=merge-duplicates,return=minimal"]
+        var t = try await token(url: url, key: key)
+        do {
+            _ = try await request(u, key: key, method: "POST", token: t, json: rows, extra: extra)
+        } catch SupaError.http(401, _) {
+            accessToken = nil
+            t = try await refresh(url: url, key: key)
+            _ = try await request(u, key: key, method: "POST", token: t, json: rows, extra: extra)
+        }
+    }
+
+    func fetchRows(url: String, key: String, table: String, sinceISO: String) async throws -> [[String: Any]] {
+        let u = try base(url)
+        let data = try await authed({ _ in
+            var c = URLComponents(url: u.appendingPathComponent("rest/v1/\(table)"), resolvingAgainstBaseURL: false)!
+            c.queryItems = [URLQueryItem(name: "select", value: "*"), URLQueryItem(name: "updated_at", value: "gt.\(sinceISO)")]
+            return c.url!
+        }, url: url, key: key)
+        return (try JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
     }
 
     func signOut() {

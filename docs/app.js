@@ -9,6 +9,7 @@
   const St = window.SubTutorStretch;
   const KIWI = window.SubTutorKiwi || [];
   const NZV = window.SubTutorNZVowels;
+  const F = window.SubTutorFluency;
   const DAY = 86400000;
   const WEB_DEFAULTS = { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1], fastRates: [1, 1.25, 1.5, 1] };
   // 사다리 단계 수를 바꿀 때 채워 넣는 기본값 (마지막은 1배속)
@@ -989,11 +990,406 @@
     });
   }
 
+
+  // ───────── 입트기 (말하기 유창성 연습) ─────────
+  // 프롬프트(기본 48개 내장 + 직접 추가)를 누르면 펼쳐져 자유 말하기 / 줄여 말하기(4/3/2식 다운 타이머)로 녹음한다.
+  // 오디오는 이 브라우저(IndexedDB)에만 두고, 프롬프트와 기록(길이·날짜·별점·메모·받아 적기)만 Supabase 로 동기화한다.
+  const SPEAK_GROUPS = [
+    ['mine', '내 프롬프트'],
+    ['short:boss', '짧게 답하기 · 교장·동료의 말'], ['short:student', '짧게 답하기 · 학생과 주고받기'],
+    ['short:parent', '짧게 답하기 · 학부모'], ['short:etc', '짧게 답하기 · 그 외'],
+    ['long:daily', '길게 말하기 · 일상 이야기'], ['long:opinion', '길게 말하기 · 내 생각'],
+    ['long:class', '길게 말하기 · 수업에서'], ['long:meeting', '길게 말하기 · 회의에서'], ['long:etc', '길게 말하기 · 그 외'],
+  ];
+  const SPEAK_STAGE_DEFAULT = [75, 60, 45];
+  function loadSpeak() {
+    let o = {};
+    try { o = JSON.parse(localStorage.getItem('st.speak') || '{}') || {}; } catch (e) { o = {}; }
+    const sp = {
+      prompts: Array.isArray(o.prompts) ? o.prompts : [],
+      takes: Array.isArray(o.takes) ? o.takes : [],
+      stages: Array.isArray(o.stages) && o.stages.length ? o.stages.map(Number).filter((n) => n > 0) : SPEAK_STAGE_DEFAULT.slice(),
+      lastSync: o.lastSync || 0, seeded: !!o.seeded,
+      syncMsg: '', open: null, edit: false, importOpen: false,
+      hintOpen: new Set(), memoOpen: new Set(), heardOpen: new Set(), audioIds: new Set(), audioLoaded: false,
+    };
+    // 내장 프롬프트 채우기: 처음 한 번 + 새 버전에서 추가된 것 (지운 것은 tombstone 이 남아 다시 생기지 않는다)
+    (window.SPEAK_PROMPTS || []).forEach((b) => {
+      if (!sp.prompts.some((p) => p.id === b.id)) sp.prompts.push({ id: b.id, text: b.text, kind: b.kind, cat: b.cat, hint: b.hint || '', deleted: false, editedAt: 0 });
+    });
+    sp.seeded = true;
+    return sp;
+  }
+  const sp = loadSpeak();
+  const saveSpeak = () => { try { localStorage.setItem('st.speak', JSON.stringify({ prompts: sp.prompts, takes: sp.takes, stages: sp.stages, lastSync: sp.lastSync, seeded: sp.seeded })); } catch (e) { /* ignore */ } };
+  saveSpeak();
+
+  // 오디오는 IndexedDB (이 브라우저에만 — 다른 기기에는 기록만 간다)
+  let spDbP = null;
+  function spDb() {
+    if (spDbP) return spDbP;
+    spDbP = new Promise((resolve, reject) => {
+      const req = indexedDB.open('subtutor-speak', 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore('audio', { keyPath: 'id' }); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return spDbP;
+  }
+  async function spAudioPut(id, blob) { try { const db = await spDb(); await new Promise((res, rej) => { const t = db.transaction('audio', 'readwrite'); t.objectStore('audio').put({ id, blob }); t.oncomplete = res; t.onerror = () => rej(t.error); }); sp.audioIds.add(id); } catch (e) { /* 시크릿 창 등 — 재생만 안 될 뿐 */ } }
+  async function spAudioGet(id) { try { const db = await spDb(); return await new Promise((res) => { const r = db.transaction('audio').objectStore('audio').get(id); r.onsuccess = () => res(r.result ? r.result.blob : null); r.onerror = () => res(null); }); } catch (e) { return null; } }
+  async function spAudioDel(id) { try { const db = await spDb(); db.transaction('audio', 'readwrite').objectStore('audio').delete(id); } catch (e) { /* ignore */ } sp.audioIds.delete(id); }
+  async function spAudioLoadIds() {
+    if (sp.audioLoaded) return;
+    sp.audioLoaded = true;
+    try { const db = await spDb(); const keys = await new Promise((res) => { const r = db.transaction('audio').objectStore('audio').getAllKeys(); r.onsuccess = () => res(r.result || []); r.onerror = () => res([]); }); keys.forEach((k) => sp.audioIds.add(k)); if (state.view === 'speak') render(); } catch (e) { /* ignore */ }
+  }
+
+  const spTakesOf = (pid) => sp.takes.filter((t) => t.pid === pid && !t.deleted).sort((a, b) => b.at - a.at);
+  const spMarkP = (p) => { p.editedAt = Date.now(); p.dirty = true; saveSpeak(); };
+  const spMarkT = (t) => { t.editedAt = Date.now(); t.dirty = true; saveSpeak(); };
+  const fmtWhen = (ms) => { const d = new Date(ms); return (d.getMonth() + 1) + '.' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+
+  function spAddPrompts(text, kind) {
+    const lines = F.parsePromptLines(text);
+    const now = Date.now();
+    lines.forEach((t, i) => sp.prompts.push({ id: 'u' + (now + i).toString(36) + Math.random().toString(36).slice(2, 6), text: t, kind, cat: 'mine', hint: '', deleted: false, editedAt: now, dirty: true }));
+    saveSpeak();
+    return lines.length;
+  }
+  function spStats() {
+    const now = new Date();
+    const day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const week0 = Date.now() - 7 * DAY;
+    const live = sp.takes.filter((t) => !t.deleted);
+    const today = live.filter((t) => t.at >= day0);
+    const week = live.filter((t) => t.at >= week0);
+    const secs = (arr) => Math.round(arr.reduce((a, t) => a + (t.durMs || 0), 0) / 1000);
+    return '오늘 ' + today.length + '회 · ' + F.fmtClock(secs(today)) + ' — 이번 주 ' + week.length + '회 · ' + F.fmtClock(secs(week));
+  }
+
+  // 동기화: 바뀐 것(dirty)만 올리고, lastSync 뒤에 바뀐 것을 받아 와 나중에 바뀐 쪽이 이긴다
+  let speakSyncBusy = false;
+  async function speakSync() {
+    if (speakSyncBusy) return;
+    if (!supaBase() || !supa.key.trim() || !supa.refresh) { sp.syncMsg = '설정 › 아이폰 동기화에서 로그인하면 아이폰과 동기화됩니다 (오디오 제외)'; return; }
+    speakSyncBusy = true;
+    if (state.view === 'speak') { const m = $('.speak-sync'); if (m) m.textContent = '동기화 중…'; }
+    try {
+      await supaEnsureToken();
+      const H = { apikey: supa.key.trim(), Authorization: 'Bearer ' + supa.token, 'Content-Type': 'application/json' };
+      const iso = (ms) => new Date(Math.max(0, ms || 0)).toISOString();   // 0(처음)은 1970 — '지금'으로 만들면 첫 받아 오기가 전부 빠진다
+      const push = async (table, rows) => { if (rows.length) await supaFetch('/rest/v1/' + table, { method: 'POST', headers: Object.assign({ Prefer: 'resolution=merge-duplicates' }, H), body: JSON.stringify(rows) }); };
+      await push('speak_prompts', sp.prompts.filter((p) => p.dirty).map((p) => ({ user_id: supa.userId || undefined, id: p.id, text: p.text || '', kind: p.kind || 'short', cat: p.cat || 'mine', hint: p.hint || '', deleted: !!p.deleted, updated_at: iso(p.editedAt || Date.now()) })));
+      await push('speak_takes', sp.takes.filter((t) => t.dirty).map((t) => ({ user_id: supa.userId || undefined, id: t.id, prompt_id: t.pid, at: t.at, dur_ms: Math.round(t.durMs || 0), mode: t.mode, target_s: t.targetS || 0, rating: t.rating || 0, memo: t.memo || '', heard: t.heard || '', deleted: !!t.deleted, updated_at: iso(t.editedAt || Date.now()) })));
+      sp.prompts.forEach((x) => { delete x.dirty; });
+      sp.takes.forEach((x) => { delete x.dirty; });
+      const since = encodeURIComponent(iso(Math.max(0, (sp.lastSync || 0) - 2000)));
+      const pull = async (table) => (await supaFetch('/rest/v1/' + table + '?select=*&updated_at=gt.' + since, { headers: H })).json();
+      for (const row of await pull('speak_prompts')) {
+        const at = Date.parse(row.updated_at) || 0;
+        let x = sp.prompts.find((q) => q.id === row.id);
+        if (x && at <= (x.editedAt || 0)) continue;
+        if (!x) { x = { id: row.id }; sp.prompts.push(x); }
+        Object.assign(x, { text: row.text || '', kind: row.kind || 'short', cat: row.cat || 'mine', hint: row.hint || '', deleted: !!row.deleted, editedAt: at });
+        delete x.dirty;
+      }
+      for (const row of await pull('speak_takes')) {
+        const at = Date.parse(row.updated_at) || 0;
+        let x = sp.takes.find((q) => q.id === row.id);
+        if (x && at <= (x.editedAt || 0)) continue;
+        if (!x) { x = { id: row.id }; sp.takes.push(x); }
+        Object.assign(x, { pid: row.prompt_id || '', at: Number(row.at) || 0, durMs: Number(row.dur_ms) || 0, mode: row.mode || 'free', targetS: Number(row.target_s) || 0, rating: Number(row.rating) || 0, memo: row.memo || '', heard: row.heard || '', deleted: !!row.deleted, editedAt: at });
+        delete x.dirty;
+      }
+      sp.lastSync = Date.now();
+      sp.syncMsg = '동기화 끝 — ' + fmtWhen(sp.lastSync) + ' (오디오는 녹음한 기기에만)';
+      saveSpeak();
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      sp.syncMsg = /42P01|PGRST205|does not exist|Could not find the table/i.test(m)
+        ? '서버에 입트기 표가 없습니다 — 저장소 supabase/schema.sql 의 "입트기" 블록을 Supabase SQL Editor 에서 실행하세요'
+        : '동기화 실패: ' + m;
+    } finally {
+      speakSyncBusy = false;
+      if (state.view === 'speak') render();
+    }
+  }
+
+  // 녹음 화면 (전체 덮개 — 목록과 따로 그려서 다시 렌더링해도 안 끊긴다)
+  const spRec = { el: null, wakeLock: null };
+  function spAsrStart() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return null;
+    try {
+      const r = new SR();
+      r.lang = 'en-NZ';
+      r.continuous = true;
+      r.interimResults = false;
+      const box = { text: '' };
+      r.onresult = (e) => { for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) box.text += (box.text ? ' ' : '') + e.results[i][0].transcript.trim(); };
+      r.onerror = () => { /* 조용히 — 받아 적기만 빠진다 */ };
+      r.start();
+      return { stop() { try { r.stop(); } catch (e) { /* ignore */ } }, get text() { return box.text; } };
+    } catch (e) { return null; }
+  }
+  function spRecClose() {
+    if (spRec.el) { spRec.el.remove(); spRec.el = null; }
+    if (spRec.wakeLock) { try { spRec.wakeLock.release(); } catch (e) { /* ignore */ } spRec.wakeLock = null; }
+    if (state.view === 'speak') render();
+  }
+  async function spSaveTake(prompt, mode, targetS, blob, durMs, heard) {
+    const t = { id: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), pid: prompt.id, at: Date.now(), durMs: Math.round(durMs), mode, targetS: targetS || 0, rating: 0, memo: '', heard: heard || '', deleted: false, editedAt: Date.now(), dirty: true };
+    if (blob) await spAudioPut(t.id, blob);
+    sp.takes.push(t);
+    saveSpeak();
+    return t;
+  }
+  async function openSpeakRec(prompt, mode) {
+    let sess = null;
+    try { sess = await R.session(); } catch (e) { toast('마이크를 허용해야 녹음할 수 있습니다'); return; }
+    if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then((w) => { spRec.wakeLock = w; }).catch(() => {});
+    let asr = spAsrStart();
+    let stage = 0;
+    let timer = 0;
+    let paused = false;
+    const stages = sp.stages.slice();
+    const target = () => stages[stage];
+    const wrap = el('div', { class: 'speak-rec' });
+    spRec.el = wrap;
+    document.body.append(wrap);
+    const finishAll = () => { clearInterval(timer); if (asr) asr.stop(); spRecClose(); };
+
+    const promptEl = el('div', { class: 'r-prompt', text: prompt.text });
+    const stageEl = el('div', { class: 'r-stage' });
+    const clockEl = el('div', { class: 'r-clock', text: '0:00' });
+    const pauseBtn = el('button', { class: 'rbtn', title: '잠깐 멈춤', onclick: () => {
+      paused = !paused;
+      if (paused) { sess.pause(); pauseBtn.textContent = '▶'; } else { sess.resume(); pauseBtn.textContent = '⏸'; }
+    } }, '⏸');
+    const stopBtn = el('button', { class: 'rbtn stop', title: '마치기' }, '⏹');
+    const cancelBtn = el('button', { class: 'r-cancel', onclick: async () => { clearInterval(timer); if (asr) asr.stop(); try { await sess.stop(); } catch (e) { /* ignore */ } finishAll(); } }, '✕ 버리고 나가기');
+
+    if (mode === 'free') {
+      stageEl.textContent = '자유 말하기 — 시간 제한 없음';
+      const wave = el('canvas', { class: 'r-wave' });
+      wrap.append(promptEl, stageEl, clockEl, wave, el('div', { class: 'r-btns' }, [pauseBtn, stopBtn]), cancelBtn);
+      const ctx2 = wave.getContext('2d');
+      wave.width = 560; wave.height = 72;
+      const buf = sess.analyser ? new Uint8Array(sess.analyser.frequencyBinCount) : null;
+      const draw = () => {
+        if (!spRec.el) return;
+        requestAnimationFrame(draw);
+        if (!buf) return;
+        sess.analyser.getByteFrequencyData(buf);
+        ctx2.clearRect(0, 0, wave.width, wave.height);
+        ctx2.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#8b5cf6';
+        const n = 48, w = wave.width / n;
+        for (let i = 0; i < n; i++) { const v = buf[Math.floor((i * buf.length) / n)] / 255; const h = Math.max(2, v * wave.height); ctx2.fillRect(i * w + 1, (wave.height - h) / 2, w - 2, h); }
+      };
+      draw();
+      timer = setInterval(() => { clockEl.textContent = F.fmtClock(sess.activeMs / 1000); }, 200);
+      stopBtn.onclick = async () => {
+        clearInterval(timer);
+        if (asr) asr.stop();
+        const { blob, durationMs } = await sess.stop();
+        if (durationMs < 700) { toast('너무 짧아서 저장하지 않았습니다'); finishAll(); return; }
+        await spSaveTake(prompt, 'free', 0, blob, durationMs, asr ? asr.text : '');
+        toast('녹음을 저장했습니다 (' + F.fmtClock(durationMs / 1000) + ')');
+        finishAll();
+      };
+      return;
+    }
+
+    // 줄여 말하기: 포모도로식 원형 다운 타이머 — 시간이 넘으면 같은 방향으로 주황 띠가 덧칠해지며 +1초씩
+    const RAD = 104, C = 2 * Math.PI * RAD;
+    const mkCircle = (cls, color, width) => { const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); c.setAttribute('cx', 120); c.setAttribute('cy', 120); c.setAttribute('r', RAD); c.setAttribute('fill', 'none'); c.setAttribute('stroke', color); c.setAttribute('stroke-width', width); c.setAttribute('stroke-linecap', 'round'); c.setAttribute('class', cls); return c; };
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', 240); svg.setAttribute('height', 240); svg.setAttribute('viewBox', '0 0 240 240');
+    const line = getComputedStyle(document.documentElement).getPropertyValue('--line').trim() || '#2a2a33';
+    const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#8b5cf6';
+    const orange = getComputedStyle(document.documentElement).getPropertyValue('--orange').trim() || '#fbbf24';
+    const base = mkCircle('ring-base', line, 10);
+    const prog = mkCircle('ring-prog', accent, 10);
+    const over = mkCircle('ring-over', orange, 10);
+    [prog, over].forEach((c) => { c.setAttribute('stroke-dasharray', '0 ' + C); });
+    svg.append(base, prog, over);
+    const center = el('div', { class: 'r-center' }, [clockEl]);
+    const ring = el('div', { class: 'speak-ring' });
+    ring.append(svg, center);
+    const resultEl = el('div', { class: 'r-result', style: 'display:none' });
+    wrap.append(promptEl, stageEl, ring, resultEl, el('div', { class: 'r-btns' }, [pauseBtn, stopBtn]), cancelBtn);
+
+    const setRing = (c2, frac) => c2.setAttribute('stroke-dasharray', Math.max(0, Math.min(1, frac)) * C + ' ' + C);
+    const startStage = () => {
+      stageEl.textContent = '줄여 말하기 ' + (stage + 1) + '/' + stages.length + ' 단계 — 목표 ' + F.fmtClock(target());
+      clockEl.classList.remove('over');
+      setRing(prog, 0); setRing(over, 0);
+      resultEl.style.display = 'none';
+      pauseBtn.style.display = '';
+      stopBtn.style.display = '';
+      timer = setInterval(() => {
+        const t = sess.activeMs / 1000, tg = target();
+        if (t <= tg) { clockEl.textContent = F.fmtClock(Math.ceil(tg - t)); setRing(prog, t / tg); }
+        else { clockEl.classList.add('over'); clockEl.textContent = '+' + Math.max(1, Math.ceil(t - tg)); setRing(prog, 1); setRing(over, Math.min(1, (t - tg) / tg)); }
+      }, 100);
+    };
+    stopBtn.onclick = async () => {
+      clearInterval(timer);
+      const heard = asr ? (asr.stop(), asr.text) : '';
+      const { blob, durationMs } = await sess.stop();
+      const durS = durationMs / 1000, tg = target();
+      await spSaveTake(prompt, 'step', tg, blob, durationMs, heard);
+      const r = F.overUnder(tg, durS);
+      const last = stage >= stages.length - 1;
+      resultEl.textContent = '';
+      resultEl.append(
+        el('b', null, (stage + 1) + '단계 끝 — ' + r.text),
+        el('div', { class: 'count' }, '목표 ' + F.fmtClock(tg) + ' · 말함 ' + F.fmtClock(durS)),
+        el('div', null, last
+          ? [el('button', { class: 'btn primary big', onclick: finishAll }, '끝내기')]
+          : [el('button', { class: 'btn primary big', onclick: async () => {
+              stage++;
+              try { sess = await R.session(); } catch (e) { toast('마이크를 다시 열지 못했습니다'); finishAll(); return; }
+              asr = spAsrStart();
+              paused = false; pauseBtn.textContent = '⏸';
+              startStage();
+            } }, '다음 단계 (' + F.fmtClock(stages[stage + 1]) + ')'),
+            el('button', { class: 'btn big', style: 'margin-left:8px', onclick: finishAll }, '여기서 끝')]),
+      );
+      resultEl.style.display = '';
+      pauseBtn.style.display = 'none';
+      stopBtn.style.display = 'none';
+      if (state.view === 'speak') render();   // 뒤 목록에 방금 기록이 보이게
+    };
+    startStage();
+  }
+
+  // 입트기 화면
+  function renderSpeak() {
+    spAudioLoadIds();
+    if (supa.refresh && Date.now() - (sp.lastSync || 0) > SUPA_AUTO_MS && !speakSyncBusy) speakSync();
+    if (!sp.syncMsg && !supa.refresh) sp.syncMsg = '설정 › 아이폰 동기화에서 로그인하면 아이폰과 동기화됩니다 (오디오 제외)';
+    const wrap = el('div');
+    const head = el('div', { class: 'speak-head' }, [
+      el('span', { class: 'stats', text: spStats() }),
+      el('button', { class: 'btn', title: '아무 프롬프트나 하나 열기', onclick: () => {
+        const pool = sp.prompts.filter((p) => !p.deleted);
+        if (!pool.length) return;
+        const recent = Date.now() - 3 * DAY;
+        const fresh = pool.filter((p) => !spTakesOf(p.id).some((t) => t.at > recent));
+        const pick = (fresh.length ? fresh : pool)[Math.floor(Math.random() * (fresh.length ? fresh.length : pool.length))];
+        sp.open = pick.id; sp.importOpen = false; render();
+        setTimeout(() => { const n = document.querySelector('[data-sp="' + pick.id + '"]'); if (n) n.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, 60);
+      } }, '🎲 아무거나'),
+      el('button', { class: 'btn' + (sp.importOpen ? ' primary' : ''), onclick: () => { sp.importOpen = !sp.importOpen; render(); } }, '＋ 추가'),
+      el('button', { class: 'btn' + (sp.edit ? ' primary' : ''), onclick: () => { sp.edit = !sp.edit; render(); } }, sp.edit ? '편집 끝' : '✎ 편집'),
+      el('button', { class: 'btn', onclick: () => speakSync() }, '동기화'),
+      infoBtn('speakFluency'),
+    ]);
+    wrap.append(head, el('p', { class: 'speak-sync', text: sp.syncMsg || '' }));
+
+    if (sp.importOpen) {
+      const ta = el('textarea', { placeholder: '한 줄에 하나씩 — 여러 줄을 붙여 넣으면 줄마다 프롬프트가 됩니다.\n예)\nTell me about your weekend.\nHow do you handle a noisy class?' });
+      const kindSel = el('select', { class: 'btn' }, [el('option', { value: 'short' }, '짧게 답하기'), el('option', { value: 'long' }, '길게 말하기')]);
+      wrap.append(el('div', { class: 'speak-import' }, [
+        ta,
+        el('div', { class: 'row' }, [
+          kindSel,
+          el('button', { class: 'btn primary', onclick: () => {
+            const n = spAddPrompts(ta.value, kindSel.value);
+            if (!n) { toast('추가할 줄이 없습니다'); return; }
+            toast('프롬프트 ' + n + '개를 추가했습니다');
+            sp.importOpen = false; render();
+          } }, '추가'),
+          el('span', { class: 'count' }, '내 프롬프트로 들어갑니다 (편집에서 힌트를 적을 수 있어요)'),
+        ]),
+      ]));
+    }
+
+    const visible = sp.prompts.filter((p) => !p.deleted);
+    SPEAK_GROUPS.forEach(([gkey, gtitle]) => {
+      const list = visible.filter((p) => (gkey === 'mine' ? p.cat === 'mine' : p.kind + ':' + p.cat === gkey));
+      if (!list.length) return;
+      wrap.append(el('div', { class: 'speak-group', text: gtitle + ' · ' + list.length }));
+      list.forEach((p) => wrap.append(speakPromptCard(p)));
+    });
+    return wrap;
+  }
+
+  function speakPromptCard(p) {
+    const takes = spTakesOf(p.id);
+    const open = sp.open === p.id && !sp.edit;
+    const card = el('div', { class: 'speak-p' + (open ? ' open' : ''), 'data-sp': p.id });
+    if (sp.edit) {
+      const ti = el('input', { value: p.text, placeholder: '프롬프트 (영어 문장)' });
+      ti.oninput = () => { p.text = ti.value; spMarkP(p); };
+      const hi = el('input', { value: p.hint || '', placeholder: '힌트 — 쓰면 좋은 표현·단어 (비워도 됨)' });
+      hi.oninput = () => { p.hint = hi.value; spMarkP(p); };
+      card.append(el('div', { class: 'speak-edit-row' }, [ti, hi,
+        el('div', null, [el('button', { class: 'btn danger', onclick: () => { p.deleted = true; spMarkP(p); render(); } }, '🗑 이 프롬프트 지우기')])]));
+      return card;
+    }
+    const headRow = el('div', { class: 'p-head', onclick: () => { sp.open = open ? null : p.id; render(); } }, [
+      el('span', { class: 'p-text', text: p.text }),
+      el('span', { class: 'p-meta', text: takes.length ? takes.length + '회 · ' + fmtWhen(takes[0].at) : '' }),
+    ]);
+    card.append(headRow);
+    if (!open) return card;
+
+    const body = el('div', { class: 'speak-body' });
+    body.append(el('div', { class: 'speak-bigbtns' }, [
+      el('button', { class: 'btn primary', onclick: () => openSpeakRec(p, 'free') }, '🎙 자유 말하기'),
+      el('button', { class: 'btn', onclick: () => openSpeakRec(p, 'step') }, '⏱ 줄여 말하기 ' + sp.stages.map((s2) => F.fmtClock(s2)).join('→')),
+    ]));
+    const hintOn = sp.hintOpen.has(p.id);
+    body.append(el('button', { class: 'btn', style: 'justify-self:start', onclick: () => { if (hintOn) sp.hintOpen.delete(p.id); else sp.hintOpen.add(p.id); render(); } }, hintOn ? '💡 힌트 감추기' : '💡 힌트 보이기'));
+    if (hintOn) body.append(el('div', { class: 'speak-hint', text: p.hint || '힌트가 없습니다 — ✎ 편집에서 적어 둘 수 있어요.' }));
+    takes.forEach((t) => body.append(speakTakeRow(t)));
+    card.append(body);
+    return card;
+  }
+
+  function speakTakeRow(t) {
+    const row = el('div', { class: 'speak-take' });
+    const line = el('div', { class: 't-line' });
+    line.append(el('span', { class: 't-when', text: fmtWhen(t.at) }));
+    line.append(el('span', { class: 't-badge', text: (t.mode === 'step' ? '줄여 ' + F.fmtClock(t.targetS) : '자유') + ' · ' + F.fmtClock(t.durMs / 1000) }));
+    if (t.mode === 'step' && t.targetS) {
+      const r = F.overUnder(t.targetS, t.durMs / 1000);
+      line.append(el('span', { class: r.diff > 0 ? 't-over' : r.diff < 0 ? 't-under' : 'count', text: r.text }));
+    }
+    const w = F.wpm(t.heard, t.durMs);
+    if (w) line.append(el('span', { class: 't-wpm', text: w + ' wpm' }));
+    if (sp.audioIds.has(t.id)) {
+      line.append(el('button', { class: 'icon', title: '재생', onclick: async () => { const b = await spAudioGet(t.id); if (b) R.play(b); else toast('소리 파일이 없습니다'); } }, '▶'));
+    } else {
+      line.append(el('span', { class: 'speak-nolocal', title: '오디오는 동기화하지 않습니다', text: '소리는 녹음한 기기에' }));
+    }
+    const heardOn = sp.heardOpen.has(t.id);
+    line.append(el('button', { class: 'icon' + (heardOn ? ' on' : ''), title: '받아 적은 문장 (음성 인식)', onclick: () => { if (heardOn) sp.heardOpen.delete(t.id); else sp.heardOpen.add(t.id); render(); } }, 'T'));
+    const memoOn = sp.memoOpen.has(t.id);
+    line.append(el('button', { class: 'icon' + (t.memo ? ' on' : ''), title: '메모', onclick: () => { if (memoOn) sp.memoOpen.delete(t.id); else sp.memoOpen.add(t.id); render(); } }, '📝'));
+    const stars = el('span', { class: 'speak-stars', title: '스스로 평가 (별점)' });
+    for (let i = 1; i <= 5; i++) stars.append(el('button', { class: (t.rating || 0) >= i ? 'on' : '', onclick: () => { t.rating = t.rating === i ? 0 : i; spMarkT(t); render(); } }, '★'));
+    line.append(stars);
+    line.append(el('button', { class: 'icon', title: '이 녹음 지우기', onclick: () => { t.deleted = true; spMarkT(t); spAudioDel(t.id); render(); } }, '🗑'));
+    row.append(line);
+    if (memoOn) {
+      const ta = el('textarea', { class: 't-memo', placeholder: '메모 — 막힌 데, 다음에 쓸 표현…' });
+      ta.value = t.memo || '';
+      ta.onchange = () => { t.memo = ta.value; spMarkT(t); };
+      row.append(ta);
+    }
+    if (heardOn) row.append(el('p', { class: 't-heard', text: t.heard ? '들린 문장: ' + t.heard : '이 녹음은 받아 적지 못했습니다 (이 브라우저의 음성 인식이 꺼져 있었거나 지원되지 않음)' }));
+    return row;
+  }
+
   // ───────── 라우팅/렌더 ─────────
   function route() {
     if (state.shadow && state.view === 'shadow') { state.shadow.gen++; state.shadow.busy = false; }
     const m = /^#\/(\w+)/.exec(location.hash);
-    state.view = m && ['list', 'quiz', 'words', 'known', 'settings', 'shadow', 'today'].includes(m[1]) ? m[1] : 'list';
+    state.view = m && ['list', 'quiz', 'words', 'known', 'settings', 'shadow', 'today', 'speak'].includes(m[1]) ? m[1] : 'list';
     render();
   }
   window.addEventListener('hashchange', route);
@@ -1007,7 +1403,7 @@
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === state.view));
     const app = $('#app');
     app.textContent = '';
-    const titles = { list: '저장한 자막', quiz: '퀴즈', words: '단어장', known: '알고 있는 표현', settings: '설정', shadow: '쉐도잉', today: '오늘의 훈련' };
+    const titles = { list: '저장한 자막', quiz: '퀴즈', words: '단어장', known: '알고 있는 표현', settings: '설정', shadow: '쉐도잉', today: '오늘의 훈련', speak: '입트기' };
     document.title = 'SubTutor · ' + titles[state.view];
     switch (state.view) {
       case 'list': app.append(renderList(learning(), 'learning')); break;
@@ -1017,6 +1413,7 @@
       case 'settings': app.append(renderSettings()); break;
       case 'shadow': app.append(renderShadow()); break;
       case 'today': app.append(renderToday()); break;
+      case 'speak': app.append(renderSpeak()); break;
       default: break;
     }
     renderClipStates();
@@ -1876,6 +2273,7 @@
     }
     supa.lastAt = Date.now();
     try { localStorage.setItem('st.supaLastAt', String(supa.lastAt)); } catch (e) { /* ignore */ }
+    try { await speakSync(); } catch (e) { /* 입트기 동기화가 실패해도 올리기는 성공 */ }
     return { items: rows.length, words: wordCount, audioOk, audioFail };
   }
   // 자동 동기화: 접속하고 잠시 뒤 + 15분마다, 로그인이 유지돼 있으면 조용히 올린다
@@ -2070,8 +2468,8 @@
     const saved = new Array(weeks).fill(0), rev = new Array(weeks).fill(0), train = new Array(weeks).fill(0);
     state.items.forEach((i) => { const b = bucket(i.savedAt || 0); if (b >= 0 && b < weeks) saved[weeks - 1 - b]++; });
     (st.reviews || []).forEach((r) => { const b = bucket(r.t); if (b >= 0 && b < weeks) rev[weeks - 1 - b]++; });
-    // 훈련한 날: 그날 정오를 기준으로 주에 넣는다 (0~7일)
-    Object.keys(st.training || {}).forEach((d) => { const b = bucket(new Date(d + 'T12:00:00').getTime()); if (b >= 0 && b < weeks) train[weeks - 1 - b]++; });
+    // 훈련한 날: 그날 정오를 기준으로 주에 넣는다 (0~7일). 오늘 오전이면 (지금 - 오늘 정오)가 음수라 -1주가 되므로 0으로 끌어올린다
+    Object.keys(st.training || {}).forEach((d) => { const b = Math.max(0, bucket(new Date(d + 'T12:00:00').getTime())); if (b < weeks) train[weeks - 1 - b]++; });
     const max = Math.max(1, ...saved, ...rev);
     const bars = el('div', { class: 'bars' }, saved.map((n, k) => el('div', { class: 'bar-col', title: (k === weeks - 1 ? '이번 주' : (weeks - 1 - k) + '주 전') + ': 저장 ' + n + ' · 복습 ' + rev[k] + ' · 오늘의 훈련 ' + train[k] + '일' }, [
       el('div', { class: 'bar-pair' }, [el('div', { class: 'bar saved', style: 'height:' + Math.max(2, Math.round((n / max) * 60)) + 'px' }), el('div', { class: 'bar rev', style: 'height:' + Math.max(2, Math.round((rev[k] / max) * 60)) + 'px' }), el('div', { class: 'bar train', 'data-days': String(train[k]), style: 'height:' + Math.max(2, Math.round((train[k] / 7) * 60)) + 'px' })]),

@@ -68,3 +68,45 @@ create policy "own audio update" on storage.objects
 drop policy if exists "own audio delete" on storage.objects;
 create policy "own audio delete" on storage.objects
   for delete using (bucket_id = 'audio' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- ── 입트기(말하기 유창성 연습) ──────────────────────────────────────────────
+-- 이미 프로젝트를 만든 뒤라면 이 아래 블록만 SQL Editor 에 붙여 넣어 실행하면 된다.
+-- 녹음 오디오는 올리지 않는다(용량) — 프롬프트와 녹음 기록(길이·날짜·별점·메모·받아 적기)만 동기화한다.
+
+-- 말하기 프롬프트 (기본 48개는 앱·웹에 내장 — 서버에는 고치거나 지우거나 새로 만든 것만 올라온다)
+create table if not exists public.speak_prompts (
+  user_id uuid not null default auth.uid(),
+  id text not null,                        -- 내장 b01…b48, 직접 만든 것은 u<시각><난수>
+  text text not null default '',
+  kind text not null default 'short',      -- short(짧게 답하기) | long(길게 말하기)
+  cat text not null default 'mine',        -- boss·student·parent·daily·opinion·class·meeting·etc·mine
+  hint text not null default '',           -- 힌트(쓰면 좋은 표현)
+  deleted boolean not null default false,  -- 지움 표식 (기기끼리 지움도 퍼지게)
+  updated_at timestamptz not null default now(),
+  primary key (user_id, id)
+);
+alter table public.speak_prompts enable row level security;
+drop policy if exists "own speak_prompts" on public.speak_prompts;
+create policy "own speak_prompts" on public.speak_prompts
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- 말하기 녹음 기록 (소리 파일 없이 정보만)
+create table if not exists public.speak_takes (
+  user_id uuid not null default auth.uid(),
+  id text not null,                        -- t<시각><난수>
+  prompt_id text not null default '',
+  at bigint not null default 0,            -- 녹음한 때 (ms)
+  dur_ms bigint not null default 0,        -- 말한 길이 (멈춘 시간 제외)
+  mode text not null default 'free',       -- free(자유 말하기) | step(줄여 말하기)
+  target_s bigint not null default 0,      -- 줄여 말하기 목표 초 (자유는 0)
+  rating bigint not null default 0,        -- 별점 0~5
+  memo text not null default '',
+  heard text not null default '',          -- 음성 인식으로 받아 적은 문장 (그 기기에서 인식됐을 때만)
+  deleted boolean not null default false,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, id)
+);
+alter table public.speak_takes enable row level security;
+drop policy if exists "own speak_takes" on public.speak_takes;
+create policy "own speak_takes" on public.speak_takes
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);

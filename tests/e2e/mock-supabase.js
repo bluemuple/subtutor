@@ -3,7 +3,7 @@
 // GoTrue(password/refresh/signup) + PostgREST(items/words upsert·select) + Storage(audio 업로드/다운로드) + CORS
 const http = require('http');
 const fs = require('fs');
-const state = { items: new Map(), words: new Map(), objects: new Map(), tokens: 0, itemPosts: 0 };
+const state = { items: new Map(), words: new Map(), objects: new Map(), speakPrompts: new Map(), speakTakes: new Map(), tokens: 0, itemPosts: 0 };
 const USER = { id: '00000000-0000-4000-8000-000000000001', email: 'me@test.local' };
 const seedMp3 = process.argv[2]; // 시드 MP3 파일 경로 (없으면 시드 없음)
 if (seedMp3 && fs.existsSync(seedMp3)) {
@@ -58,6 +58,30 @@ http.createServer(async (req, res) => {
       res.writeHead(row ? 204 : 404, CORS); res.end();
       return;
     }
+    // 입트기: 프롬프트·녹음 기록 (오디오 없음) — GET(updated_at=gt. 거름) · POST upsert · PATCH ?id=eq.
+    const speakStore = p === '/rest/v1/speak_prompts' ? state.speakPrompts : p === '/rest/v1/speak_takes' ? state.speakTakes : null;
+    if (speakStore) {
+      if (req.method === 'GET') {
+        let list = [...speakStore.values()];
+        const gt = url.searchParams.get('updated_at');
+        if (gt && gt.startsWith('gt.')) { const t = Date.parse(gt.slice(3)); list = list.filter((r) => Date.parse(r.updated_at) > t); }
+        return json(res, 200, list);
+      }
+      if (req.method === 'POST') {
+        const rows = JSON.parse((await readBody(req)).toString());
+        for (const r of [].concat(rows)) speakStore.set(r.id, Object.assign({ user_id: USER.id, updated_at: new Date().toISOString() }, speakStore.get(r.id) || {}, r));
+        res.writeHead(201, CORS); res.end();
+        return;
+      }
+      if (req.method === 'PATCH') {
+        const id = (url.searchParams.get('id') || '').replace(/^eq\./, '');
+        const body = JSON.parse((await readBody(req)).toString() || '{}');
+        const row = speakStore.get(id);
+        if (row) speakStore.set(id, Object.assign({}, row, body));
+        res.writeHead(row ? 204 : 404, CORS); res.end();
+        return;
+      }
+    }
     if (p === '/rest/v1/words' && req.method === 'GET') return json(res, 200, [...state.words.values()]);
     if (p === '/rest/v1/words' && req.method === 'POST') {
       const rows = JSON.parse((await readBody(req)).toString());
@@ -76,7 +100,7 @@ http.createServer(async (req, res) => {
       }
       if (req.method === 'POST' || req.method === 'PUT') { state.objects.set(key, await readBody(req)); return json(res, 200, { Key: key }); }
     }
-    if (p === '/__state') return json(res, 200, { itemPosts: state.itemPosts, items: [...state.items.values()], words: [...state.words.values()], objects: [...state.objects.keys()].map((k) => [k, state.objects.get(k).length]) });
+    if (p === '/__state') return json(res, 200, { itemPosts: state.itemPosts, items: [...state.items.values()], words: [...state.words.values()], speakPrompts: [...state.speakPrompts.values()], speakTakes: [...state.speakTakes.values()], objects: [...state.objects.keys()].map((k) => [k, state.objects.get(k).length]) });
     json(res, 404, { error: 'mock 404 ' + req.method + ' ' + p });
   } catch (e) { json(res, 500, { error: String(e && e.message || e) }); }
 }).listen(+(process.argv[3] || 8768), '127.0.0.1', function () { console.log('mock supabase on http://127.0.0.1:' + this.address().port); });

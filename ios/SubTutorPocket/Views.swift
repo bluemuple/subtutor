@@ -166,6 +166,7 @@ struct RootView: View {
     @State private var showKnown = false       // ✓ 알아요 칩: 알아요로 옮긴 대사만 (평소에는 숨김)
     @State private var showWorkPicker = false
     @State private var toast: Toast?
+    @State private var showSpeak = false
 
     var body: some View {
         NavigationStack {
@@ -175,17 +176,23 @@ struct RootView: View {
             .overlay(alignment: .top) { toastView }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Image("Logo").resizable().frame(width: 30, height: 30)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .accessibilityLabel("자막 튜터")
+                ToolbarItem(placement: .topBarLeading) {   // 한 덩어리로 — 여러 개로 두면 오른쪽 아이콘이 … 로 접힌다
+                    HStack(spacing: 10) {
+                        Image("Logo").resizable().frame(width: 28, height: 28)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .accessibilityLabel("자막 튜터")
+                        Button { Haptic.press(); showSpeak = true } label: { Image(systemName: "quote.bubble.fill") }
+                            .accessibilityLabel("입트기 — 말하기 연습")
+                    }
                 }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    downloadAllButton
-                    Button { store.veilText.toggle() } label: { Image(systemName: store.veilText ? "eye.slash" : "eye") }
-                    Button { store.veilKo.toggle() } label: { Text("뜻").strikethrough(store.veilKo) }
-                    repeatButton
-                    Button { sheet = .settings } label: { Image(systemName: "gearshape") }
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 15) {
+                        downloadAllButton
+                        Button { store.veilText.toggle() } label: { Image(systemName: store.veilText ? "eye.slash" : "eye") }
+                        Button { store.veilKo.toggle() } label: { Text("뜻").strikethrough(store.veilKo) }
+                        repeatButton
+                        Button { sheet = .settings } label: { Image(systemName: "gearshape") }
+                    }
                 }
             }
             .searchable(text: $query, prompt: "대사·뜻·메모·태그 검색")
@@ -200,6 +207,7 @@ struct RootView: View {
             case .tags(let item): TagSheet(item: item)
             }
         }
+        .fullScreenCover(isPresented: $showSpeak) { SpeakView() }
     }
 
     // 반복 토글: 누르면 켬/끔 (켜 두면 대사를 누를 때 끝없이 반복), 길게 누르면 재생 속도 0.5~2배
@@ -782,6 +790,7 @@ struct ContinuousBar: View {
 struct SettingsView: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var player: Player
+    @EnvironmentObject var speak: SpeakStore
     @Environment(\.dismiss) private var dismiss
     @State private var password = ""
 
@@ -872,6 +881,26 @@ struct SettingsView: View {
                     Text("표시")
                 } footer: {
                     Text("가린 대사를 길게 누르면 자막과 뜻이 보이고, 다시 길게 누르면 도로 가려집니다(누를 때 진동). \"뜻 가림\"은 눌러서 뜻만 볼 수도 있습니다. 가리기를 다시 켜면 열어 둔 대사도 모두 다시 가려집니다.")
+                }
+                Section {
+                    ForEach(speak.stages.indices, id: \.self) { i in
+                        Stepper("\(i + 1)단계 — \(speak.stages[i])초",
+                                value: Binding(get: { speak.stages.indices.contains(i) ? speak.stages[i] : 60 },
+                                               set: { v in if speak.stages.indices.contains(i) { speak.stages[i] = v; speak.persist() } }),
+                                in: 10...300, step: 5)
+                    }
+                    .onDelete { idx in
+                        if speak.stages.count > 1 { speak.stages.remove(atOffsets: idx); speak.persist() }
+                    }
+                    Button("+ 단계 추가") {
+                        speak.stages.append(max(10, (speak.stages.last ?? 60) - 15))
+                        speak.persist()
+                    }
+                    .disabled(speak.stages.count >= 6)
+                } header: {
+                    Text("입트기 — 줄여 말하기 단계")
+                } footer: {
+                    Text("상단 바의 말풍선(입트기)에서 같은 대답을 단계마다 점점 짧은 시간에 다시 말합니다(기본 75→60→45초). 시간이 넘으면 +1초씩 올라가고, 끝나면 몇 초 초과·부족인지 보여 줍니다. 단계는 밀어서 지울 수 있습니다. 녹음 파일은 폰에만 남고, 프롬프트와 기록(길이·날짜·별점·메모·받아 적기)만 웹과 동기화됩니다.")
                 }
                 Section("저장소") {
                     LabeledContent("대사", value: "\(store.items.count)개 (소리 저장 \(store.audioCount)개)")

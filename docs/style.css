@@ -429,3 +429,59 @@ input.rate:focus { outline: none; color: var(--accent2); }
 .supa-in.supa-url { flex: 2; min-width: 240px; }
 .supa-in:focus { outline: none; border-color: var(--accent); }
 .supa-line { margin-top: 8px; }
+
+/* ───────── 입트기 (말하기 유창성 연습) ───────── */
+#nav a.speak-link { color: var(--red); font-weight: 700; }
+#nav a.speak-link.active { color: var(--red); }
+.speak-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; }
+.speak-head .stats { color: var(--muted); font-size: 13px; margin-right: auto; }
+.speak-sync { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
+.speak-import { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin-bottom: 12px; display: grid; gap: 8px; }
+.speak-import textarea { width: 100%; min-height: 84px; background: var(--sunken); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; font-size: 14px; resize: vertical; }
+.speak-import .row { display: flex; gap: 8px; align-items: center; }
+.speak-group { margin: 14px 0 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
+.speak-p { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+.speak-p .p-head { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
+.speak-p .p-text { font-size: 15px; font-weight: 600; color: var(--strong); flex: 1; }
+.speak-p .p-meta { color: var(--dim); font-size: 12px; white-space: nowrap; }
+.speak-p.open { border-color: var(--accent); }
+.speak-edit-row { display: grid; gap: 6px; }
+.speak-edit-row input { width: 100%; background: var(--sunken); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 14px; }
+.speak-body { margin-top: 10px; display: grid; gap: 8px; }
+.speak-bigbtns { display: flex; gap: 10px; }
+.speak-bigbtns .btn { flex: 1; padding: 14px 8px; font-size: 16px; border-radius: 12px; }
+.speak-hint { background: var(--sunken); border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: var(--muted); white-space: pre-wrap; }
+.speak-take { border-top: 1px solid var(--row-line); padding: 7px 0 2px; font-size: 13px; }
+.speak-take .t-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.speak-take .t-when { color: var(--muted); }
+.speak-take .t-badge { background: var(--card2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 12px; }
+.speak-take .t-over { color: var(--orange); }
+.speak-take .t-under { color: var(--accent2); }
+.speak-take .t-wpm { color: var(--green); font-size: 12px; }
+.speak-take .icon { background: none; border: none; color: var(--muted); font-size: 15px; padding: 2px 4px; }
+.speak-take .icon:hover { color: var(--text); }
+.speak-take .icon.on { color: var(--yellow); }
+.speak-stars { display: inline-flex; gap: 0; }
+.speak-stars button { background: none; border: none; padding: 0 1px; font-size: 15px; color: var(--dim); }
+.speak-stars button.on { color: var(--yellow); }
+.speak-take .t-memo { width: 100%; margin-top: 6px; background: var(--sunken); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 13px; min-height: 40px; }
+.speak-take .t-heard { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; background: var(--sunken); border-radius: 8px; padding: 6px 8px; }
+.speak-nolocal { color: var(--dim); font-size: 11.5px; }
+
+/* 녹음 화면 (전체 덮개) */
+.speak-rec { position: fixed; inset: 0; z-index: 90; background: var(--bg); display: flex; flex-direction: column; align-items: center; padding: 26px 18px; gap: 14px; overflow: auto; }
+.speak-rec .r-prompt { font-size: 21px; font-weight: 700; color: var(--strong); text-align: center; max-width: 640px; }
+.speak-rec .r-stage { color: var(--muted); font-size: 14px; }
+.speak-rec .r-clock { font-size: 54px; font-weight: 800; color: var(--red); font-variant-numeric: tabular-nums; }
+.speak-rec .r-clock.over { color: var(--orange); }
+.speak-rec canvas.r-wave { width: min(560px, 92vw); height: 72px; background: var(--sunken); border-radius: 10px; }
+.speak-ring { position: relative; width: 240px; height: 240px; }
+.speak-ring svg { transform: rotate(-90deg); }
+.speak-ring .r-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+.speak-ring .r-center .r-clock { font-size: 46px; }
+.speak-rec .r-btns { display: flex; gap: 18px; align-items: center; margin-top: 6px; }
+.speak-rec .r-btns .rbtn { width: 64px; height: 64px; border-radius: 50%; border: 2px solid var(--line); background: var(--card); color: var(--text); font-size: 24px; }
+.speak-rec .r-btns .rbtn.stop { background: var(--accent); border-color: var(--accent); color: #fff; }
+.speak-rec .r-result { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; text-align: center; display: grid; gap: 10px; }
+.speak-rec .r-result b { font-size: 18px; }
+.speak-rec .r-cancel { background: none; border: none; color: var(--dim); font-size: 13px; }
