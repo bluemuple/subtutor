@@ -30,6 +30,7 @@
     dubListenFirst: false,      // ● 녹음: 먼저 원래 소리(원어민)를 들려준 뒤 녹음
     dubAutoPreview: false,      // 녹음 뒤 내 녹음을 영상에 맞춰 바로 들려주기
     dubAutoNext: false,         // 그다음 자막으로 넘어가 녹음 준비
+    dubFeedback: true,          // 더빙 명료도 피드백(실험적): 녹음과 나란히 크롬 음성 인식 → 일치율·속도·멈춤 (근거: lib/explain.js dubFeedback)
     wordSort: 'hard',           // 단어 목록 정렬: hard · easy · easyNoBasic
     leadMs: 150,
     tailMs: 200,
@@ -42,8 +43,8 @@
     cloze: 'off',               // off | function | random : 영상 위 자막 빈칸
     soundsLike: false,          // 소리 나는 대로 줄
     kiwiNotes: true,            // 키위·마오리·학교 용어 주석
+    nzNotes: true,              // NZ 모음 주석: fish→fush, pen→pin, ear=air 처럼 들리는 단어에 점선 밑줄 (근거: lib/explain.js nzVowels)
     vocabProfile: true,         // 어휘 프로파일·말 속도
-    loopLadder: false,          // S 반복 때 속도 사다리
     missedTag: '못 알아들음',
   };
   let settings = Object.assign({}, DEFAULT_SETTINGS);
@@ -60,10 +61,10 @@
     userScrollAt: 0, statusText: '', statusErr: false,
     ttPoll: null, tickCount: 0,
     rate: 1, rateReapplyUntil: 0, clearanceCur: 0, clearanceLowSince: 0,
-    koHold: false, clozeRevealIdx: -1, loopCount: 0, loopBaseRate: 1, profile: null, watched: new Set(), missed: new Set(), statsSavedAt: 0, seriesSaved: false,
+    koHold: false, clozeRevealIdx: -1, loopCount: 0, loopBaseRate: 1, loopLadderOn: false, profile: null, watched: new Set(), missed: new Set(), statsSavedAt: 0, seriesSaved: false,
     dubSegs: [], dubRange: [0, 0], dubBoxFor: -1, dubRec: null, dubLadder: null, dubPreview: null, dubPlay: null, dubMic: null, dubLoopRate: 1, dubPrevRate: 1, // 더빙
   };
-  const Sp = globalThis.SubTutorSpeech, Voc = globalThis.SubTutorVocab, Ex = globalThis.SubTutorExplain, Kiwi = globalThis.SubTutorKiwi || [], Freq = globalThis.SubTutorFreq || '';
+  const Sp = globalThis.SubTutorSpeech, Voc = globalThis.SubTutorVocab, Ex = globalThis.SubTutorExplain, Kiwi = globalThis.SubTutorKiwi || [], Freq = globalThis.SubTutorFreq || '', NZV = globalThis.SubTutorNZVowels;
   const trackCache = new Map(); // videoId -> tracks
   let pageVideoId = null;
   let pageMeta = null;
@@ -161,7 +162,7 @@
       settings = s;
       applySettings();
       if (changedTranslation) { refreshAllKo(); if (state.current >= 0) ensureTranslations(state.current); }
-      if (['koMode', 'secondPass', 'cloze', 'soundsLike', 'kiwiNotes', 'vocabProfile'].some((k) => prev[k] !== s[k])) { renderList(); renderOverlay(true); if (prev.vocabProfile !== s.vocabProfile) refreshProfileStatus(); }
+      if (['koMode', 'secondPass', 'cloze', 'soundsLike', 'kiwiNotes', 'nzNotes', 'vocabProfile'].some((k) => prev[k] !== s[k])) { renderList(); renderOverlay(true); if (prev.vocabProfile !== s.vocabProfile) refreshProfileStatus(); }
     }
     if (changes.items) loadSaved();
     if (changes.words && state.wordView) { const before = savedWords; loadSavedWords().then(() => updateWordCells([...new Set([...before, ...savedWords])].filter((w) => before.has(w) !== savedWords.has(w)))); }
@@ -180,6 +181,7 @@
       case 'setEnabled': setEnabled(!!msg.enabled); sendResponse({ ok: true }); break;
       case 'popupOpened': onPopupOpened(); sendResponse({ ok: true, pending: false }); break;
       case 'invoke': sendResponse(onInvoke(msg)); break;
+      case 'dubAt': dubAt(msg.ms).then(sendResponse, (e) => sendResponse({ ok: false, error: String((e && e.message) || e) })); return true;
       default: return;
     }
   });
@@ -1551,8 +1553,9 @@
       field('빈칸 자막', f.cloze, 'cloze'),
       field('소리 나는 대로', sw('soundsLike'), 'soundsLike'),
       field('키위·마오리·학교 용어 주석', sw('kiwiNotes'), 'kiwiNotes'),
+      field('NZ 모음 주석 (fush·pin 처럼 들리는 단어)', sw('nzNotes'), 'nzVowels'),
       field('어휘 프로파일 · 말 속도', sw('vocabProfile'), 'vocabProfile'),
-      field('반복 속도 사다리', sw('loopLadder'), 'loopLadder'),
+      field('반복 속도 사다리 (X 키 배속)', (f.ladderCfg = el('span', { class: 'st-ladder-cfg' })), 'loopLadder'),
       el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: showVocab }, '이 에피소드 어휘 목록'), el('button', { class: 'st-btn', onclick: () => showInfo('missed') }, 'Q 못 알아들음 표시란?'), el('button', { class: 'st-btn', onclick: () => showInfo('twoPass') }, '두 번 보기 순서')]),
       el('h4', { text: '재생' }),
       field('따라하기 쉬는 시간', f.shadowPause, 'shadowing'),
@@ -1565,6 +1568,7 @@
       field('녹음 전에 원래 소리 먼저 듣기', sw('dubListenFirst'), 'dub'),
       field('녹음 뒤 내 녹음 바로 들어보기', sw('dubAutoPreview'), 'dub'),
       field('그다음 자막으로 넘어가 녹음 준비', sw('dubAutoNext'), 'dub'),
+      field('명료도 피드백 (실험적 · 인터넷 필요)', sw('dubFeedback'), 'dubFeedback'),
       el('h4', { text: '저장' }),
       field('별표 저장 시 오디오', f.audioMode, 'audioStore'),
       el('div', { class: 'st-btn-row' }, [
@@ -1586,11 +1590,11 @@
     f.audioMode.value = settings.audioMode === 'both' ? 'download' : (settings.audioMode || 'off');
     f.koMode.value = settings.koMode || 'hold';
     f.cloze.value = settings.cloze || 'off';
-    f.secondPass.checked = !!settings.secondPass; f.soundsLike.checked = !!settings.soundsLike; f.kiwiNotes.checked = !!settings.kiwiNotes; f.vocabProfile.checked = !!settings.vocabProfile; f.loopLadder.checked = !!settings.loopLadder;
+    f.secondPass.checked = !!settings.secondPass; f.soundsLike.checked = !!settings.soundsLike; f.kiwiNotes.checked = !!settings.kiwiNotes; f.nzNotes.checked = settings.nzNotes !== false; f.vocabProfile.checked = !!settings.vocabProfile; renderLadderCfgExt();
     f.fontScale.value = settings.fontScale;
     f.shadowPause.value = shadowPauseValue();
     f.dubPlayback.checked = settings.dubPlayback !== false;
-    f.dubListenFirst.checked = !!settings.dubListenFirst; f.dubAutoPreview.checked = !!settings.dubAutoPreview; f.dubAutoNext.checked = !!settings.dubAutoNext;
+    f.dubListenFirst.checked = !!settings.dubListenFirst; f.dubAutoPreview.checked = !!settings.dubAutoPreview; f.dubAutoNext.checked = !!settings.dubAutoNext; f.dubFeedback.checked = settings.dubFeedback !== false;
     f.leadMs.value = settings.leadMs; f.tailMs.value = settings.tailMs;
     f.offset.value = state.offsetMs;
     f.offset.title = state.offsetMs ? (state.offsetSource === 'auto' ? '플랫폼 자막과 대조해 자동 감지한 값' : '직접 입력한 값') + ' · 자막이 소리보다 빠르면 음수' : '자막이 소리보다 빠르면 음수, 늦으면 양수. 플랫폼 자막이 켜져 있으면 자동 감지';
@@ -1657,7 +1661,7 @@
     const frag = document.createDocumentFragment();
     state.cues.forEach((c, i) => {
       const en = el('div', { class: 'st-en' });
-      fillMarked(en, c.text.replace(/\n/g, ' '), settings.kiwiNotes ? kiwiHits(c) : []);
+      fillMarked(en, c.text.replace(/\n/g, ' '), lineMarks(c));
       const main = el('div', { class: 'st-row-main' }, [en, el('div', { class: 'st-ko', text: settings.showTranslation ? koFor(c) : '' })]);
       if (settings.soundsLike && Sp) { const sl = Sp.soundsLike(c.text.replace(/\n/g, ' ')); if (sl && sl !== c.text) main.append(el('div', { class: 'st-sound', text: sl })); }
       if (settings.kiwiNotes) { const hits = kiwiHits(c); if (hits.length) main.append(el('div', { class: 'st-kiwi-line', text: hits.slice(0, 3).map((h) => h.term + ' = ' + h.ko).join(' · ') })); }
@@ -1686,14 +1690,28 @@
     if (!h) { h = Sp.findKiwi(c.text, Kiwi); kiwiCache.set(c, h); }
     return h;
   }
-  // 텍스트에 키위 용어 밑줄을 넣는다 (텍스트 노드 + <u>)
+  // NZ 모음 주석: 아는 단어인데 NZ 발음 때문에 못 알아듣는 고빈도 단어 (fish→fush, pen→pin, ear=air, milk→miwk …)
+  const nzCache = new WeakMap();
+  function nzHits(c) {
+    if (!NZV) return [];
+    let h = nzCache.get(c);
+    if (!h) { h = NZV.find(c.text, 3); nzCache.set(c, h); }
+    return h;
+  }
+  // 한 줄에 그릴 밑줄 모음: 키위 용어(실선) + NZ 모음(점선). 겹치면 키위 용어가 이긴다
+  function lineMarks(c) {
+    const kiwi = (settings.kiwiNotes ? kiwiHits(c) : []).map((h) => ({ start: h.start, end: h.end, cls: 'st-kiwi', title: h.term + ' = ' + h.ko }));
+    const nz = (settings.nzNotes !== false ? nzHits(c) : []).map((h) => ({ start: h.start, end: h.end, cls: 'st-nzv', title: h.hint + ' · ' + h.typeLabel }));
+    return Sp && Sp.mergeAnnotations ? Sp.mergeAnnotations(kiwi, nz) : kiwi.concat(nz);
+  }
+  // 텍스트에 주석 밑줄을 넣는다 (텍스트 노드 + <u>)
   function fillMarked(node, text, hits) {
     node.textContent = '';
     if (!hits || !hits.length) { node.textContent = text; return; }
     let pos = 0;
     for (const h of hits) {
       if (h.start > pos) node.append(document.createTextNode(text.slice(pos, h.start)));
-      node.append(el('u', { class: 'st-kiwi', title: h.term + ' = ' + h.ko }, text.slice(h.start, h.end)));
+      node.append(el('u', { class: h.cls || 'st-kiwi', title: h.title !== undefined ? h.title : (h.term + ' = ' + h.ko) }, text.slice(h.start, h.end)));
       pos = h.end;
     }
     if (pos < text.length) node.append(document.createTextNode(text.slice(pos)));
@@ -1736,7 +1754,7 @@
     const missed = state.missed.has(id);
     const clozed = settings.cloze !== 'off' && Sp && state.clozeRevealIdx !== i;
     const text = clozed ? Sp.clozeLine(c.text, settings.cloze, i).text : c.text;
-    fillMarked(ui.ovText, text, settings.kiwiNotes && !clozed ? kiwiHits(c) : []);
+    fillMarked(ui.ovText, text, clozed ? [] : lineMarks(c));
     let showKo = !!settings.showTranslation;
     if (settings.koMode === 'hold') showKo = showKo && (state.koHold || (settings.secondPass && missed));
     else if (settings.koMode === 'afterRepeat') showKo = showKo && (state.koHold || (settings.secondPass && missed) || (state.loop && state.loopIdx === i && state.loopCount >= (settings.koRepeats || 3)));
@@ -1918,7 +1936,7 @@
     if (state.clip) stopClip('user');
     cancelModesPending();
     state.lastShown = i; state.prevIdx = -1;
-    if (state.loop) { if (state.loopIdx !== i) { state.loopCount = 0; if (settings.loopLadder) { state.rate = ladderRates()[0]; applyRate(true); } } state.loopIdx = i; }
+    if (state.loop) { if (state.loopIdx !== i) { state.loopCount = 0; const lr = loopRatesFor(); if (lr) { state.rate = lr.rates[0]; applyRate(true); } } state.loopIdx = i; }
     state.clozeRevealIdx = -1;
     playFrom(cueVideoMs(c) - settings.leadMs, !!(opts && opts.play === false));
     highlightRow(i, true);
@@ -1933,14 +1951,16 @@
     if (!state.cues.length) return;
     const t = nowMs();
     if (state.current >= 0) goToCue(state.current - 1);
-    else { const i = S.lastStartedIndex(state.cues, isFinite(t) ? t : 0); goToCue(i < 0 ? 0 : i); }
+    else if (!isFinite(t)) goToCue(Math.max(0, state.lastShown)); // 광고 중(TVNZ+ 처럼 본편 시간이 없는 동안): 광고 앞에서 보던 줄로
+    else { const i = S.lastStartedIndex(state.cues, t); goToCue(i < 0 ? 0 : i); }
   }
   function nextCue() {
     if (!state.cues.length) return;
     const t = nowMs();
     if (state.current >= 0) goToCue(state.current + 1);
+    else if (!isFinite(t)) goToCue(Math.min(state.cues.length - 1, Math.max(0, state.lastShown) + 1)); // 광고 중: 광고 앞 줄의 다음 줄로 (광고를 건너뛴다)
     else {
-      let i = S.nextStartingIndex(state.cues, isFinite(t) ? t : 0);
+      let i = S.nextStartingIndex(state.cues, t);
       // 방금 D 로 옮긴 줄의 앞 여유(자막 시작 전) 동안 다시 누르면 같은 줄이 다시 잡힌다 → 그다음 줄로 (연달아 누르면 그만큼 넘어간다)
       if (i >= 0 && i === state.lastShown && now() - state.lastSeekAt < 2000) i = Math.min(state.cues.length - 1, i + 1);
       goToCue(i < 0 ? state.cues.length - 1 : i);
@@ -1957,6 +1977,25 @@
     const out = raw.map((x) => Math.round(clamp(+x, 0.3, 2) * 100) / 100).filter((x) => Number.isFinite(x) && x > 0).slice(0, 6);
     return out.length ? out : LADDER_FALLBACK;
   }
+  // X 반복 속도 사다리가 켜져 있을 때 반복마다 올라갈 단계 (S 일정한 속도 반복이면 없음)
+  function loopRatesFor() {
+    return state.loop && state.loopLadderOn ? { rates: ladderRates() } : null;
+  }
+  // 설정 ⚙ 의 사다리 배속 편집: 웹 설정 › 속도 사다리와 같은 값을 고친다 (더빙 ▶ 배속 연습도 같은 단계)
+  function saveLadderRates(rates) {
+    const clean = rates.map((x) => Math.round(clamp(+x || 1, 0.3, 2) * 100) / 100).slice(0, 6);
+    saveSettings({ web: Object.assign({}, settings.web, { ladderRates: clean }) });
+  }
+  function renderLadderCfgExt() {
+    const box = ui.form && ui.form.ladderCfg; if (!box) return;
+    box.textContent = '';
+    const rates = ladderRates();
+    rates.forEach((r, k) => {
+      box.append(el('input', { class: 'st-ladder-rate', type: 'number', min: '0.3', max: '2', step: '0.05', value: String(r), title: (k + 1) + '번째 배속 (0.3~2)', onchange: (e) => { const next = ladderRates().slice(); next[k] = +e.target.value || 1; saveLadderRates(next); } }));
+    });
+    if (rates.length > 1) box.append(el('button', { class: 'st-btn st-mini st-ladder-del', title: '마지막 단계 빼기', onclick: () => saveLadderRates(ladderRates().slice(0, -1)) }, '−'));
+    if (rates.length < 6) box.append(el('button', { class: 'st-btn st-mini st-ladder-add', title: '단계 추가', onclick: () => { const cur = ladderRates(); saveLadderRates(cur.concat(Math.min(2, Math.round((cur[cur.length - 1] + 0.15) * 100) / 100))); } }, '+ 추가'));
+  }
   const rateText = (r) => String(Math.round(r * 100) / 100);
   // Shift+< / Shift+> 와 컨트롤 바의 ‹ › 가 오르내리는 단계: 설정 › 속도 사다리에 넣은 배속(+ 보통 속도 1배)
   function rateSteps() {
@@ -1971,17 +2010,42 @@
     state.rate = next;
     applyRate(false);
   }
-  function toggleLoop() {
-    if (state.loop) {
-      state.loop = false; state.loopIdx = -1; toast('반복 끔');
-      if (settings.loopLadder && Math.abs(state.rate - state.loopBaseRate) > 0.01) { state.rate = state.loopBaseRate; applyRate(true); }
-    } else {
-      const i = anchorIndex();
-      if (i < 0) return;
-      state.loop = true; state.loopIdx = i; state.loopCount = 0; state.loopBaseRate = state.rate;
-      if (settings.loopLadder) { const L = ladderRates(); state.rate = L[0]; applyRate(true); toast('🔁 반복 · 속도 사다리 ' + L.map(rateText).join('→') + '×'); } else toast('🔁 이 자막 반복');
-      goToCue(i);
-    }
+  // S: 일정한 속도 반복 (지금 배속 그대로) · X: 반복 속도 사다리 (설정한 배속 단계대로). 반복 중 서로 누르면 모드만 바뀐다
+  function stopLoop() {
+    state.loop = false; state.loopIdx = -1;
+    if (state.loopLadderOn && Math.abs(state.rate - state.loopBaseRate) > 0.01) { state.rate = state.loopBaseRate; applyRate(true); }
+    state.loopLadderOn = false;
+    toast('반복 끔');
+    updateModeUI();
+    renderOverlay(true);
+  }
+  function startLoop(ladder) {
+    const i = anchorIndex();
+    if (i < 0) return;
+    state.loop = true; state.loopIdx = i; state.loopCount = 0; state.loopBaseRate = state.rate; state.loopLadderOn = !!ladder;
+    if (ladder) { const rates = ladderRates(); state.rate = rates[0]; applyRate(true); toast('🪜 반복 속도 사다리 · ' + rates.map(rateText).join('→') + '× (배속은 ⚙ 설정에서)'); }
+    else toast('🔁 이 자막 반복 · ' + rateText(state.rate) + '×');
+    goToCue(i);
+    updateModeUI();
+    renderOverlay(true);
+  }
+  function toggleLoop() { // S
+    if (!state.loop) { startLoop(false); return; }
+    if (!state.loopLadderOn) { stopLoop(); return; }
+    // 사다리 반복 중 S → 일정한 속도 반복으로 (사다리를 시작한 배속으로 되돌린다)
+    state.loopLadderOn = false;
+    if (Math.abs(state.rate - state.loopBaseRate) > 0.01) { state.rate = state.loopBaseRate; applyRate(true); }
+    toast('🔁 이 자막 반복 · ' + rateText(state.rate) + '×');
+    updateModeUI();
+    renderOverlay(true);
+  }
+  function toggleLoopLadder() { // X
+    if (!state.loop) { startLoop(true); return; }
+    if (state.loopLadderOn) { stopLoop(); return; }
+    // 일정 반복 중 X → 사다리 반복으로 (1단계부터)
+    state.loopLadderOn = true; state.loopCount = 0;
+    const rates = ladderRates(); state.rate = rates[0]; applyRate(true);
+    toast('🪜 반복 속도 사다리 · ' + rates.map(rateText).join('→') + '×');
     updateModeUI();
     renderOverlay(true);
   }
@@ -2276,6 +2340,18 @@
     if (Math.abs(state.rate - state.dubPrevRate) > 0.01) { state.rate = state.dubPrevRate; applyRate(true); }
   }
   function toggleDubBox() { if (dubModeOn()) closeDubBox(); else openDubBox(); }
+  // 웹의 오늘의 훈련 › "플레이어에서 더빙하기": 그 대사(영상 시간 ms)의 줄에서 더빙 칸을 연다 (탭을 막 열었으면 자막이 올 때까지 기다린다)
+  async function dubAt(ms) {
+    for (let k = 0; k < 60 && (!state.cues.length || !state.active); k++) await sleepMs(250);
+    if (!state.cues.length) return { ok: false, error: '자막을 불러오지 못했습니다' };
+    const t = ms + effectiveOffset();
+    let i = S.findCueIndex(state.cues, t + 10);
+    if (i < 0) i = S.nextStartingIndex(state.cues, t - 300);
+    if (i < 0) i = state.cues.length - 1;
+    if (!isEnabled()) setEnabled(true);
+    openDubBox(i);
+    return { ok: true, index: i };
+  }
   function moveDubRange(d) { openDubBox(clamp(state.dubRange[0] + d, 0, state.cues.length - 1)); }
   function growDubRange(d) {
     const [i, j] = state.dubRange;
@@ -2411,6 +2487,43 @@
     }
     if (state.dubLadder === L) cancelDubLadder(); // 다 들었으면 원래 속도로
   }
+  // 더빙 명료도(실험적): 녹음과 나란히 크롬 음성 인식을 돌려 내 발음이 영어로 어떻게 들렸는지 받아 둔다.
+  // 실패(미지원·오프라인·권한 거부)는 조용히 없던 일로 — 피드백만 빠지고 녹음은 그대로. 원본 소리는 녹음 중 꺼져 있어 섞이지 않는다
+  function startDubAsr() {
+    try {
+      if (settings.dubAsrTest) { const o = { text: String(settings.dubAsrTest), done: true, stop() {} }; return o; } // E2E 용 가짜 인식
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) return null;
+      const r = new SR();
+      r.lang = 'en-NZ';
+      r.continuous = true;
+      r.interimResults = false;
+      r.maxAlternatives = 1;
+      const o = { text: '', done: false, stop() { try { r.stop(); } catch (e) { o.done = true; } } };
+      r.onresult = (e) => { let t = ''; for (const res of e.results) t += res[0].transcript + ' '; o.text = t.trim(); };
+      r.onerror = () => { o.done = true; };
+      r.onend = () => { o.done = true; };
+      r.start();
+      return o;
+    } catch (e) { return null; }
+  }
+  // 저장된 녹음(1배 시간축)으로 명료도 지표를 만든다: 인식 문장과의 단어 일치율 · 내 wpm vs 원본 wpm · 0.3초 넘는 멈춤 수
+  function dubFeedbackOf(asr, r, samples, sr) {
+    const Au = globalThis.SubTutorAudio;
+    const secs = samples.length / sr;
+    const heard = (asr && asr.text) || '';
+    const myWords = heard ? heard.trim().split(/\s+/).length : 0;
+    const origWords = String(r.text || '').trim().split(/\s+/).filter(Boolean).length;
+    const origSecs = (r.endMs - r.startMs) / 1000;
+    return {
+      text: heard.slice(0, 300),
+      acc: heard ? S.diffWords(r.text, heard).accuracy : null,
+      wpm: secs > 0.3 && myWords ? Math.round((myWords / secs) * 60) : 0,
+      origWpm: origSecs > 0.3 && origWords ? Math.round((origWords / origSecs) * 60) : 0,
+      pauses: Au.silenceGaps ? Au.silenceGaps(samples, sr, 300) : 0,
+    };
+  }
+
   // ② 녹음: 구간 앞에 세워 3·2·1 → 원래 소리를 끄고 고른 배속으로 구간을 재생하며 마이크를 녹음 → 구간에 맞춰 자르고
   //    (느리게 녹음했으면 음높이를 지킨 채 원래 길이로 줄여) MP3 로. 저장된 녹음은 언제나 1배속 영상 시간에 맞춰져 있다
   async function recordDubTake() {
@@ -2450,6 +2563,7 @@
       for (let n = 3; n >= 1; n--) { rec.phase = 'count'; rec.count = n; renderDubBox(); await sleepMs(600); if (rec.cancel) throw new Error('cancel'); }
       if (v) { v.muted = true; mutedByUs = true; } // 원래 소리를 끈다 (스피커 소리가 녹음에 섞이지 않게)
       const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => MediaRecorder.isTypeSupported(m)) || '';
+      const asr = settings.dubFeedback !== false ? startDubAsr() : null; // 명료도(실험적): 녹음과 나란히 음성 인식
       mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       const chunks = [];
       mr.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
@@ -2465,6 +2579,7 @@
       });
       await sleepMs(200);
       if (mr.state !== 'inactive') mr.stop();
+      if (asr) { asr.stop(); for (let w = 0; w < 15 && !asr.done; w++) await sleepMs(100); } // 마지막 인식 결과를 잠깐만 기다린다
       await stopped;
       if (!ok) throw new Error(rec.cancel ? 'cancel' : '재생이 멈춰 이번 녹음은 저장하지 않았습니다');
       rec.phase = 'save'; renderDubBox();
@@ -2491,9 +2606,10 @@
         if (!St) throw new Error('속도 변환 모듈을 불러오지 못했습니다 (확장 프로그램을 다시 로드하세요)');
         samples = St.stretch(samples, sr, 1 / recRate);
       }
+      const fb = asr ? dubFeedbackOf(asr, r, samples, sr) : null;
       const enc = Au.encodeClip(Au.normalize(samples, 0.9), sr, { rate: 32000, kbps: 64 });
       // clipStartMs: 이 녹음의 첫 샘플이 놓일 영상 시각 (재생은 이 값만 본다 — 나중에 자막 보정값이 바뀌어도 소리는 제자리)
-      const take = { id: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: Date.now(), ms: Math.round((samples.length * 1000) / sr), clipStartMs: r.startMs - leadMs, format: enc.format, recRate };
+      const take = { id: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: Date.now(), ms: Math.round((samples.length * 1000) / sr), clipStartMs: r.startMs - leadMs, format: enc.format, recRate, fb };
       await chrome.storage.local.set({ [dubAudioKey(take.id)]: { b64: Au.bytesToBase64(enc.bytes), mime: enc.mime } });
       const seg = dubSegFor(r, true);
       seg.takes.push(take);
@@ -2773,6 +2889,7 @@
           return el('div', { class: 'st-dub-take' + (chosen ? ' chosen' : ''), 'data-take': t.id }, [
             el('span', { class: 'st-dub-k', text: String(k + 1) }),
             el('span', { class: 'st-dub-len', text: (t.ms / 1000).toFixed(1) + '초' + (t.recRate && t.recRate !== 1 ? ' · ' + rateText(t.recRate) + '배 녹음' : '') + ' · ' + new Date(t.at).toTimeString().slice(0, 5) }),
+            t.fb && (t.fb.acc !== null || t.fb.pauses || t.fb.wpm) ? el('span', { class: 'st-dub-fb', title: '명료도 피드백(실험적)' + (t.fb.text ? ' · 인식된 문장: "' + t.fb.text + '"' : '') + (t.fb.origWpm ? ' · 원본 ' + t.fb.origWpm + ' wpm' : '') + ' · 0.3초 넘는 멈춤 ' + t.fb.pauses + '번' }, [t.fb.acc !== null ? '일치 ' + t.fb.acc + '%' : '', t.fb.wpm ? (t.fb.acc !== null ? ' · ' : '') + t.fb.wpm + 'wpm' : '', t.fb.pauses ? ' · 멈춤 ' + t.fb.pauses : ''].join('')) : null,
             withProps(el('button', { class: 'st-btn st-mini st-dub-play' + (pv ? ' on' : ''), onclick: () => previewDubTake(seg, t) }, pv ? '◼' : '▶ 들어보기'), { disabled: busy }),
             el('button', { class: 'st-dub-star' + (chosen ? ' on' : ''), title: chosen ? '더빙 해제' : '이 녹음을 이 구간의 더빙으로 (원래 소리 대신 재생)', onclick: () => chooseDubTake(seg, t) }, chosen ? '★' : '☆'),
             withProps(el('button', { class: 'st-dub-del', title: '이 녹음 지우기', onclick: () => deleteDubTake(seg, t) }, '✕'), { disabled: busy }),
@@ -2956,7 +3073,8 @@
         if ((t >= c.end + settings.tailMs - 20 || t < c.start - settings.leadMs - 2500) && now() - state.lastLoopSeekAt > 500) {
           state.lastLoopSeekAt = now();
           state.loopCount++;
-          if (settings.loopLadder) { const L = ladderRates(); const r = L[Math.min(L.length - 1, state.loopCount)]; if (Math.abs(r - state.rate) > 0.01) { state.rate = r; applyRate(true); } }
+          const lr = loopRatesFor();
+          if (lr) { const r = lr.rates[Math.min(lr.rates.length - 1, state.loopCount)]; if (Math.abs(r - state.rate) > 0.01) { state.rate = r; applyRate(true); } }
           seekTo(cueVideoMs(c) - settings.leadMs);
           if (settings.koMode === 'afterRepeat') renderOverlay(true);
         }
@@ -2985,7 +3103,7 @@
     const i = shown >= 0 ? shown : anchorIndex();
     if (i >= 0) toggleSave(i); else chip('info', '저장할 자막이 없습니다');
   }
-  const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyD: nextCue, KeyF: replayCue, KeyE: saveShownCue, Enter: saveShownCue, KeyQ: toggleMissed, KeyR: () => toggleDubBox(), KeyV: () => { state.clozeRevealIdx = displayIndex(); renderOverlay(true); }, KeyT: () => { if (!state.koHold) { state.koHold = true; renderOverlay(true); } }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
+  const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyX: toggleLoopLadder, KeyD: nextCue, KeyF: replayCue, KeyE: saveShownCue, Enter: saveShownCue, KeyQ: toggleMissed, KeyR: () => toggleDubBox(), KeyV: () => { state.clozeRevealIdx = displayIndex(); renderOverlay(true); }, KeyT: () => { if (!state.koHold) { state.koHold = true; renderOverlay(true); } }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
   // Shift 와 함께: < 한 단계 느리게 · > 한 단계 빠르게. 단계는 설정 › 속도 사다리의 배속을 그대로 쓴다.
   // 유튜브는 Shift+< , Shift+> 가 이미 유튜브 자체 기능이라 건드리지 않는다 (두 번 적용되는 것을 막는다).
   const SHIFT_ACTIONS = RATE_UI ? { Comma: () => stepRate(-1), Period: () => stepRate(1) } : {};

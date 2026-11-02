@@ -209,3 +209,13 @@ u.st-kiwi { text-decoration: underline dotted #fbbf24; text-underline-offset: 3p
 .st-row.st-dubbed { border-left-color: #fbbf24; }
 .st-ov-dub { position: absolute; left: 16px; bottom: calc(var(--st-clearance, 0px) + 12px); display: none; background: rgba(251,191,36,.92); color: #111; font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 12px; }
 .st-ov-dub.on { display: block; }
+
+/* NZ 모음 주석: 점선 밑줄 (키위 용어 주석과 겹치면 키위가 우선) */
+#st-panel u.st-nzv, #st-overlay u.st-nzv { text-decoration: underline dotted #38bdf8 2px; text-underline-offset: 3px; cursor: help; font-style: normal; }
+
+/* 더빙 명료도 피드백 (실험적) */
+.st-dub-take .st-dub-fb { font-size: 11px; color: #86efac; cursor: help; white-space: nowrap; }
+
+/* 설정: 반복 속도 사다리(X) 배속 편집 */
+.st-ladder-cfg { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.st-ladder-cfg input.st-ladder-rate { width: 52px; padding: 2px 4px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; color: inherit; font-size: 12px; }

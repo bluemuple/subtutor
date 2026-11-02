@@ -1,0 +1,37 @@
+# SubTutor Pocket (자막 튜터 아이폰 앱) — xcodegen 프로젝트 정의
+# 프로젝트 파일 만들기: cd ios && xcodegen generate  →  SubTutorPocket.xcodeproj 가 생긴다
+# 내 아이폰에 설치: Xcode 로 .xcodeproj 를 열고 Signing & Capabilities 에서 본인 Apple ID 팀을 고른 뒤, 아이폰을 꽂고 ▶ Run
+# (무료 Apple ID 는 7일마다 다시 Run 해야 한다. 시뮬레이터는 서명 없이 바로 된다)
+name: SubTutorPocket
+options:
+  bundleIdPrefix: com.bluemuple
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+targets:
+  SubTutorPocket:
+    type: application
+    platform: iOS
+    sources:
+      - SubTutorPocket
+    info:
+      path: SubTutorPocket/Info.plist
+      properties:
+        CFBundleDisplayName: 자막 튜터
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIBackgroundModes: [audio]          # 화면을 꺼도(이동 중) 재생이 이어진다
+        NSMicrophoneUsageDescription: 대사를 따라 말한 내 목소리를 녹음해 원어민 소리와 비교하는 데 씁니다.
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSAppTransportSecurity:             # 시뮬레이터에서 로컬 모의 Supabase(http://127.0.0.1)로 검사할 때만 예외
+          NSExceptionDomains:
+            127.0.0.1: { NSExceptionAllowsInsecureHTTPLoads: true }
+            localhost: { NSExceptionAllowsInsecureHTTPLoads: true }
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bluemuple.subtutor.pocket
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic

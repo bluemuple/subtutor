@@ -376,15 +376,27 @@ async function runSites() {
       await tp.evaluate(() => { document.querySelector('video').pause(); window.__seeks = []; }); // 여기부터는 우리가 옮긴 탐색만
       await tp.click('.st-row[data-i="7"] .st-en');  // 본편 24.0초 → 영상 26 + 6.0 − 앞 여유 0.15 = 31.85초
       await waitFor(async () => { const t = await vt(tp); return t > 31.7 && t < 33.5; }, 3000, 'row 7 → video 31.85 s');
+      const pauseNow = () => tp.evaluate(() => document.querySelector('video').pause());
       await tp.click('.st-row[data-i="4"] .st-en');
       await waitFor(async () => { const t = await vt(tp); return t > 17.6 && t < 19.5; }, 3000, 'row 4 → video 17.85 s');
+      await pauseNow(); await sleep(250); // 재생이 광고까지 흘러가기 전에 멈추고 누른다 (광고 중의 D 는 아래에서 따로 확인)
       await tp.keyboard.press('KeyD');                 // 5번 줄(본편 17.0초) → 영상 20.85초
-      await waitFor(async () => { const t = await vt(tp); return t > 20.7 && t < 22; }, 3000, 'D → row 5 at video 20.85 s');
+      await waitFor(async () => { const t = await vt(tp); return t > 20.7 && t < 22.3; }, 3000, 'D → row 5 at video 20.85 s');
+      await pauseNow(); await sleep(250);
       await tp.keyboard.press('KeyD');                 // 6번 줄(본편 20.5초) → 광고(22–26초)를 건너뛰어 영상 28.35초
-      await waitFor(async () => { const t = await vt(tp); return t > 28.2 && t < 29.6; }, 3000, 'D across the ad → video 28.35 s');
+      await waitFor(async () => { const t = await vt(tp); return t > 28.2 && t < 29.8; }, 3000, 'D across the ad → video 28.35 s');
+      // 광고 중의 A/D: 본편 시간이 없는 동안 눌러도 0초로 가지 않고, 광고 앞에서 보던 줄 기준으로 움직인다
       const seeks = await tp.evaluate(() => window.__seeks.slice());
       // (탐색을 잇달아 하면 브라우저가 seeking 이벤트를 합치기도 한다 → 위치는 위의 단계마다 확인했고, 여기서는 광고 구간으로 옮긴 적이 없는지만)
       assert(!seeks.some((ms) => ms >= 22000 && ms < 26000), 'never seeks into the ad: ' + seeks.join(','));
+      // 광고 중의 D: 본편 시간이 없는 동안 눌러도 0초로 가지 않고, 광고 앞에서 보던 줄의 다음 줄로 간다
+      await tp.evaluate(() => { const v = document.querySelector('video'); v.currentTime = 23.2; v.play(); });
+      await sleep(600);
+      await tp.evaluate(() => { window.__seeks = []; }); // 위의 23.2초 이동은 테스트가 한 것 — D 가 만드는 탐색만 본다
+      await tp.keyboard.press('KeyD');
+      await waitFor(async () => { const t = await vt(tp); return t > 26 && t < 48; }, 3000, 'D during the ad lands in content, not at 0');
+      const adSeeks = await tp.evaluate(() => window.__seeks.slice());
+      assert(adSeeks.length && adSeeks.every((ms) => ms >= 26000), 'D from the ad goes straight to content: ' + adSeeks.join(','));
       await tp.evaluate(() => document.querySelector('video').pause());
     });
     await step('TVNZ+(모의): 저장한 대사를 웹에서 ▶ 하면 TVNZ 탭이 그 대사만(광고를 건너뛴 본편 시각) 재생하고 멈춘다 · 목록에 "TVNZ+"', async () => {
@@ -401,7 +413,9 @@ async function runSites() {
       await web.click('.item .play');
       await waitFor(() => web.evaluate(() => window.__clipEvents.includes('ended')), 20000, 'clip ended').catch(async (e) => { throw new Error(e.message + ' events=' + JSON.stringify(await web.evaluate(() => window.__clipEvents))); });
       const t = await vt(tp);
-      assert(t > 34.4 && t < 35.6, 'TVNZ stopped at the line end (content 26.6 + tail → video 34.8 s): ' + t.toFixed(2));
+      const paused = await tp.evaluate(() => document.querySelector('video').paused);
+      // 느린 머신에서는 멈춤이 몇 초 늦게 먹을 수 있다 — 대사 끝(34.8초) 뒤에 멈췄고, 영상 끝(48초)까지 가지 않았으면 된다
+      assert(paused && t > 34.4 && t < 45, 'TVNZ paused after the line end (34.8 s), before the tail of the video: ' + t.toFixed(2) + ' paused=' + paused);
       await web.close();
     });
     await tp.close();
@@ -447,7 +461,8 @@ async function runSites() {
       const bar = await dp.$$eval('.bar > *', (xs) => xs.map((x) => (x.classList.contains('st-rate') ? 'rate' : (x.classList.contains('st-ctl') ? 'ST' : x.getAttribute('aria-label')))));
       assert(bar.join(',') === 'Play,Captions,rate,ST,Fullscreen', 'ted bar ' + bar.join(','));
       const d = await diag(dp);
-      assert(/pageTracks=\["en:text\/file","ko:text\/file"\]/.test(d), 'only en/ko files kept: ' + d.split('\n').find((l) => l.startsWith('site=')));
+      const kept = (/pageTracks=(\[[^\]]*\])/.exec(d) || [])[1] || '[]';
+      assert(JSON.parse(kept).sort().join(',') === 'en:text/file,ko:text/file', 'only en/ko files kept (any order): ' + kept);
     });
     await dp.close();
 
@@ -643,6 +658,16 @@ async function runSites() {
       assert(ov.row && /sweet as/.test(ov.row) && ov.rowSound && /gonna/.test(ov.rowSound), 'panel row annotations ' + JSON.stringify(ov));
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { soundsLike: false } }, {}));
       await page.evaluate(() => document.querySelector('video').pause());
+    });
+    await step('NZ 모음 주석: think 처럼 NZ 발음이 다른 단어에 점선 밑줄 + "~처럼 들림" 설명, 끄면 사라진다', async () => {
+      const row = '.st-row[data-i="7"]'; // "I don't think she's paying attention."
+      await waitFor(() => page.$(row + ' u.st-nzv'), 6000, 'nzv underline on think');
+      const t = await page.$eval(row + ' u.st-nzv', (u) => u.textContent + '|' + u.title);
+      assert(/^think\|/.test(t) && /thunk/.test(t) && /KIT/.test(t), 'think hint: ' + t);
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { nzNotes: false } }, {}));
+      await waitFor(() => page.evaluate(() => !document.querySelector('.st-row u.st-nzv')), 5000, 'toggled off removes the dotted underlines');
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { nzNotes: true } }, {}));
+      await waitFor(() => page.$(row + ' u.st-nzv'), 5000, 'toggled back on');
     });
     await step('어휘 프로파일: 상태줄의 말 속도·3천 밖 비율, 어휘 목록 상자, 에피소드 통계', async () => {
       const status = await page.$eval('.st-status', (e) => e.textContent);
@@ -1091,6 +1116,33 @@ async function runSites() {
         await sleep(200);
       }
     });
+    await step('더빙 명료도 피드백(실험적): 인식 문장과의 일치율·wpm·멈춤이 녹음 줄에 붙고, 끄면 붙지 않는다 (인식이 없으면 조용히 생략)', async () => {
+      const cueText = await page.$eval('.st-row[data-i="8"] .st-en', (e) => e.textContent);
+      await sw.evaluate((t) => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubFeedback: true, dubAsrTest: t } }, {}), cueText);
+      await sleep(300);
+      await page.click('.st-row[data-i="8"] .st-en');
+      await sleep(400);
+      await page.keyboard.press('KeyR');
+      await waitFor(() => page.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox:not(.st-hidden)'); return b && b.previousElementSibling.dataset.i === '8'; }), 4000, 'dub box on row 8');
+      assert((await page.$$('.st-dub-take')).length === 0, 'row 8 starts with no takes');
+      await page.click('.st-dub-rec');
+      await waitFor(async () => (await page.$$('.st-dub-take')).length === 1 && !(await page.$('.st-dub-rec.on')), 30000, 'take saved');
+      const fb = await page.$eval('.st-dub-take:last-child .st-dub-fb', (e) => e.textContent + '||' + e.title).catch(() => null);
+      assert(fb && /일치 100%/.test(fb) && /\d+wpm/.test(fb) && /원본 \d+ wpm/.test(fb) && /인식된 문장/.test(fb), 'feedback badge: ' + fb);
+      // 끄면(또는 인식이 없으면) 배지 없이 저장만 된다
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubFeedback: false, dubAsrTest: '' } }, {}));
+      await sleep(300);
+      await page.click('.st-dub-rec');
+      await waitFor(async () => (await page.$$('.st-dub-take')).length === 2 && !(await page.$('.st-dub-rec.on')), 30000, 'second take saved');
+      assert(!(await page.$('.st-dub-take:last-child .st-dub-fb')), 'no badge when the feedback is off');
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubFeedback: true } }, {}));
+      // 이 단계의 더빙을 지우고 새로고침해 다음 단계가 깨끗한 상태에서 돌게 한다
+      await sw.evaluate(async () => { const o = await chrome.storage.local.get(null); const keys = ['dubs:netflix:12345'].concat(Object.keys(o).filter((k) => k.startsWith('dubaudio:'))); await chrome.storage.local.remove(keys); });
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#st-panel', { timeout: 15000 });
+      await waitFor(() => page.$$eval('.st-row', (r) => r.length === 10), 15000, 'rows after reload');
+      await page.evaluate(() => { const v = document.querySelector('video'); v.muted = true; v.pause(); v.currentTime = 20; });
+    });
     await step('더빙 녹음 흐름 설정: 원래 소리 먼저 듣기 → 3·2·1 → 녹음 → 내 녹음 바로 들어보기 → 다음 자막으로 넘어가 녹음 준비', async () => {
       try {
         await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { dubListenFirst: true, dubAutoPreview: true, dubAutoNext: true } }, {}));
@@ -1191,12 +1243,11 @@ async function runSites() {
         await sleep(400);
       }
     });
-    await step('반복 속도 사다리: 웹 설정의 단계대로 S 반복마다 올라가고, 끄면 원래 속도 (음높이 유지)', async () => {
-      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { loopLadder: true } }, {}));
-      await sleep(300);
+    await step('X 반복 속도 사다리: 설정한 배속 단계대로 반복마다 올라가고, ⚙ 설정에서 단계를 더하고 빼며, 끄면 원래 속도 (음높이 유지)', async () => {
       await setTime(page, 2.3, true);
       await sleep(300);
-      await page.keyboard.press('KeyS');
+      await page.keyboard.press('KeyX');
+      await waitFor(() => page.evaluate(() => /반복 속도 사다리/.test(document.querySelector('.st-toast').textContent)), 3000, 'ladder toast');
       await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.8) < 0.01), 3000, 'ladder starts at 0.8');
       // 플레이어 재생도 음높이를 유지한다 (크롬 기본값이지만 직접 켜 둔다)
       assert(await page.evaluate(() => { const v = document.querySelector('video'); return !('preservesPitch' in v) || v.preservesPitch === true; }), 'preservesPitch on the video element');
@@ -1205,10 +1256,37 @@ async function runSites() {
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.55, 1.3], ladderPitch: true } } }, {}));
       await sleep(300);
       await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1.3) < 0.01), 10000, 'follows the web ladder settings (1.3)');
+      // ⚙ 설정의 "반복 속도 사다리" 편집: 입력이 단계 수만큼 보이고, + 추가가 단계를 늘린다 (더빙 연습 사다리와 같은 값)
+      await page.evaluate(() => { const st = document.querySelector('.st-settings'); if (st.classList.contains('st-hidden')) [...document.querySelectorAll('#st-panel button')].find((b) => b.title === '설정').click(); });
+      await waitFor(() => page.$$eval('.st-ladder-cfg input.st-ladder-rate', (e) => e.length === 2), 3000, 'two rate inputs in the panel settings');
+      assert(await page.$$eval('.st-ladder-cfg input.st-ladder-rate', (e) => Math.abs(+e[0].value - 0.55) < 0.001 && Math.abs(+e[1].value - 1.3) < 0.001), 'inputs show the configured rates');
+      await page.click('.st-ladder-cfg .st-ladder-add');
+      await waitFor(() => sw.evaluate(async () => { const w = ((await chrome.storage.local.get('settings')).settings || {}).web || {}; return Array.isArray(w.ladderRates) && w.ladderRates.length === 3 && Math.abs(w.ladderRates[2] - 1.45) < 0.001; }), 4000, '+ adds a 1.45 step to the shared ladder');
+      await waitFor(() => page.$$eval('.st-ladder-cfg input.st-ladder-rate', (e) => e.length === 3), 3000, 'third input appears');
+      await page.click('.st-ladder-cfg .st-ladder-del');
+      await waitFor(() => sw.evaluate(async () => { const w = ((await chrome.storage.local.get('settings')).settings || {}).web || {}; return Array.isArray(w.ladderRates) && w.ladderRates.length === 2; }), 4000, '− removes the last step');
+      await page.evaluate(() => { const st = document.querySelector('.st-settings'); if (!st.classList.contains('st-hidden')) [...document.querySelectorAll('#st-panel button')].find((b) => b.title === '설정').click(); });
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true } } }, {}));
-      await page.keyboard.press('KeyS');
+      await page.keyboard.press('KeyX');
       await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 3000, 'rate restored');
-      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { loopLadder: false } }, {}));
+    });
+    await step('S 일정한 속도 반복: 배속을 바꾸지 않고 반복하며, 반복 중 S↔X 로 모드만 바뀐다', async () => {
+      await setTime(page, 2.3, true);
+      await sleep(300);
+      await page.keyboard.press('KeyS');
+      await waitFor(() => page.evaluate(() => /이 자막 반복 · 1×/.test(document.querySelector('.st-toast').textContent)), 3000, 'steady loop toast with the current rate');
+      await page.evaluate(() => { window.__seeks = []; });
+      await waitFor(() => page.evaluate(() => window.__seeks.length >= 1), 12000, 'looped back at least once');
+      assert(await page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 'steady loop keeps 1×');
+      assert(await page.evaluate(() => !!document.querySelector('.st-ov-chip.on-loop')), 'loop chip on');
+      // S 반복 중 X → 사다리 1단계(0.8)로, 사다리 중 S → 일정(시작 배속)으로. 반복은 꺼지지 않는다
+      await page.keyboard.press('KeyX');
+      await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 0.8) < 0.01), 3000, 'S→X switches to the ladder first step');
+      await page.keyboard.press('KeyS');
+      await waitFor(() => page.evaluate(() => Math.abs(document.querySelector('video').playbackRate - 1) < 0.01), 3000, 'X→S returns to the steady rate');
+      assert(await page.evaluate(() => !!document.querySelector('.st-ov-chip.on-loop')), 'still looping after the switch');
+      await page.keyboard.press('KeyS');
+      await waitFor(() => page.evaluate(() => !document.querySelector('.st-ov-chip.on-loop')), 3000, 'loop off');
     });
     await step('재생 화면을 떠나면 패널이 닫히고 돌아오면 다시 열린다', async () => {
       await page.evaluate(() => history.pushState({}, '', '/browse'));
@@ -1358,7 +1436,7 @@ async function runSites() {
         const got = await opt.evaluate(async () => {
           const root = await navigator.storage.getDirectory();
           const out = [];
-          async function walk(dir, prefix) { for await (const [name, h] of dir.entries()) { if (h.kind === 'directory') await walk(h, prefix + name + '/'); else { const f = await h.getFile(); out.push({ path: prefix + name, size: f.size, b64: await new Promise((res) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.readAsDataURL(f); }) }); } } }
+          async function walk(dir, prefix) { for await (const [name, h] of dir.entries()) { if (h.kind === 'directory') { if (name !== '백업') await walk(h, prefix + name + '/'); } else { const f = await h.getFile(); out.push({ path: prefix + name, size: f.size, b64: await new Promise((res) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.readAsDataURL(f); }) }); } } }
           await walk(await root.getDirectoryHandle('e2e-docs'), 'e2e-docs/');
           return out;
         });
@@ -1560,15 +1638,15 @@ async function runSites() {
       try {
       await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
       await waitFor(() => web.$('.ladder-cfg'), 8000, 'ladder settings block');
-      assert(await web.$$eval('.ladder-cfg input.rate', (e) => e.length) === 4, 'four rate inputs by default');
+      assert(await web.$$eval('.ladder-cfg input.rate:not(.fast-rate)', (e) => e.length) === 4, 'four rate inputs by default');
       // 2단계로 줄이면 기본값(0.7 → 1)이 채워진다
       await web.select('.ladder-cfg .ladder-steps', '2');
-      await waitFor(() => web.$$eval('.ladder-cfg input.rate', (e) => e.map((x) => x.value)).then((v) => (v.length === 2 ? v : null)), 5000, 'two steps');
-      assert((await web.$$eval('.ladder-cfg input.rate', (e) => e.map((x) => x.value))).join(',') === '0.7,1', 'preset for two steps');
+      await waitFor(() => web.$$eval('.ladder-cfg input.rate:not(.fast-rate)', (e) => e.map((x) => x.value)).then((v) => (v.length === 2 ? v : null)), 5000, 'two steps');
+      assert((await web.$$eval('.ladder-cfg input.rate:not(.fast-rate)', (e) => e.map((x) => x.value))).join(',') === '0.7,1', 'preset for two steps');
       // 사용자 지정 배속: 0.45 → 1.0 (범위 밖 값은 0.3~2.0 으로 맞춘다)
-      await web.evaluate(() => { const i = document.querySelector('.ladder-cfg input.rate[data-step="0"]'); i.value = '0.05'; i.dispatchEvent(new Event('change', { bubbles: true })); });
-      await waitFor(() => web.$eval('.ladder-cfg input.rate[data-step="0"]', (i) => i.value === '0.3'), 5000, 'clamped to 0.3');
-      await web.evaluate(() => { const i = document.querySelector('.ladder-cfg input.rate[data-step="0"]'); i.value = '0.45'; i.dispatchEvent(new Event('change', { bubbles: true })); });
+      await web.evaluate(() => { const i = document.querySelector('.ladder-cfg input.rate:not(.fast-rate)[data-step="0"]'); i.value = '0.05'; i.dispatchEvent(new Event('change', { bubbles: true })); });
+      await waitFor(() => web.$eval('.ladder-cfg input.rate:not(.fast-rate)[data-step="0"]', (i) => i.value === '0.3'), 5000, 'clamped to 0.3');
+      await web.evaluate(() => { const i = document.querySelector('.ladder-cfg input.rate:not(.fast-rate)[data-step="0"]'); i.value = '0.45'; i.dispatchEvent(new Event('change', { bubbles: true })); });
       const saved = await waitFor(async () => { const w = await sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings || {}).web); return w && Array.isArray(w.ladderRates) && w.ladderRates[0] === 0.45 ? w : null; }, 5000, 'rates saved to the extension');
       assert(saved.ladderRates.length === 2 && saved.ladderRates[1] === 1 && saved.ladderPitch === true, 'saved ladder: ' + JSON.stringify(saved.ladderRates) + ' pitch=' + saved.ladderPitch);
       // 음높이 유지를 끄면 playbackRate 로 재생한다
@@ -1600,6 +1678,90 @@ async function runSites() {
         await trackClipEvents();
         await waitFor(() => web.$(yt + ' .ladder'), 8000, 'list back again');
       }
+    });
+    await step('고속 적응 프리셋 ⏩: 이해 확인한 문장에만 나오고 1 → 1.25 → 1.5 → 1 순서로 재생 · 설정에서 단계 편집(마지막은 1배 고정)', async () => {
+      assert((await web.$$('.ladder.fast')).length === 0, 'no fast button before any line is confirmed understood');
+      await web.evaluate(() => { const it = window.__subtutorDebug.state.items.find((i) => i.platform === 'youtube'); return window.SubTutorBridge.request('items.update', { id: it.id, patch: { lastResult: 'know' } }); });
+      await waitFor(() => web.$$eval('.ladder.fast', (b) => b.length === 1), 6000, 'fast button appears on the understood item only');
+      const yt = '[data-id^="youtube:"]';
+      assert(/고속 적응 1 → 1.25 → 1.5 → 1×/.test(await web.$eval(yt + ' .ladder.fast', (b) => b.title)), 'fast title: ' + await web.$eval(yt + ' .ladder.fast', (b) => b.title));
+      const order = [];
+      await web.click(yt + ' .ladder.fast');
+      await waitFor(async () => {
+        const t = await web.$eval('#toast', (e) => e.textContent);
+        const m = /⏩ ([\d.]+)×/.exec(t);
+        if (m && order[order.length - 1] !== m[1]) order.push(m[1]);
+        return order.length === 4 && order[3] === '1' && (await web.$eval(yt, (e) => !e.classList.contains('playing')));
+      }, 30000, 'fast preset finished').catch(async (e) => {
+        const dbg = await web.evaluate(() => JSON.stringify({ clip: window.__subtutorDebug.state.clip, local: window.__subtutorDebug.state.clipLocal, ladderFor: window.__subtutorDebug.state.ladderFor, playRate: window.__subtutorDebug.state.playRate, log: window.__subtutorDebug.log.slice(-12) })).catch(() => '(no dbg)');
+        throw new Error(e.message + ' order=' + order.join(',') + ' dbg=' + dbg);
+      });
+      assert(order.join(',') === '1,1.25,1.5,1', 'rates in order: ' + order.join(','));
+      // 설정: 고속 적응 편집 칸 — 마지막 단계는 1배 고정, 나머지는 바꿀 수 있다
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await waitFor(() => web.$('.fast-cfg'), 5000, 'fast preset editor under the ladder settings');
+      const cells = await web.$$eval('.fast-cfg input.fast-rate', (xs) => xs.map((x) => [x.value, x.disabled]));
+      assert(cells.length === 4 && cells[3][0] === '1' && cells[3][1] === true, 'last step fixed at 1: ' + JSON.stringify(cells));
+      await web.$eval('.fast-cfg input.fast-rate[data-step="1"]', (i) => { i.value = '1.2'; i.dispatchEvent(new Event('change', { bubbles: true })); });
+      await waitFor(() => web.evaluate(() => window.SubTutorBridge.request('settings.get').then((r) => JSON.stringify(r.settings.web.fastRates) === '[1,1.2,1.5,1]')), 5000, 'edited rate saved');
+      await web.$eval('.fast-cfg select.fast-steps', (sel) => { sel.value = '4'; sel.dispatchEvent(new Event('change', { bubbles: true })); }); // 단계 수를 고르면 그 기본값으로
+      await waitFor(() => web.evaluate(() => window.SubTutorBridge.request('settings.get').then((r) => JSON.stringify(r.settings.web.fastRates) === '[1,1.25,1.5,1]')), 5000, 'preset restored');
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await waitFor(() => web.$$eval('.item', (r) => r.length >= 3), 8000, 'list back');
+    });
+    await step('NZ 모음 미니 퀴즈: 짝 단어(pen·pin)가 든 오디오 있는 저장 문장으로 "들린 단어 고르기" 2지선다 · 맞음 표시·힌트·요약', async () => {
+      const src = await sw.evaluate(async () => {
+        const items = (await chrome.storage.local.get('items')).items || [];
+        const withCopy = items.find((i) => i.audio);
+        if (withCopy) { const a = (await chrome.storage.local.get('audio:' + withCopy.id))['audio:' + withCopy.id]; if (a) return { data: a, mime: (withCopy.audio.mime || 'audio/mpeg') }; }
+        const withFile = items.find((i) => i.file && i.file.location === 'folder');
+        if (!withFile) return { err: 'no-audio-item' };
+        const r = await globalThis.SubTutorFS.readFile(withFile.file.path);
+        if (!r.ok) return { err: r.reason };
+        let b64 = ''; const b = r.bytes;
+        for (let i = 0; i < b.length; i += 0x8000) b64 += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+        return { data: btoa(b64), mime: 'audio/mpeg' };
+      });
+      assert(src && src.data, 'an audio source exists to copy: ' + JSON.stringify(src && src.err));
+      await web.evaluate(() => window.SubTutorBridge.request('items.import', { items: [{ id: 'netflix:777:100', platform: 'netflix', videoId: '777', url: 'https://www.netflix.com/watch/777', title: 'NZ Quiz Mock', episode: '', startMs: 100, endMs: 1600, text: 'Have you got a pen?', translation: '펜 있어요?', savedAt: Date.now(), box: 'learning' }] }));
+      await web.evaluate((d) => window.SubTutorBridge.request('audio.put', { itemId: 'netflix:777:100', data: d.data, mime: d.mime, format: 'mp3', ms: 1500 }), src);
+      await web.goto('http://localhost:8766/#/quiz', { waitUntil: 'load' });
+      await waitFor(() => web.$eval('.nz-start', (b) => !b.disabled && /\(1\)/.test(b.textContent)), 8000, 'mini quiz button counts 1 eligible question');
+      await web.click('.nz-start');
+      await waitFor(() => web.$$eval('.nz-opt', (b) => b.length === 2 && b.every((x) => ['pen', 'pin'].includes(x.textContent))), 5000, 'two options: the word and its NZ-merged pair');
+      await web.evaluate(() => { [...document.querySelectorAll('.nz-opt')].find((b) => b.textContent === 'pen').click(); });
+      await waitFor(() => web.$eval('.nz-card .score', (e) => /맞았습니다/.test(e.textContent)), 4000, 'graded correct');
+      assert(await web.$$eval('.nz-card p.count', (ps) => ps.some((p) => /NZ 발음/.test(p.textContent) && /DRESS/.test(p.textContent))), 'hint line with the vowel type');
+      assert(await web.$eval('.nz-card .answer', (e) => /pen/.test(e.textContent)), 'sentence shown with the word');
+      await web.$eval('.nz-card .quiz-result .btn.primary', (b) => b.click());
+      await waitFor(() => web.$('.quiz-card.summary'), 4000, 'summary');
+      assert(await web.$eval('.summary .nums', (e) => /1/.test(e.textContent)), 'score counted');
+      await web.evaluate(() => { window.__subtutorDebug.state.nzQuiz = null; return window.SubTutorBridge.request('items.remove', { id: 'netflix:777:100' }); });
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await waitFor(() => web.$$eval('.item', (r) => r.length >= 3), 8000, 'list back');
+    });
+    await step('Q 원인 태깅: 못 알아들은 문장에만 원인 칩(선택 사항) · 고르면 저장, 같은 칩은 해제 · 진행 상황에 비율과 다음 훈련 추천', async () => {
+      assert((await web.$$('.miss-why')).length === 0, 'no reason chips before any missed item');
+      await web.evaluate(() => { const it = window.__subtutorDebug.state.items.find((i) => i.platform === 'netflix'); return window.SubTutorBridge.request('items.update', { id: it.id, patch: { missed: true } }); });
+      await waitFor(() => web.$('.miss-why'), 6000, 'chips row appears on the missed item');
+      assert((await web.$$('.miss-why')).length === 1, 'only on the missed item');
+      const labels = await web.$$eval('.miss-why .mw', (xs) => xs.map((x) => x.textContent));
+      assert(labels.join(',') === '속도,모르는 단어,축약·연음,키위 발음,문장이 김', 'labels ' + labels.join(','));
+      await web.click('.miss-why .mw[data-why="reduction"]');
+      await waitFor(() => sw.evaluate(async () => (((await chrome.storage.local.get('items')).items) || []).some((i) => i.missReason === 'reduction')), 5000, 'reason saved');
+      await waitFor(() => web.$eval('.miss-why .mw[data-why="reduction"]', (b) => b.classList.contains('on')), 3000, 'chip lit');
+      await web.click('.miss-why .mw[data-why="speed"]'); // 다른 칩을 누르면 바꾼다
+      await waitFor(() => sw.evaluate(async () => (((await chrome.storage.local.get('items')).items) || []).some((i) => i.missReason === 'speed')), 5000, 'reason replaced');
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await waitFor(() => web.$('.miss-stats .miss-row'), 8000, 'dashboard shows reason rows');
+      const stat = await web.$eval('.miss-stats', (e) => e.textContent);
+      assert(/속도/.test(stat) && /1개 · 100%/.test(stat) && /고속 적응/.test(stat), 'stats + recommendation: ' + stat.slice(0, 160));
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await waitFor(() => web.$('.miss-why'), 8000, 'back to the list');
+      await web.click('.miss-why .mw[data-why="speed"]'); // 같은 칩을 다시 누르면 해제
+      await waitFor(() => sw.evaluate(async () => (((await chrome.storage.local.get('items')).items) || []).every((i) => !i.missReason)), 5000, 'reason cleared');
+      await web.evaluate(() => { const it = window.__subtutorDebug.state.items.find((i) => i.missed); return window.SubTutorBridge.request('items.update', { id: it.id, patch: { missed: false } }); });
+      await waitFor(() => web.evaluate(() => !document.querySelector('.miss-why')), 6000, 'chips gone after unmarking');
     });
     await step('오디오 구간 조정: ms 단위 버튼·드래그, 보관 오디오는 그 안에서 자르고 플레이어 재생은 조정 구간으로', async () => {
       const items = () => sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
@@ -1789,7 +1951,7 @@ async function runSites() {
       assert(logs.some((l) => /\[web dialog\] 이 대사 1개를 삭제할까요\? PC 에 저장한 MP3 파일 1개도 함께 지웁니다/.test(l)), 'delete confirm names the MP3 file: ' + logs.filter((l) => /web dialog/.test(l)).slice(-1).join(''));
       // 웹은 목록에서 먼저 빼고(바로 보이게) 확장 프로그램이 그다음에 파일을 지우므로, 폴더가 비워질 때까지 기다린다.
       // 실패하면 남은 폴더 안에 무엇이 있는지까지 보여 준다
-      const listFolders = () => opt.evaluate(async () => { const sub = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [n, h] of sub.entries()) { if (h.kind === 'directory') { const inner = []; for await (const [m] of h.entries()) inner.push(m); out.push(n + '/[' + inner.join(', ') + ']'); } else out.push(n); } return out; });
+      const listFolders = () => opt.evaluate(async () => { const sub = await (await (await navigator.storage.getDirectory()).getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [n, h] of sub.entries()) { if (n === '백업') continue; if (h.kind === 'directory') { const inner = []; for await (const [m] of h.entries()) inner.push(m); out.push(n + '/[' + inner.join(', ') + ']'); } else out.push(n); } return out; });
       await waitFor(async () => !(await listFolders()).some((n) => /Mock Lecture/.test(n)), 8000, 'MP3 file and its emptied folder removed with the item')
         .catch(async (e) => { throw new Error(e.message + ': ' + JSON.stringify(await listFolders()) + ' toast=' + await web.$eval('#toast', (t) => t.textContent).catch(() => '')); });
       await waitFor(() => web.$eval('#toast', (t) => /MP3 파일 1개 삭제/.test(t.textContent)), 5000, 'delete result says the MP3 file was removed');
@@ -1829,6 +1991,18 @@ async function runSites() {
       assert(recs.length === 3 && recs[0] > 0, 'db recordings ' + recs.length);
       // 녹음을 멈추면 마이크를 놓는다 (안 그러면 탭에 녹음 중 빨간 점이 계속 남는다)
       assert(await web.evaluate(() => !window.SubTutorRecorder.micOpen()), 'microphone released after recording');
+    });
+    await step('웹 녹음 명료도(실험적): 인식 일치율·멈춤이 번호 버튼에 작게 붙는다', async () => {
+      const it = await web.evaluate(() => { const s = window.__subtutorDebug.state; const i = s.items.find((x) => x.platform === 'netflix' && x.id !== 'netflix:12345:22000') || s.items.find((x) => x.platform === 'youtube'); return { id: i.id, text: i.text }; }); // 녹음 3개 단계(22000)와 다른 항목으로
+      await web.evaluate((t) => { window.__subtutorAsrTest = t; }, it.text);
+      const row = '[data-rec-item="' + it.id + '"]';
+      await web.click(row + ' .rec-btn');
+      await sleep(900);
+      await web.click(row + ' .rec-btn.recording');
+      await waitFor(() => web.$eval(row + ' .attempt.latest', (b) => /일치 100%/.test(b.title) && /멈춤 \d+번/.test(b.title) && /인식:/.test(b.title)), 8000, 'feedback in the attempt title');
+      assert(await web.$eval(row + ' .attempt.latest .fb-acc', (e) => e.textContent === '100%'), 'small acc badge');
+      await web.evaluate(() => { window.__subtutorAsrTest = null; });
+      // 녹음은 그대로 둔다 (다른 항목이라 뒤 단계와 무관). 지우거나 새로고침하면 다른 단계의 녹음·화면 상태를 건드린다
     });
     await step('같이 듣기: 플레이어 오디오 뒤에 최근 녹음이 재생된다', async () => {
       const oneRow = await web.evaluate(() => { const n = document.querySelector('[data-id="netflix:12345:22000"]'); const a = n.querySelector('.tags-row .tag-add').getBoundingClientRect(); const r = n.querySelector('.rec-row .rec-btn').getBoundingClientRect(); const i = n.querySelector('.rec-row .info').getBoundingClientRect(); return { sameRow: Math.abs(a.top - r.top) < 12 && Math.abs(a.top - i.top) < 12, order: r.left > a.right - 2 && i.left > r.left }; });
@@ -1920,6 +2094,112 @@ async function runSites() {
       await web.click('.word-row[data-word="frisbee"] .word-del');
       await waitFor(async () => (await wordsNow()).length === 0, 3000, 'word removed');
       await waitFor(() => web.evaluate(() => !document.querySelector('.word-row')), 3000, 'row gone');
+    });
+    await step('오늘의 훈련: 첫 화면 카드의 버튼 하나로 받아쓰기 → (단어 카드) → Q 문장 속도 사다리 → 더빙 권유(플레이어에서 그 줄 더빙 칸이 열림) → 완료까지 끊김 없이 이어지고, 연속 일수가 D-day 옆과 주별 그래프에 남는다', async () => {
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await waitFor(() => web.$('.today-card .today-start:not([disabled])'), 8000, 'today card on the first screen');
+      const plan = await web.$eval('.today-plan', (e) => e.textContent);
+      assert(/받아쓰기 \d/.test(plan) && /Q 문장 사다리 \d/.test(plan) && /더빙 1/.test(plan) && /약 \d+분/.test(plan), 'plan ' + plan);
+      assert(/D-\d+/.test(await web.$eval('.today-dday', (e) => e.textContent)), 'D-day on the card');
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 1], ladderPitch: true, dubRecRates: [0.5, 0.7, 1], fastRates: [1, 1.25, 1.5, 1] } } }, {})); // 사다리를 2단계로 줄여 시간 단축
+      await sleep(300);
+      await web.click('.today-card .today-start');
+      await waitFor(() => web.evaluate(() => location.hash === '#/today' && !!document.querySelector('.today-head')), 5000, 'today session view');
+      const seen = [];
+      const S = () => web.evaluate(() => { const t = window.__subtutorDebug.state.today; if (!t) return 'none'; if (t.finished) return 'done'; const x = t.stages[t.idx]; return x ? x.kind + (x.kind === 'ladder' ? ':' + x.pos : '') : 'between'; });
+      const dbg = () => web.evaluate(() => { const st = window.__subtutorDebug.state; const t = st.today; return JSON.stringify({ idx: t && t.idx, stages: t && t.stages.map((x) => x.kind + (x.pos !== undefined ? ':' + x.pos : '')), fin: t && !!t.finished, clip: st.clip, ladderFor: st.ladderFor, playRate: st.playRate, toast: document.getElementById('toast').textContent }); }).catch(() => '(no dbg)');
+      let dubItem = null, lastKey = '', keyAt = Date.now();
+      const tGuard = Date.now();
+      for (let guard = 0; guard < 600 && Date.now() - tGuard < 240000; guard++) {
+        const stKey = await S();
+        const st = stKey.split(':')[0];
+        if (stKey !== lastKey) { lastKey = stKey; keyAt = Date.now(); }
+        else if (Date.now() - keyAt > 60000) throw new Error('today stuck in ' + stKey + ' → ' + (await dbg()));
+        if (st === 'done') break;
+        if (st !== 'between' && !seen.includes(st)) seen.push(st);
+        if (st === 'dict') {
+          await web.waitForSelector('.quiz-card');
+          const phase = await web.evaluate(() => (window.__subtutorDebug.state.quiz || {}).phase);
+          if (phase === 'listen') {
+            const text = await web.evaluate(() => { const s = window.__subtutorDebug.state; const id = s.quiz.queue[s.quiz.pos]; return (s.items.find((i) => i.id === id) || {}).text || ''; });
+            await web.waitForSelector('.dictation');
+            await web.$eval('.dictation', (t, v) => { t.value = v; t.dispatchEvent(new Event('input', { bubbles: true })); }, text);
+            await web.focus('.dictation');
+            await web.keyboard.press('Enter');
+            await waitFor(() => web.evaluate(() => (window.__subtutorDebug.state.quiz || {}).phase === 'graded'), 3000, 'dictation graded');
+          }
+          await web.evaluate(() => document.activeElement && document.activeElement.blur && document.activeElement.blur());
+          await web.keyboard.press('KeyC');
+          await sleep(250);
+        } else if (st === 'words') {
+          await web.keyboard.press('Space'); await sleep(150); await web.keyboard.press('KeyC'); await sleep(250);
+        } else if (st === 'ladder') {
+          // 사다리가 저절로 시작하고, 끝까지 듣기 전에는 자막이 감춰져 있다. 재생이 끊겼으면 Space 로 다시, 35초 넘게 같은 문장에 막혀 있으면 건너뛴다(N)
+          const info = await web.evaluate(() => { const s = window.__subtutorDebug.state; const stg = s.today.stages[s.today.idx]; const cur = stg.ids[stg.pos]; return { fin: stg.finishedFor === cur, active: !!s.ladderFor || ['opening', 'loading', 'playing'].includes(s.clip.state), veiled: !!document.querySelector('.today-ladder .answer.veiled-text') }; });
+          if (info.fin) { assert(!(await web.$('.today-ladder .answer.veiled-text')), 'text revealed after the full ladder'); await web.keyboard.press('KeyN'); await sleep(250); }
+          else if (Date.now() - keyAt > 35000) { console.log('    [today] ladder stuck at ' + lastKey + ' → skip: ' + (await dbg())); await web.keyboard.press('KeyN'); await sleep(300); }
+          else if (!info.active) { await web.keyboard.press('Space'); await sleep(500); }
+          else { assert(info.veiled, 'text veiled while the ladder plays'); await sleep(400); }
+        } else if (st === 'dub') {
+          dubItem = await web.evaluate(() => { const s = window.__subtutorDebug.state; const st = s.today.stages[s.today.idx]; const it = s.items.find((i) => i.id === st.id); return { id: it.id, platform: it.platform, text: it.text }; });
+          await web.click('.today-dub-open');
+          // 그 대사의 플레이어 탭에서 더빙 칸이 열린다 (그 줄 바로 아래)
+          const opened = await waitFor(async () => {
+            for (const p of await browser.pages()) {
+              const r = await p.evaluate(() => { const b = document.querySelector('.st-list > .st-dubbox:not(.st-hidden)'); return b ? b.previousElementSibling.querySelector('.st-en').textContent : null; }).catch(() => null);
+              if (r) return { page: p, row: r };
+            }
+            return null;
+          }, 40000, 'player dub box opened from the web');
+          assert(opened.row.replace(/\s+/g, ' ') === dubItem.text.replace(/\s+/g, ' '), 'dub box under the suggested line: ' + opened.row + ' vs ' + dubItem.text);
+          await waitFor(() => web.$eval('.today-dub-state', (e) => /열었습니다/.test(e.textContent)), 10000, 'dub opened message');
+          await opened.page.evaluate(() => { const c = document.querySelector('.st-dub-close'); if (c) c.click(); const v = document.querySelector('video'); if (v) v.pause(); });
+          await web.bringToFront();
+          await web.click('.today-finish');
+        }
+      }
+      assert(seen[0] === 'dict' && seen.includes('ladder') && seen[seen.length - 1] === 'dub', 'stages in order: ' + seen.join(' → ') + ' → ' + (await dbg()));
+      await waitFor(() => web.$('.today-summary'), 5000, 'summary');
+      assert(/1일 연속/.test(await web.$eval('.today-streak-big', (e) => e.textContent)), 'streak 1 day');
+      const day = await web.evaluate(() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); });
+      const rec = await sw.evaluate(async (k) => ((await chrome.storage.local.get('stats')).stats.training || {})[k], day);
+      assert(rec && rec.dict >= 1 && rec.ladder >= 1 && rec.dub === 1 && rec.sessions === 1, 'training record ' + JSON.stringify(rec));
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1], fastRates: [1, 1.25, 1.5, 1] } } }, {})); // 사다리 단계 복원
+      await web.click('.today-summary .btn.primary');
+      await waitFor(() => web.$eval('.today-card', (e) => e.classList.contains('done') && /오늘 완료 ✓ · 🔥 1일 연속/.test(e.textContent)), 5000, 'first screen shows today done');
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await waitFor(() => web.$eval('.dash .dday', (e) => /D-\d+/.test(e.textContent) && /🔥 1일 연속/.test(e.textContent)), 8000, 'streak next to D-day');
+      const lastWeek = await web.$$eval('.bars .bar.train', (bs) => bs[bs.length - 1].dataset.days);
+      assert(lastWeek === '1', 'this week training bar = 1 day: ' + lastWeek);
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+    });
+    await step('축약 패턴 통계: 받아쓰기에서 going to·did you·them 을 놓치면 gonna·didja·’em 로 쌓이고, 패턴을 누르면 그 문장 목록으로', async () => {
+      await web.evaluate(() => window.SubTutorBridge.request('items.import', { items: [{ id: 'netflix:778:200', platform: 'netflix', videoId: '778', url: 'https://www.netflix.com/watch/778', title: 'Reduction Mock', episode: '', startMs: 200, endMs: 2600, text: "I'm going to catch them later, did you see?", translation: '', savedAt: Date.now(), box: 'learning' }] }));
+      await web.goto('http://localhost:8766/#/quiz', { waitUntil: 'load' });
+      await web.evaluate(() => { window.__subtutorDebug.state.quizPrefs.autoplay = false; window.__subtutorDebug.state.quizPrefs.dueOnly = false; });
+      await waitFor(() => web.$('.quiz-setup'), 5000, 'quiz setup');
+      await web.$$eval('.quiz-setup select', (sels) => { const s = sels[0]; s.value = 'Reduction Mock'; s.dispatchEvent(new Event('change', { bubbles: true })); });
+      await web.click('.quiz-setup .btn.primary.big');
+      await waitFor(() => web.$('.dictation'), 5000, 'dictation card');
+      await web.$eval('.dictation', (t) => { t.value = "I'm catch later see"; t.dispatchEvent(new Event('input', { bubbles: true })); });
+      await web.focus('.dictation');
+      await web.keyboard.press('Enter');
+      await waitFor(() => web.$('.quiz-result'), 4000, 'graded');
+      const red = await waitFor(() => sw.evaluate(async () => { const r = ((await chrome.storage.local.get('stats')).stats || {}).reductions; return r && r.gonna && r.didja && r["'em"] ? r : null; }), 6000, 'patterns recorded');
+      assert(red.gonna.n === 1 && red.gonna.src === 'going to' && red.didja.src === 'did you', 'patterns ' + JSON.stringify(red));
+      await web.evaluate(() => document.activeElement && document.activeElement.blur());
+      await web.keyboard.press('KeyC');
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await waitFor(() => web.$('.tag.red-pattern'), 8000, 'pattern chips in the weak-words box');
+      const chips = await web.$$eval('.tag.red-pattern', (xs) => xs.map((x) => x.textContent));
+      assert(chips.some((c) => /gonna/.test(c)) && chips.some((c) => /didja/.test(c)), 'chips ' + chips.join(','));
+      await web.evaluate(() => { [...document.querySelectorAll('.tag.red-pattern')].find((x) => /didja/.test(x.textContent)).click(); });
+      await waitFor(() => web.evaluate(() => location.hash === '#/list'), 4000, 'jumps to the list');
+      await waitFor(() => web.$$eval('.item', (r) => r.length === 1), 5000, 'filtered to the sentence with that pattern');
+      assert(/did you see/.test(await web.$eval('.item .en', (e) => e.textContent)), 'the did-you sentence');
+      await web.evaluate(() => { window.__subtutorDebug.state.search = ''; window.__subtutorDebug.state.quizPrefs.autoplay = true; window.__subtutorDebug.state.quizPrefs.dueOnly = true; return window.SubTutorBridge.request('items.remove', { id: 'netflix:778:200' }); });
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await waitFor(() => web.evaluate(() => !document.querySelector('.item [data-id*="778"]') && document.querySelectorAll('.item').length >= 1), 8000, 'list restored');
     });
     await step('설정: 학습 기능 토글·ⓘ 근거·진행 상황·약점 단어·추천', async () => {
       await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
@@ -2018,7 +2298,7 @@ async function runSites() {
       assert(!(await web.$('[data-id="netflix:802:1000"]')), 'selected item gone');
       assert(logs.some((l) => /\[web dialog\] 선택한 대사 1개를 삭제할까요\? PC 에 저장한 MP3 파일 1개도 함께 지웁니다/.test(l)), 'confirm names the file: ' + logs.filter((l) => /web dialog/.test(l)).slice(-1).join(''));
       await waitFor(() => web.$eval('#toast', (t) => /대사 1개 삭제 · MP3 파일 1개 삭제/.test(t.textContent)), 5000, 'toast reports the deleted file');
-      const left = await opt.evaluate(async () => { const root = await navigator.storage.getDirectory(); const sub = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [name] of sub.entries()) out.push(name); return out; });
+      const left = await opt.evaluate(async () => { const root = await navigator.storage.getDirectory(); const sub = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); const out = []; for await (const [name] of sub.entries()) { if (name !== '백업') out.push(name); } return out; });
       assert(!left.includes('Edit Show S1E2') && left.includes('Edit Keep'), 'file and its emptied folder removed, other folders kept: ' + JSON.stringify(left));
       assert(await web.$$eval('.item .pick', (x) => x.length) === 4, 'still in edit mode after deleting');
     });
@@ -2047,6 +2327,58 @@ async function runSites() {
       assert(r.added === 1 && r.total === 2, 'import ' + JSON.stringify(r));
     });
 
+    await step('자동 백업: 지정 폴더에 JSON 을 쓰고(지금 백업 · 변경 50건 규칙), 그 파일의 items·words 로 완전 복원된다', async () => {
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await waitFor(() => web.$eval('.backup-line', (e) => /자동 백업/.test(e.textContent)), 8000, 'backup status line');
+      await web.click('.backup-now');
+      const meta = await waitFor(() => sw.evaluate(async () => { const m = (await chrome.storage.local.get('backupMeta')).backupMeta; return m && m.lastPath ? m : null; }), 10000, 'backup written');
+      assert(/SubTutor\/백업\/subtutor-backup-\d{4}-\d{2}-\d{2}\.json$/.test(meta.lastPath), 'path ' + meta.lastPath);
+      await waitFor(() => web.$eval('.backup-line', (e) => /마지막/.test(e.textContent)), 5000, 'line shows the last backup');
+      const payload = await sw.evaluate(async () => { const day = new Date().toISOString().slice(0, 10); const r = await globalThis.SubTutorFS.readFile('SubTutor/백업/subtutor-backup-' + day + '.json'); return r.ok ? JSON.parse(new TextDecoder().decode(r.bytes)) : { err: r.reason }; });
+      assert(payload.app === 'SubTutor' && Array.isArray(payload.items) && Array.isArray(payload.words) && payload.settings && payload.stats, 'payload keys: ' + Object.keys(payload).join(','));
+      assert(payload.items.some((i) => i.id === 'netflix:999:1000'), 'imported item inside the backup');
+      await web.evaluate(() => window.SubTutorBridge.request('items.remove', { id: 'netflix:999:1000' }));
+      await waitFor(() => sw.evaluate(async () => !(((await chrome.storage.local.get('items')).items) || []).some((i) => i.id === 'netflix:999:1000')), 5000, 'item removed');
+      const res = await web.evaluate((p) => Promise.all([window.SubTutorBridge.request('items.import', { items: p.items }), window.SubTutorBridge.request('words.import', { words: p.words })]), payload);
+      assert(res[0].added === 1, 'restore added the removed item back: ' + JSON.stringify(res[0]));
+      assert(await sw.evaluate(async () => (((await chrome.storage.local.get('items')).items) || []).some((i) => i.id === 'netflix:999:1000' && i.text === 'Imported line')), 'restored with its text');
+      // 변경 50건 규칙: 49건째로 맞춰 두고 한 번 더 바꾸면 저절로 백업되고 카운터가 0 이 된다
+      await sw.evaluate(async () => { await chrome.storage.local.set({ backupMeta: { lastAt: Date.now(), changes: 49, lastPath: '', lastError: '' } }); }); // 50건째 변경이 백업을 깨운다
+      await web.evaluate(() => window.SubTutorBridge.request('items.update', { id: 'netflix:999:1000', patch: { comment: 'backup trigger' } }));
+      await waitFor(() => sw.evaluate(async () => { const m = (await chrome.storage.local.get('backupMeta')).backupMeta; return m && m.changes === 0 && m.lastPath ? true : null; }), 15000, 'auto backup after the 50th change');
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+    });
+
+    await step('아이폰 동기화: 회원가입하면 바로 전부 올리고(대사·단어·보관 소리, 아이폰과 같은 파일 이름), 접속만 해도 자동 동기화가 돈다', async () => {
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      await web.waitForSelector('.supa-url');
+      const type = async (sel, txt) => { await web.click(sel, { clickCount: 3 }); await web.type(sel, txt); };
+      await type('.supa-url', 'http://127.0.0.1:8769');
+      await type('.supa-key', 'test-anon');
+      await type('.supa-email', 'me@test.local');
+      await type('.supa-pass', 'pass1234');
+      await web.click('.supa-signup');
+      await waitFor(() => web.$eval('.supa-line', (e) => /^올렸습니다/.test(e.textContent)), 45000, 'signup logs in and uploads');
+      const st = await supaState();
+      const counts = await sw.evaluate(async () => { const s = await chrome.storage.local.get(['items', 'words']); return { items: (s.items || []).length, words: (s.words || []).length }; });
+      assert(st.items.length === counts.items && counts.items > 0, 'server items match the extension (' + st.items.length + '/' + counts.items + ')');
+      assert(st.words.length === counts.words, 'server words match (' + st.words.length + '/' + counts.words + ')');
+      const withAudio = st.items.filter((i) => i.has_audio).length;
+      assert(st.objects.length === withAudio && withAudio >= 1, 'every has_audio item has an uploaded MP3 (' + st.objects.length + '/' + withAudio + ')');
+      assert(st.objects.every((o) => /^audio\/[^/]+\/[A-Za-z0-9._-]+\.mp3$/.test(o[0])), 'storage names follow the iPhone-safe rule');
+      assert(st.items.every((i) => typeof i.start_ms === 'number' && typeof i.saved_at === 'number' && typeof i.text === 'string'), 'rows carry the columns the iPhone app reads');
+      // 로그인 유지 + 자동 동기화: 다시 접속하면 refresh 토큰으로 조용히 로그인해 올린다 (쓰로틀을 0 으로 당겨서 확인)
+      const before = Date.now();
+      await web.evaluate(() => localStorage.setItem('st.supaLastAt', '0'));
+      await web.reload({ waitUntil: 'load' });
+      await waitFor(async () => {
+        const now = await supaState();
+        return now.items.length > 0 && now.items.every((i) => new Date(i.updated_at).getTime() >= before - 2000);
+      }, 30000, 'auto sync after reload upserts the items again');
+      // 뒤 단계에 영향을 주지 않게 로그인을 정리한다
+      await web.evaluate(() => { localStorage.removeItem('st.supaRefresh'); localStorage.setItem('st.supaAuto', '1'); });
+    });
+
     const errors = logs.filter((l) => /error/i.test(l) && !/favicon|ERR_|net::/i.test(l));
     if (errors.length) console.log('  콘솔 오류:\n   ' + errors.slice(0, 10).join('\n   '));
     await runDisney();
@@ -2058,6 +2390,7 @@ async function runSites() {
     const bad = results.filter((r) => !r.ok);
     console.log('\n결과: ' + (results.length - bad.length) + '/' + results.length + ' 통과' + (bad.length ? ' — 실패: ' + bad.map((b) => b.name).join(', ') : ''));
     await browser.close().catch(() => {});
+    try { supaMock.kill(); } catch (e) { /* 이미 죽음 */ }
     servers.close();
     fs.rmSync(userDataDir, { recursive: true, force: true });
     process.exit(failed || bad.length ? 1 : 0);

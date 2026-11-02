@@ -106,5 +106,38 @@
     return out.sort((a, b) => a.start - b.start);
   }
 
-  return { soundsLike, clozeLine, findKiwi, FUNCTION_WORDS, RULES };
+  // ── 받아쓰기의 축약·약형 분류 ──
+  // 소리 나는 대로 규칙(RULES)과 t 약화(FLAP)가 일어나는 구간 = 실제 말에서 모양이 바뀌는 곳.
+  // 받아쓰기에서 놓친 단어가 그 구간에 들어 있으면 그 패턴(gonna, didja, 'em …)을 놓친 것으로 센다 (Wong et al. 2017: 축약형 지각은 어휘량과 별개의 듣기 예측 변수)
+  const REDUCTIONS = RULES.concat(FLAP).map(([re, to]) => ({ to, src: re.source.replace(/\(\?!.*$/, '').replace(/\\b/g, '').toLowerCase(), re: new RegExp(re.source, 'gi') }));
+  const normWord = (w) => String(w || '').toLowerCase().replace(/[’‘]/g, "'").replace(/'/g, '');
+  function reductionMisses(text, missingWords) {
+    const t = String(text || '').replace(/\n/g, ' ');
+    const miss = new Set((missingWords || []).map(normWord).filter(Boolean));
+    if (!miss.size) return [];
+    const out = [];
+    for (const r of REDUCTIONS) {
+      r.re.lastIndex = 0;
+      let m;
+      while ((m = r.re.exec(t))) {
+        const words = m[0].toLowerCase().split(/[^a-z'’]+/).map(normWord).filter(Boolean);
+        if (words.some((w) => miss.has(w))) {
+          out.push({ pattern: r.to, src: r.src });
+          words.forEach((w) => miss.delete(w)); // 긴 패턴(going to → gonna)이 먼저 가져가면 짧은 패턴(going → goin')은 세지 않는다
+          break;
+        }
+      }
+      if (!miss.size) break;
+    }
+    return out;
+  }
+
+  // 주석 겹침: 먼저 온 목록(키위 용어)이 이기고, 겹치지 않는 두 번째 목록(NZ 모음)만 남긴다. 위치순
+  function mergeAnnotations(primary, secondary) {
+    const out = (primary || []).slice();
+    for (const h of secondary || []) if (!out.some((p) => h.start < p.end && h.end > p.start)) out.push(h);
+    return out.sort((a, b) => a.start - b.start);
+  }
+
+  return { soundsLike, clozeLine, findKiwi, mergeAnnotations, reductionMisses, REDUCTIONS, FUNCTION_WORDS, RULES };
 });

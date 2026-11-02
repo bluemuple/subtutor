@@ -1,4 +1,4 @@
-const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '', koMode: 'hold', secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false };
+const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '', koMode: 'hold', secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, nzNotes: true, vocabProfile: true };
 // 따라하기 쉬는 시간: 자막 길이 × 배율(r…) 또는 고정 초(s…) — content.js 와 같은 규칙
 const SHADOW_RATIOS = [0.8, 1, 1.1, 1.2, 1.3, 1.5, 2];
 const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -53,7 +53,7 @@ function render() {
   $('audioMode').value = settings.audioMode === 'both' ? 'download' : (settings.audioMode || 'off');
   $('koMode').value = settings.koMode || 'hold';
   $('cloze').value = settings.cloze || 'off';
-  ['secondPass', 'soundsLike', 'kiwiNotes', 'vocabProfile', 'loopLadder'].forEach((k) => { $(k).checked = !!settings[k]; });
+  ['secondPass', 'soundsLike', 'kiwiNotes', 'nzNotes', 'vocabProfile'].forEach((k) => { $(k).checked = !!settings[k]; });
   $('enabled').checked = !currentPlatform || !settings.enabled || settings.enabled[currentPlatform] !== false;
   $('enabledRow').style.display = currentPlatform ? '' : 'none';
 }
@@ -73,7 +73,7 @@ async function init() {
   $('audioMode').addEventListener('change', (e) => save({ audioMode: e.target.value }));
   $('koMode').addEventListener('change', (e) => save({ koMode: e.target.value }));
   $('cloze').addEventListener('change', (e) => save({ cloze: e.target.value }));
-  ['secondPass', 'soundsLike', 'kiwiNotes', 'vocabProfile', 'loopLadder'].forEach((k) => $(k).addEventListener('change', (e) => save({ [k]: e.target.checked })));
+  ['secondPass', 'soundsLike', 'kiwiNotes', 'nzNotes', 'vocabProfile'].forEach((k) => $(k).addEventListener('change', (e) => save({ [k]: e.target.checked })));
   document.querySelectorAll('.info').forEach((b) => b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); showInfo(b.dataset.key); }));
   $('infoClose').addEventListener('click', () => $('infobox').classList.add('hidden'));
   $('keysBtn').addEventListener('click', () => showInfo('keys'));

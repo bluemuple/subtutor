@@ -353,3 +353,79 @@ input.rate:focus { outline: none; color: var(--accent2); }
 .item-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 5px; }
 .item-actions .tags-row, .item-actions .rec-row { margin-top: 0; }
 .settings .theme-sel { background: var(--card2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px; font: inherit; font-size: 14px; }
+
+/* 오늘의 훈련 */
+.today-card { display: flex; align-items: center; gap: 16px; padding: 14px 18px; margin-bottom: 12px; background: linear-gradient(120deg, rgba(139,92,246,.18), rgba(52,211,153,.10)); border: 1px solid rgba(139,92,246,.45); border-radius: 14px; }
+.today-card.done { background: var(--card); border-color: rgba(52,211,153,.45); }
+.today-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.today-title { font-size: 18px; font-weight: 800; color: var(--strong); display: flex; align-items: center; gap: 8px; }
+.today-dday { font-size: 13px; font-weight: 700; color: var(--accent2); background: var(--card2); border-radius: 10px; padding: 1px 8px; }
+.today-plan { color: var(--text); font-size: 14px; }
+.today-streak { color: var(--orange); font-size: 13px; font-weight: 600; }
+.today-card .today-start { white-space: nowrap; }
+.today-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.today-head > b { display: flex; align-items: center; font-size: 15px; }
+.today-head .steps { margin: 0; flex: 1; }
+.today-dub-title { margin: 6px 0 8px; font-size: 17px; display: flex; align-items: center; }
+.today-streak-big { font-size: 20px; font-weight: 800; color: var(--orange); margin: 6px 0; }
+.dday-streak { margin-left: 12px; font-size: 15px; font-weight: 700; color: var(--orange); }
+.bar.train { background: var(--orange); }
+.lg.train::before { background: var(--orange); }
+@media (max-width: 640px) { .today-card { flex-direction: column; align-items: stretch; } }
+
+/* 고속 적응 프리셋 */
+.item .ladder.fast { color: var(--orange); font-size: 12px; letter-spacing: -1px; }
+.item .ladder.fast:hover { border-color: var(--orange); }
+.fast-cfg { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.fast-cfg-title { font-size: 13px; color: var(--orange); margin-right: 6px; }
+.fast-cfg-hint { color: var(--dim); font-size: 12px; margin: 6px 0 0; }
+.rate-cell.fixed { opacity: .75; }
+.rate-cell.fixed input { color: var(--dim); }
+
+/* Q 원인 태깅 */
+.miss-why { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.mw-label { color: var(--dim); font-size: 12px; display: inline-flex; align-items: center; }
+.mw { background: var(--card2); border: 1px solid var(--line); border-radius: 12px; padding: 1px 9px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.mw:hover { border-color: var(--hover-line); color: var(--text); }
+.mw.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.miss-stats { margin-top: 14px; }
+.miss-stats h4 { margin: 0 0 8px; font-size: 14px; display: flex; align-items: center; }
+.miss-row { display: grid; grid-template-columns: 90px 1fr 110px; gap: 10px; align-items: center; margin: 4px 0; font-size: 13px; }
+.miss-name { color: var(--text); }
+.miss-bar-track { height: 10px; background: var(--card2); border-radius: 5px; overflow: hidden; }
+.miss-bar { height: 100%; background: var(--accent2); border-radius: 5px; }
+.miss-n { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.miss-advice { color: var(--yellow); font-size: 13px; margin: 8px 0 0; }
+
+/* NZ 모음 미니 퀴즈 */
+.nz-opts { display: flex; gap: 12px; margin-top: 6px; }
+.nz-opt { flex: 1; font-size: 22px; font-weight: 700; }
+.nz-opt.right { background: var(--know-bg); border-color: var(--know-line); color: var(--know-text); }
+.nz-opt.wrong { background: var(--banner-bg); border-color: var(--banner-line); color: var(--banner-text); }
+
+/* 자주 놓치는 축약 패턴 */
+.red-title { margin: 14px 0 6px; font-size: 13px; color: var(--muted); display: flex; align-items: center; }
+.tag.red-pattern { border-color: rgba(251,191,36,.45); color: var(--forgot-text); }
+.tag.red-pattern:hover { border-color: var(--orange); }
+
+/* 웹 녹음 명료도 배지 */
+.attempt { overflow: visible; }
+.attempt .fb-acc { position: absolute; bottom: -12px; left: 50%; transform: translateX(-50%); font-size: 9px; color: var(--green); white-space: nowrap; }
+.rec-row { padding-bottom: 8px; }
+
+/* 자동 백업 줄 */
+.backup-row { align-items: center; }
+.backup-row .backup-line { margin: 0; flex: 1; min-width: 240px; }
+
+/* 지원 사이트 목록 */
+.site-links { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 16px; }
+.site-row { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.site-link { font-weight: 600; white-space: nowrap; }
+.site-about { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 아이폰 동기화 */
+.supa-row { margin-top: 8px; }
+.supa-in { background: var(--card2); border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 7px 10px; font-size: 13px; min-width: 150px; flex: 1; }
+.supa-in.supa-url { flex: 2; min-width: 240px; }
+.supa-in:focus { outline: none; border-color: var(--accent); }
+.supa-line { margin-top: 8px; }

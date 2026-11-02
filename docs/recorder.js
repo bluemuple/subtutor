@@ -36,7 +36,7 @@ window.SubTutorRecorder = (() => {
       req.onerror = () => reject(req.error);
     });
   }
-  async function add(itemId, blob, durationMs) {
+  async function add(itemId, blob, durationMs, fb) {
     const existing = await list(itemId);
     const db = await open();
     await new Promise((resolve, reject) => {
@@ -44,7 +44,7 @@ window.SubTutorRecorder = (() => {
       const s = t.objectStore(STORE);
       const overflow = Math.max(0, existing.length + 1 - MAX);
       existing.slice(0, overflow).forEach((r) => s.delete(r.id));
-      s.add({ itemId, blob, mime: blob.type, durationMs, createdAt: Date.now() });
+      s.add({ itemId, blob, mime: blob.type, durationMs, createdAt: Date.now(), fb: fb || null });
       t.oncomplete = () => resolve();
       t.onerror = () => reject(t.error);
     });

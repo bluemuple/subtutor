@@ -184,5 +184,28 @@
     return (h ? String(h).padStart(2, '0') + '-' : '') + String(m).padStart(2, '0') + '-' + String(sec).padStart(2, '0');
   }
 
-  return { mediaClockOffset, mediaClock, clipSamples, isSilent, resample, normalize, encodeMonoWav, encodeMonoMp3, encodeClip, hasMp3, floatToInt16, parseWavHeader, bytesToBase64, base64ToBytes, safeFileName, fmtClock };
+  // 0.3초(기본) 넘게 조용한 구간 수 — 더빙 명료도 피드백에서 막힘·머뭇거림의 흔적으로 쓴다. 앞뒤 무음은 세지 않는다
+  function silenceGaps(samples, rate, minMs, thresh) {
+    if (!samples || !samples.length || !rate) return 0;
+    const win = Math.max(1, Math.round(rate * 0.02)); // 20ms 창
+    const th = thresh || 0.015;
+    const need = Math.max(1, Math.round((minMs || 300) / 20));
+    const quiet = [];
+    for (let i = 0; i + win <= samples.length; i += win) {
+      let s = 0;
+      for (let k = i; k < i + win; k++) s += samples[k] * samples[k];
+      quiet.push(Math.sqrt(s / win) < th);
+    }
+    let a = 0, b = quiet.length - 1;
+    while (a < quiet.length && quiet[a]) a++;
+    while (b >= 0 && quiet[b]) b--;
+    let gaps = 0, run = 0;
+    for (let i = a; i <= b; i++) {
+      if (quiet[i]) run++;
+      else { if (run >= need) gaps++; run = 0; }
+    }
+    return gaps;
+  }
+
+  return { silenceGaps, mediaClockOffset, mediaClock, clipSamples, isSilent, resample, normalize, encodeMonoWav, encodeMonoMp3, encodeClip, hasMp3, floatToInt16, parseWavHeader, bytesToBase64, base64ToBytes, safeFileName, fmtClock };
 });

@@ -9,10 +9,10 @@ const Sites = globalThis.SubTutorSites;
 const SITE_URL = 'https://bluemuple.github.io/subtutor/';
 const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
-  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {},
+  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {},
   audioDirName: '', // 사용자가 고른 오디오 저장 폴더 이름 (핸들은 IndexedDB). 비어 있으면 다운로드 폴더
-  koMode: 'hold', koRepeats: 3, secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, vocabProfile: true, loopLadder: false, missedTag: '못 알아들음',
-  web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1] },
+  koMode: 'hold', koRepeats: 3, secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, nzNotes: true, vocabProfile: true, missedTag: '못 알아들음',
+  web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1], fastRates: [1, 1.25, 1.5, 1] },
 };
 // ───────── 학습 통계 (에피소드별 이해율·말 속도, 시리즈 어휘 재출현, 받아쓰기 약점 단어, 복습 기록) ─────────
 async function getStats() {
@@ -46,7 +46,7 @@ function withItems(fn) {
   const run = itemsChain.then(async () => {
     const items = await getItems();
     const r = await fn(items);
-    if (r && r.write) await chrome.storage.local.set({ items: r.items });
+    if (r && r.write) { await chrome.storage.local.set({ items: r.items }); noteDataChange(); }
     return r ? r.result : undefined;
   });
   itemsChain = run.catch(() => {});
@@ -63,7 +63,7 @@ function withWords(fn) {
   const run = wordsChain.then(async () => {
     const words = await getWords();
     const r = await fn(words);
-    if (r && r.write) await chrome.storage.local.set({ words: r.words });
+    if (r && r.write) { await chrome.storage.local.set({ words: r.words }); noteDataChange(); }
     return r ? r.result : undefined;
   });
   wordsChain = run.catch(() => {});
@@ -518,10 +518,47 @@ globalThis.__subtutorInvoke = invokeOnTab; // 테스트용
 if (chrome.commands) chrome.commands.onCommand.addListener((command, tab) => { if (command === 'save-cue') invokeOnTab(tab, 'command'); });
 if (chrome.contextMenus) chrome.contextMenus.onClicked.addListener((info, tab) => { if (info.menuItemId === 'st-save-cue') invokeOnTab(tab, 'menu'); });
 
+// ───────── 자동 백업 ─────────
+// 학습 데이터(저장 자막·단어장·통계·설정)는 이 크롬의 로컬 저장소에만 있다 — 확장 프로그램 삭제·프로필 초기화 한 번이면 전부 사라진다.
+// 오디오 저장 폴더가 지정돼 있고 권한이 살아 있으면, 자막·단어가 바뀐 지 4초 뒤에 조건(마지막 백업 뒤 7일, 또는 변경 50건)을 보고
+// <폴더>/SubTutor/백업/subtutor-backup-YYYY-MM-DD.json 을 쓴다 (같은 날은 덮어쓴다). 복원: 웹 설정 › 데이터 › 가져오기로 그 파일을 고른다
+const BACKUP_AFTER_CHANGES = 50, BACKUP_AFTER_MS = 7 * 86400000;
+let backupTimer = null, backupChain = Promise.resolve();
+function noteDataChange() {
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(() => { backupChain = backupChain.then(() => maybeBackup()).catch(() => {}); }, 4000);
+}
+async function getBackupMeta() {
+  const { backupMeta } = await chrome.storage.local.get('backupMeta');
+  return Object.assign({ lastAt: 0, changes: 0, lastPath: '', lastError: '' }, backupMeta || {});
+}
+async function maybeBackup() {
+  const meta = await getBackupMeta();
+  meta.changes++;
+  if (!meta.lastAt) meta.lastAt = Date.now(); // 첫 사용: 여기서부터 7일을 센다 (폴더를 고르자마자 쓰지는 않는다)
+  if (meta.changes < BACKUP_AFTER_CHANGES && Date.now() - meta.lastAt <= BACKUP_AFTER_MS) {
+    await chrome.storage.local.set({ backupMeta: meta });
+    return { ok: false, reason: 'not-due' };
+  }
+  return doBackup(meta);
+}
+async function doBackup(meta0) {
+  const meta = meta0 || (await getBackupMeta());
+  if (!FS) return { ok: false, reason: 'none' };
+  const st = await FS.status().catch(() => ({ state: 'none' }));
+  if (st.state !== 'granted') { meta.lastError = st.state; await chrome.storage.local.set({ backupMeta: meta }); return { ok: false, reason: st.state }; }
+  const payload = { app: 'SubTutor', kind: 'backup', exportedAt: new Date().toISOString(), items: await getItems(), words: await getWords(), stats: await getStats(), settings: await getSettings() };
+  const name = 'SubTutor/백업/subtutor-backup-' + payload.exportedAt.slice(0, 10) + '.json';
+  const r = await FS.writeFile(name, new TextEncoder().encode(JSON.stringify(payload)));
+  if (r.ok) await chrome.storage.local.set({ backupMeta: { lastAt: Date.now(), changes: 0, lastPath: r.path, lastError: '' } });
+  else { meta.lastError = r.reason || 'error'; await chrome.storage.local.set({ backupMeta: meta }); }
+  return Object.assign({ name }, r);
+}
+
 // ───────── 사용자가 켠 사이트 (목록에 없는 아무 사이트) ─────────
 // 팝업에서 "이 사이트에서 SubTutor 켜기"를 누르면 팝업이 그 사이트의 접근 권한을 받고, 여기서 콘텐츠 스크립트를 등록한다
 // (범용 페이지 스크립트 + 범용 어댑터). 등록은 브라우저를 다시 열어도 남고, 지금 탭에도 바로 넣는다
-const CONTENT_JS = ['src/lib/subtitles.js', 'vendor/lamejs/lame.min.js', 'src/lib/audio.js', 'src/lib/stretch.js', 'src/data/freq-en.js', 'src/data/kiwi.js', 'src/lib/speech.js', 'src/lib/vocab.js', 'src/lib/explain.js', 'src/lib/sites.js', 'src/content/adapters.js', 'src/content/content.js'];
+const CONTENT_JS = ['src/lib/subtitles.js', 'vendor/lamejs/lame.min.js', 'src/lib/audio.js', 'src/lib/stretch.js', 'src/data/freq-en.js', 'src/data/kiwi.js', 'src/data/nzVowels.js', 'src/lib/speech.js', 'src/lib/vocab.js', 'src/lib/explain.js', 'src/lib/sites.js', 'src/content/adapters.js', 'src/content/content.js'];
 const siteScriptIds = (host) => ['st-page-' + host, 'st-content-' + host];
 const sitePatterns = (host) => ['https://' + host + '/*', 'http://' + host + '/*'];
 function builtInHost(host) {
@@ -636,8 +673,32 @@ async function handleMessage(msg, sender) {
       return { ok: true };
     });
     case 'web.stats.weak': return withStats((st) => { for (const w of (p.words || []).slice(0, 50)) { const k = String(w).toLowerCase().slice(0, 30); if (k) st.weak[k] = (st.weak[k] || 0) + 1; } return { ok: true }; });
-    case 'web.stats.weakReset': return withStats((st) => { st.weak = {}; return { ok: true }; });
+    case 'web.stats.weakReset': return withStats((st) => { st.weak = {}; st.reductions = {}; return { ok: true }; });
+    // 받아쓰기에서 놓친 축약 패턴 (gonna, didja, 'em …) 누적
+    case 'web.stats.reduction': return withStats((st) => {
+      st.reductions = st.reductions && typeof st.reductions === 'object' ? st.reductions : {};
+      for (const r of (p.patterns || []).slice(0, 20)) {
+        const key = String((r && r.to) || '').slice(0, 24);
+        if (!key) continue;
+        const cur = st.reductions[key] || { n: 0, src: '' };
+        st.reductions[key] = { n: cur.n + 1, src: String((r && r.src) || cur.src).slice(0, 40) };
+      }
+      const keys = Object.keys(st.reductions);
+      if (keys.length > 200) keys.sort((a, b) => st.reductions[a].n - st.reductions[b].n).slice(0, keys.length - 200).forEach((k) => delete st.reductions[k]);
+      return { ok: true };
+    });
     case 'web.stats.review': return withStats((st) => { st.reviews.push({ t: Date.now(), kind: String(p.kind || 'review').slice(0, 20) }); if (st.reviews.length > 3000) st.reviews.splice(0, st.reviews.length - 3000); return { ok: true }; });
+    // 오늘의 훈련을 마친 날 (웹이 그 사람의 날짜로 'YYYY-MM-DD' 를 준다) → 연속 일수·주별 그래프
+    case 'web.stats.training': return withStats((st) => {
+      const day = /^\d{4}-\d{2}-\d{2}$/.test(String(p.day || '')) ? p.day : null;
+      if (!day) return { ok: false, error: '날짜가 없습니다' };
+      st.training = st.training && typeof st.training === 'object' ? st.training : {};
+      const prev = st.training[day] || {};
+      st.training[day] = Object.assign({}, prev, p.data || {}, { at: Date.now(), sessions: (prev.sessions || 0) + 1 });
+      const keys = Object.keys(st.training).sort();
+      if (keys.length > 800) keys.slice(0, keys.length - 800).forEach((k) => delete st.training[k]);
+      return { ok: true, training: st.training };
+    });
     case 'capture.finish': return offscreenCall({ cmd: 'finish', startMs: msg.startMs, endMs: msg.endMs, anchors: msg.anchors, downloadRate: msg.downloadRate, storeRate: msg.storeRate }, 2);
     case 'capture.stop': return offscreenCall({ cmd: 'stop' }, 2);
     case 'audio.get': return getAudio(msg.id);
@@ -685,6 +746,8 @@ async function handleMessage(msg, sender) {
     case 'openSite': await openSite(); return { ok: true };
     case 'openOptions': await chrome.runtime.openOptionsPage(); return { ok: true };
     case 'audioDir.status': return audioDirStatus();
+    case 'backup.now': case 'web.backup.now': return doBackup();
+    case 'backup.status': case 'web.backup.status': return { meta: await getBackupMeta(), dir: await audioDirStatus() };
     // 설정 페이지를 닫았다가 다시 연다: 크롬은 확장 프로그램 탭이 모두 닫히면 폴더 권한을 '휴면' 상태로 돌리고,
     // 그 상태에서 권한을 다시 요청해야 "매번 허용" 선택지가 있는 창을 띄운다.
     case 'options.reopenForGrant': {
@@ -765,6 +828,15 @@ async function handleMessage(msg, sender) {
       const s = await waitForReady(playerTab, item, 30000);
       if (s) { try { await chrome.tabs.sendMessage(playerTab, { type: 'seekTo', ms: Math.max(0, item.startMs - 300), play: true }); } catch (e) { /* ignore */ } }
       return { ok: !!s };
+    }
+    // 오늘의 훈련 › 더빙 권유: 플레이어 탭을 열어 그 대사에서 더빙 칸(R)을 바로 연다
+    case 'web.item.dub': {
+      const item = (await getItems()).find((i) => i.id === p.itemId);
+      if (!item) throw new Error('항목을 찾을 수 없습니다');
+      const playerTab = await ensurePlayerTab(item, true);
+      const s = await waitForReady(playerTab, item, 30000);
+      if (!s) return { ok: false, error: '플레이어가 준비되지 않았습니다. 플레이어 탭에서 영상이 재생되는지 확인하세요.' };
+      try { return await chrome.tabs.sendMessage(playerTab, { type: 'dubAt', ms: item.startMs }); } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
     }
     default:
       throw new Error('알 수 없는 메시지: ' + msg.type);

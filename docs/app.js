@@ -8,10 +8,13 @@
   const Sp = window.SubTutorSpeech;
   const St = window.SubTutorStretch;
   const KIWI = window.SubTutorKiwi || [];
+  const NZV = window.SubTutorNZVowels;
   const DAY = 86400000;
-  const WEB_DEFAULTS = { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1] };
+  const WEB_DEFAULTS = { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1], fastRates: [1, 1.25, 1.5, 1] };
   // 사다리 단계 수를 바꿀 때 채워 넣는 기본값 (마지막은 1배속)
   const LADDER_PRESETS = { 1: [1], 2: [0.7, 1], 3: [0.7, 0.85, 1], 4: [0.8, 0.9, 1, 1.15], 5: [0.7, 0.8, 0.9, 1, 1.15], 6: [0.6, 0.7, 0.8, 0.9, 1, 1.15] };
+  // 고속 적응 프리셋의 단계 수별 기본값 (반드시 1배로 끝난다 — 정상 속도가 느리게 들리게)
+  const FAST_PRESETS = { 3: [1.25, 1.5, 1], 4: [1, 1.25, 1.5, 1], 5: [1, 1.15, 1.3, 1.5, 1], 6: [1, 1.15, 1.25, 1.4, 1.5, 1] };
   const RATE_MIN = 0.3, RATE_MAX = 2, LADDER_MAX_STEPS = 6;
   const fmtRate = (r) => String(Math.round(r * 100) / 100);
   const $ = (sel, root) => (root || document).querySelector(sel);
@@ -34,7 +37,7 @@
     hide: loadHide(), reveal: new Map(),  // 자막/뜻 감추기: 전체 기본값 + 항목별 예외
     recordings: new Map(), recording: null, playingRec: null,
     edit: { on: false, sel: new Set() },  // 편집 모드: 선택 상자로 골라 한꺼번에 삭제
-    quiz: null, quizPrefs: { title: '', tag: '', order: 'due', dueOnly: true, autoplay: true },
+    quiz: null, quizPrefs: { title: '', tag: '', order: 'due', dueOnly: true, autoplay: true }, nzQuiz: null,
     words: [], wordReview: null,          // 단어장 (패널 '단어 목록'에서 ☆ 로 저장) · 카드 복습 진행
   };
   const clipWaiters = [];
@@ -128,7 +131,7 @@
 
   // ───────── 데이터 ─────────
   // 화면에 영향을 주는 필드만으로 서명을 만들어, 실제로 바뀐 경우에만 다시 그린다 (입력 중인 내용 보호)
-  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.comment, i.translation, i.reviews, i.forgot, i.savedAt, i.audio ? 1 : 0, i.file ? (i.file.location || '1') : 0, (i.tags || []).join(','), i.trim ? i.trim.startMs + '-' + i.trim.endMs : '', i.review ? i.review.due : '', i.missed ? 1 : 0].join('\u0001')).sort().join('\u0002');
+  const itemsSignature = (items) => items.map((i) => [i.id, i.box, i.lastResult || '', i.missReason || '', i.comment, i.translation, i.reviews, i.forgot, i.savedAt, i.audio ? 1 : 0, i.file ? (i.file.location || '1') : 0, (i.tags || []).join(','), i.trim ? i.trim.startMs + '-' + i.trim.endMs : '', i.review ? i.review.due : '', i.missed ? 1 : 0].join('\u0001')).sort().join('\u0002');
   async function loadItems(force) {
     if (!state.extOk) { render(); return; }
     let changed = !!force;
@@ -473,15 +476,32 @@
   const ladderTitle = () => '속도 사다리 ' + ladderRates().map(fmtRate).join(' → ') + '×' + (state.web.ladderPitch === false ? '' : ' (음높이 유지)');
   async function playLadder(itemId) {
     if (state.ladderFor) { state.ladderFor = null; await playItem(itemId); return; }
+    await playRates(itemId, ladderRates());
+  }
+  // eslint 호환 자리 (fastRates·playFast 는 rateTitle 옆에 정의)
+  // 정한 배속들로 한 번씩 이어서 재생 (중간에 멈추거나 다른 것을 누르면 false). 끝나면(중단돼도) ladderFor 를 치운다.
+  // 보관 오디오는 playItem 이 끝까지 재생하고 돌아오지만, 플레이어 탭 원격 재생은 시작만 하고 돌아온다 → 끝 이벤트를 기다린다
+  async function playRates(itemId, rates, mark) {
     state.ladderFor = itemId;
-    for (const rate of ladderRates()) {
-      if (state.ladderFor !== itemId) break;
-      toast('⤴ ' + rate + '×', 900);
-      await playItem(itemId, { loop: false, rate });
-      if (state.ladderFor !== itemId || state.clip.itemId !== itemId || state.clip.state !== 'ended') break;
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    if (state.ladderFor === itemId) state.ladderFor = null;
+    const trace = (m) => { try { window.__subtutorDebug.log.push('rates ' + m + ' clip=' + state.clip.itemId + '/' + state.clip.state + ' local=' + state.clipLocal + ' ladderFor=' + state.ladderFor); } catch (e) { /* ignore */ } };
+    try {
+      for (const rate of rates) {
+        if (state.ladderFor !== itemId) { trace('abort-ladder ' + rate); return false; }
+        toast((mark || '⤴') + ' ' + fmtRate(rate) + '×', 900);
+        trace('start ' + rate);
+        await playItem(itemId, { loop: false, rate });
+        trace('after-play ' + rate);
+        if (state.ladderFor !== itemId || state.clip.itemId !== itemId) { trace('abort-mismatch ' + rate); return false; }
+        if (!state.clipLocal && ['opening', 'loading', 'playing'].includes(state.clip.state)) {
+          const done = await Promise.race([waitClipEnd(), new Promise((r) => setTimeout(() => r(null), 45000))]); // 이벤트가 안 오면 45초에 포기
+          trace('remote-done ' + rate + ' ' + JSON.stringify(done));
+          if (!done || state.ladderFor !== itemId || done.itemId !== itemId || done.state !== 'ended') return false;
+        } else if (state.clip.state !== 'ended') { trace('abort-state ' + rate); return false; }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      trace('finished');
+      return true;
+    } finally { if (state.ladderFor === itemId) state.ladderFor = null; }
   }
   // 대사마다 붙는 배속 버튼 ([0.8] [0.9] [1] [1.15]): 설정 › 속도 사다리에 넣은 배속이 그대로 나온다.
   // 누르면 그 배속으로 재생하고, 🔁 반복이 켜져 있으면 그 배속으로 계속 반복한다.
@@ -500,6 +520,18 @@
     await playItem(itemId, { rate });
   }
   const rateTitle = (r) => fmtRate(r) + '배속으로 재생' + (state.web.ladderPitch === false ? '' : ' (음높이 유지)') + ' · 🔁 반복을 켜 두면 이 배속으로 계속 반복합니다 · 같은 배속을 다시 누르면 정지';
+  // 고속 적응 프리셋 (Griffiths 1990): 이해를 확인한 문장을 가속해 듣고 1배로 끝낸다
+  function fastRates() {
+    const raw = Array.isArray(state.web.fastRates) ? state.web.fastRates : [];
+    const out = raw.map((x) => Math.round(clampNum(+x, 0.5, RATE_MAX) * 100) / 100).filter((x) => Number.isFinite(x) && x > 0).slice(0, LADDER_MAX_STEPS);
+    if (!out.length) return FAST_PRESETS[4].slice();
+    out[out.length - 1] = 1;
+    return out;
+  }
+  // 이해를 확인한 문장: 받아쓰기에서 "알고 있어"를 받았거나 알고 있는 표현 상자로 옮긴 것
+  const understood = (it) => !!(it && (it.box === 'known' || it.lastResult === 'know'));
+  const fastTitle = () => '고속 적응 ' + fastRates().map(fmtRate).join(' → ') + '× — 이해를 확인한 문장을 가속해 듣고 1배로 끝냅니다 (음높이 유지)';
+  const playFast = (itemId) => playRates(itemId, fastRates(), '⏩');
   const rateBtns = (it) => (state.web.ladder === false ? [] : ladderRates().map((r) => el('button', { class: 'btn mini rate-btn', 'data-rate': fmtRate(r), title: rateTitle(r), onclick: () => playAtRate(it.id, r) }, fmtRate(r))));
   function setRepeat(on) {
     state.repeat = !!on;
@@ -525,6 +557,29 @@
     setClip(p.itemId, p.state, p.message);
     if (p.state === 'error') toast('재생 실패: ' + (p.message || ''));
   });
+
+  // ───────── Q 원인 태깅 (왜 못 알아들었나) ─────────
+  // 못 알아들은(Q) 문장을 복습할 때 원인을 원터치로 하나 고른다 (선택 사항, 재생 중에는 묻지 않는다).
+  // 축약형 지각과 어휘량은 별개 예측 변수(Wong 2017), 발화 길이도 독립 요인(Medina 2020) — 원인별로 맞는 훈련이 다르다
+  const MISS_REASONS = [['speed', '속도'], ['vocab', '모르는 단어'], ['reduction', '축약·연음'], ['accent', '키위 발음'], ['length', '문장이 김']];
+  const MISS_RECOMMEND = {
+    speed: '속도가 가장 많습니다 → 이해한 문장을 고속 적응 프리셋(목록 ⏩ · 플레이어 ⚙ › 반복 고속 적응)으로 가속해 들어 귀를 빠른 말에 맞추세요.',
+    vocab: '모르는 단어가 가장 많습니다 → 패널 "단어 목록"에서 어려운 단어를 미리 훑고 ☆ 로 단어장에 모아 카드로 복습하세요.',
+    reduction: '축약·연음이 가장 많습니다 → 플레이어 ⚙ 에서 "소리 나는 대로"와 "빈칸 자막(기능어)"을 켜고, 받아쓰기 퀴즈를 이어 가세요.',
+    accent: '키위 발음이 가장 많습니다 → "NZ 모음 주석"으로 fish→fush, pen→pin 처럼 들리는 단어를 눈으로 확인하며 들으세요.',
+    length: '긴 문장이 가장 많습니다 → ⏱ 구간 조정으로 긴 문장을 끊어 반복하고, 더빙·따라하기는 한 줄씩 하세요.',
+  };
+  function reasonRow(it) {
+    const row = el('div', { class: 'miss-why' }, [el('span', { class: 'mw-label' }, ['왜 못 알아들었나요? (선택)', infoBtn('missReason')])]);
+    for (const [k, label] of MISS_REASONS) {
+      row.append(el('button', { class: 'mw' + (it.missReason === k ? ' on' : ''), 'data-why': k, title: '원인을 하나 고르면 진행 상황에 모여 다음 훈련을 고르는 재료가 됩니다 (고르지 않아도 됩니다)', onclick: async (e) => {
+        const v = it.missReason === k ? null : k;
+        e.target.closest('.miss-why').querySelectorAll('.mw').forEach((b) => b.classList.toggle('on', b.dataset.why === v));
+        await updateItem(it.id, { missReason: v });
+      } }, label));
+    }
+    return row;
+  }
 
   // ───────── 태그 ─────────
   // 태그 이름은 확장 프로그램 설정(tagNames)에 저장되어 다른 자막에서도 고를 수 있고, 각 자막의 tags 에 지정된다
@@ -737,6 +792,48 @@
     }
     return state.recordings.get(itemId);
   }
+  // 명료도 피드백(실험적): 녹음과 나란히 크롬 음성 인식 — 실패하면 조용히 생략 (근거 ⓘ: dubFeedback)
+  function startAsr() {
+    try {
+      if (window.__subtutorAsrTest) return { text: String(window.__subtutorAsrTest), done: true, stop() {} }; // E2E 용 가짜 인식
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) return null;
+      const r = new SR();
+      r.lang = 'en-NZ'; r.continuous = true; r.interimResults = false;
+      const o = { text: '', done: false, stop() { try { r.stop(); } catch (e) { o.done = true; } } };
+      r.onresult = (e) => { let t = ''; for (const res of e.results) t += res[0].transcript + ' '; o.text = t.trim(); };
+      r.onerror = () => { o.done = true; };
+      r.onend = () => { o.done = true; };
+      r.start();
+      return o;
+    } catch (e) { return null; }
+  }
+  // 0.3초 넘게 조용한 구간 수 (확장 프로그램 audio.js 의 silenceGaps 와 같은 계산 — 웹은 audio.js 를 싣지 않아 여기 둔다)
+  function countPauses(buf) {
+    try {
+      const d = buf.getChannelData(0), rate = buf.sampleRate, win = Math.round(rate * 0.02);
+      const quiet = [];
+      for (let i = 0; i + win <= d.length; i += win) { let s = 0; for (let k = i; k < i + win; k++) s += d[k] * d[k]; quiet.push(Math.sqrt(s / win) < 0.015); }
+      let a = 0, b = quiet.length - 1;
+      while (a < quiet.length && quiet[a]) a++;
+      while (b >= 0 && quiet[b]) b--;
+      let gaps = 0, run = 0;
+      for (let i = a; i <= b; i++) { if (quiet[i]) run++; else { if (run >= 15) gaps++; run = 0; } }
+      return gaps;
+    } catch (e) { return 0; }
+  }
+  async function recFeedback(it, asr, blob, durationMs) {
+    if (!asr) return null;
+    asr.stop();
+    for (let w = 0; w < 15 && !asr.done; w++) await new Promise((r) => setTimeout(r, 100));
+    const heard = asr.text || '';
+    let pauses = 0;
+    try { pauses = countPauses(await getCtx().decodeAudioData(await blob.arrayBuffer())); } catch (e) { pauses = 0; }
+    const myWords = heard ? heard.trim().split(/\s+/).length : 0;
+    const origWords = String(it.text || '').trim().split(/\s+/).filter(Boolean).length;
+    const origSecs = (effRange(it).endMs - effRange(it).startMs) / 1000;
+    return { text: heard.slice(0, 300), acc: heard ? S.diffWords(it.text, heard).accuracy : null, wpm: durationMs > 300 && myWords ? Math.round((myWords / (durationMs / 1000)) * 60) : 0, origWpm: origSecs > 0.3 && origWords ? Math.round((origWords / origSecs) * 60) : 0, pauses };
+  }
   async function toggleRecord(itemId) {
     if (state.recording && state.recording.itemId === itemId) {
       const rec = state.recording;
@@ -746,7 +843,9 @@
         const { blob, durationMs } = await rec.ctrl.stop();
         if (durationMs < 300) toast('녹음이 너무 짧습니다');
         else {
-          const list = await R.add(itemId, blob, durationMs);
+          const it = state.items.find((i) => i.id === itemId);
+          const fb = it ? await recFeedback(it, rec.asr, blob, durationMs).catch(() => null) : null;
+          const list = await R.add(itemId, blob, durationMs, fb);
           state.recordings.set(itemId, list);
           toast('녹음 저장 ' + list.length + '/' + R.MAX + (list.length === R.MAX ? ' (다음 녹음부터 가장 오래된 것이 지워집니다)' : ''));
         }
@@ -758,7 +857,7 @@
     try {
       R.stop();
       const ctrl = await R.start();
-      state.recording = { itemId, ctrl, startedAt: Date.now(), timer: setInterval(tickRecLabel, 250) };
+      state.recording = { itemId, ctrl, asr: startAsr(), startedAt: Date.now(), timer: setInterval(tickRecLabel, 250) };
       renderRecRows();
     } catch (e) {
       toast('마이크를 사용할 수 없습니다: ' + e.message);
@@ -785,7 +884,9 @@
     const secs = isRec ? Math.floor((Date.now() - state.recording.startedAt) / 1000) : 0;
     node.append(el('button', { class: 'rec-btn' + (isRec ? ' recording' : ''), title: '내 목소리 녹음 (자막당 최대 3개)', onclick: () => toggleRecord(itemId) }, isRec ? '■ 정지 ' + Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0') : '🎙 녹음'));
     (recs || []).forEach((r, k) => {
-      const b = el('button', { class: 'attempt' + (k === recs.length - 1 ? ' latest' : '') + (state.playingRec === r.id ? ' playing' : ''), title: '녹음 ' + (k + 1) + ' 재생 (' + fmtDate(r.createdAt) + ', ' + Math.round(r.durationMs / 100) / 10 + '초)', onclick: () => playRecording(itemId, r) }, String(k + 1));
+      const fb = r.fb && (r.fb.acc !== null || r.fb.pauses || r.fb.wpm) ? r.fb : null;
+      const b = el('button', { class: 'attempt' + (k === recs.length - 1 ? ' latest' : '') + (state.playingRec === r.id ? ' playing' : '') + (fb ? ' has-fb' : ''), title: '녹음 ' + (k + 1) + ' 재생 (' + fmtDate(r.createdAt) + ', ' + Math.round(r.durationMs / 100) / 10 + '초)' + (fb ? ' · 명료도(실험적): ' + (fb.acc !== null ? '일치 ' + fb.acc + '%' : '') + (fb.wpm ? ' · ' + fb.wpm + ' wpm (원본 ' + fb.origWpm + ')' : '') + ' · 멈춤 ' + fb.pauses + '번' + (fb.text ? ' · 인식: "' + fb.text + '"' : '') : ''), onclick: () => playRecording(itemId, r) }, String(k + 1));
+      if (fb && fb.acc !== null) b.append(el('span', { class: 'fb-acc' }, fb.acc + '%'));
       b.append(el('span', { class: 'x', title: '이 녹음 삭제', onclick: async (e) => { e.stopPropagation(); await R.remove(r.id); state.recordings.set(itemId, await R.list(itemId)); renderRecRows(); } }, '×'));
       node.append(b);
     });
@@ -847,7 +948,7 @@
   function route() {
     if (state.shadow && state.view === 'shadow') { state.shadow.gen++; state.shadow.busy = false; }
     const m = /^#\/(\w+)/.exec(location.hash);
-    state.view = m && ['list', 'quiz', 'words', 'known', 'settings', 'shadow'].includes(m[1]) ? m[1] : 'list';
+    state.view = m && ['list', 'quiz', 'words', 'known', 'settings', 'shadow', 'today'].includes(m[1]) ? m[1] : 'list';
     render();
   }
   window.addEventListener('hashchange', route);
@@ -861,7 +962,7 @@
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === state.view));
     const app = $('#app');
     app.textContent = '';
-    const titles = { list: '저장한 자막', quiz: '퀴즈', words: '단어장', known: '알고 있는 표현', settings: '설정', shadow: '쉐도잉' };
+    const titles = { list: '저장한 자막', quiz: '퀴즈', words: '단어장', known: '알고 있는 표현', settings: '설정', shadow: '쉐도잉', today: '오늘의 훈련' };
     document.title = 'SubTutor · ' + titles[state.view];
     switch (state.view) {
       case 'list': app.append(renderList(learning(), 'learning')); break;
@@ -870,6 +971,7 @@
       case 'words': app.append(renderWords()); break;
       case 'settings': app.append(renderSettings()); break;
       case 'shadow': app.append(renderShadow()); break;
+      case 'today': app.append(renderToday()); break;
       default: break;
     }
     renderClipStates();
@@ -960,6 +1062,7 @@
     editSync = editUi.sync;
     wrap.classList.toggle('editing', state.edit.on);
     const viewCtl = state.edit.on ? [] : [infoBtn('sort'), hideBtn('text'), hideBtn('ko'), infoBtn('veil'), repeatButton(), infoBtn('repeat')]; // 편집 중에는 자리를 비워 한 줄에 들어가게
+    if (kind === 'learning' && !state.edit.on) { const tc = todayCard(); if (tc) wrap.append(tc); } // 첫 화면 맨 위: 오늘의 훈련
     wrap.append(buildTagBar(renderBody), el('div', { class: 'toolbar' }, [sel, search, sort].concat(viewCtl, [countEl, el('span', { class: 'spacer' }), editButton(), editUi.bar])), body);
     renderBody();
     syncVeils();
@@ -974,7 +1077,7 @@
       node.classList.toggle('selected', state.edit.sel.has(it.id));
       node.addEventListener('click', (e) => { if (e.target.closest('button, input, textarea, select, a, label, .trim-box, .rec-row, .tags-row')) return; setPick(it.id, !state.edit.sel.has(it.id)); });
     }
-    const playCol = el('div', { class: 'play-col' }, [pick, play, state.web.ladder ? el('button', { class: 'ladder', title: ladderTitle(), onclick: () => playLadder(it.id) }, '⤴') : null]);
+    const playCol = el('div', { class: 'play-col' }, [pick, play, state.web.ladder ? el('button', { class: 'ladder', title: ladderTitle(), onclick: () => playLadder(it.id) }, '⤴') : null, state.web.ladder && understood(it) ? el('button', { class: 'ladder fast', title: fastTitle(), onclick: () => playFast(it.id) }, '⏩') : null]);
     const rates = rateBtns(it); // 설정한 배속이 그대로: [0.8] [0.9] [1] [1.15]
     const body = el('div', { class: 'body' }, [
       el('div', { class: 'vis-btns' }, [
@@ -996,6 +1099,7 @@
         el('span', { class: 'state' }),
       ]),
       el('div', { class: 'item-actions' }, [buildTagRow(it), buildRecRow(it.id)]), // + 태그 · 녹음 · 1 · 같이 듣기 · ⓘ 를 한 줄에
+      it.missed && !state.edit.on ? reasonRow(it) : null, // Q 문장: 못 알아들은 원인 원터치 (선택)
       buildTrimBox(it),
     ]);
     const comment = el('textarea', { class: 'comment', placeholder: '코멘트 (뜻, 메모, 예문…)' });
@@ -1032,6 +1136,7 @@
   // ───────── 퀴즈 ─────────
   function renderQuiz() {
     const wrap = el('div', { class: 'quiz-wrap' });
+    if (state.nzQuiz) { wrap.append(state.nzQuiz.pos >= state.nzQuiz.queue.length ? nzSummary() : nzCard()); return wrap; }
     const q = state.quiz;
     if (!q) { wrap.append(quizSetup()); return wrap; }
     while (q.pos < q.queue.length && !state.items.find((i) => i.id === q.queue[q.pos])) q.pos++;
@@ -1039,6 +1144,86 @@
     wrap.append(quizCard());
     return wrap;
   }
+  // ── NZ 모음 미니 퀴즈: 저장한 오디오를 듣고 들린 단어를 2지선다로 (pen vs pin) ──
+  // 헷갈리는 짝이 있는 단어(pen/pin, bat/bet, ear/air …)가 든 저장 문장 가운데 오디오가 있는 것으로 문제를 만든다. 적으면 적은 대로
+  function nzQuestions() {
+    if (!NZV) return [];
+    const out = [];
+    for (const it of state.items) {
+      if (!(it.audio || (it.file && it.file.location === 'folder'))) continue; // 바로 재생할 소리가 있는 것만
+      const hit = NZV.find(it.text || '', 3).find((h) => h.pair);
+      if (!hit) continue;
+      out.push({ itemId: it.id, word: hit.word, pair: hit.pair, hint: hit.hint, typeLabel: hit.typeLabel, sentence: it.text });
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
+  function startNzQuiz() {
+    const qs = shuffle(nzQuestions().slice());
+    if (!qs.length) { toast('해당 단어(pen·pin 같은 짝)가 든, 오디오 있는 저장 문장이 아직 없습니다'); return; }
+    state.nzQuiz = { queue: qs, pos: 0, picked: null, stats: { ok: 0, bad: 0 }, playedFor: null };
+    render();
+  }
+  function nzCard() {
+    const z = state.nzQuiz;
+    const q = z.queue[z.pos];
+    const options = z.optionsFor === z.pos ? z.options : (z.options = shuffle([q.word, q.pair]), z.optionsFor = z.pos, z.options);
+    const picked = z.picked;
+    const card = el('div', { class: 'quiz-card nz-card', 'data-clip-item': q.itemId }, [
+      el('div', { class: 'quiz-top' }, [el('span', null, ['NZ 모음 미니 퀴즈', infoBtn('nzVowels')]), el('span', null, (z.pos + 1) + ' / ' + z.queue.length + '  ·  맞음 ' + z.stats.ok + ' · 틀림 ' + z.stats.bad)]),
+      el('div', { class: 'progress' }, el('div', { style: 'width:' + Math.round((z.pos / z.queue.length) * 100) + '%' })),
+      el('p', { class: 'step-desc' }, '듣고, 문장에 나온 단어를 고르세요 (뉴질랜드 발음은 두 단어가 비슷하게 들립니다)'),
+      el('div', { class: 'quiz-audio' }, [el('button', { class: 'btn primary big play', 'data-label': '듣기', onclick: () => playItem(q.itemId, { loop: false }) }, '▶ 듣기'), el('span', { class: 'count' }, 'Space'), el('span', { class: 'clip-state state' })]),
+      el('div', { class: 'nz-opts' }, options.map((w) => el('button', { class: 'btn big nz-opt' + (picked ? (w === q.word ? ' right' : (w === picked ? ' wrong' : '')) : ''), disabled: !!picked, onclick: () => pickNz(w) }, w))),
+    ]);
+    if (picked) {
+      card.append(
+        el('div', { class: 'quiz-result' }, [
+          el('div', { class: 'score' }, picked === q.word ? [el('b', null, '맞았습니다!')] : [el('b', null, '정답: ' + q.word), ' — NZ 발음에서는 ' + q.pair + ' 와 비슷하게 들립니다']),
+          el('div', { class: 'answer en' }, sentenceWithWord(q.sentence, q.word)),
+          el('p', { class: 'count' }, q.hint + ' · ' + q.typeLabel),
+          el('div', { class: 'quiz-actions' }, [el('button', { class: 'btn primary', onclick: nextNz }, (z.pos + 1 < z.queue.length ? '다음' : '결과 보기') + ' (Enter)')]),
+        ]),
+      );
+    }
+    if (z.playedFor !== z.pos) { z.playedFor = z.pos; if (state.extOk) setTimeout(() => playItem(q.itemId, { loop: false }), 60); }
+    return card;
+  }
+  function pickNz(w) {
+    const z = state.nzQuiz;
+    if (!z || z.picked) return;
+    z.picked = w;
+    if (w === z.queue[z.pos].word) z.stats.ok++; else z.stats.bad++;
+    render();
+  }
+  function nextNz() {
+    const z = state.nzQuiz;
+    if (!z || !z.picked) return;
+    stopLocalAudio();
+    z.picked = null;
+    z.pos++;
+    render();
+  }
+  function nzSummary() {
+    const z = state.nzQuiz;
+    return el('div', { class: 'quiz-card summary' }, [
+      el('h2', null, 'NZ 모음 퀴즈 끝!'),
+      el('div', { class: 'nums' }, [el('div', null, [el('b', null, String(z.stats.ok)), '맞음']), el('div', null, [el('b', null, String(z.stats.bad)), '틀림'])]),
+      el('p', { class: 'count' }, '틀린 짝은 플레이어의 NZ 모음 주석(점선 밑줄)으로 눈으로 확인하며 들어 보세요.'),
+      el('div', { class: 'row', style: 'display:flex;gap:10px;justify-content:center' }, [
+        el('button', { class: 'btn primary big', onclick: () => { state.nzQuiz = null; render(); } }, '퀴즈로'),
+        el('button', { class: 'btn big', onclick: startNzQuiz }, '한 번 더'),
+      ]),
+    ]);
+  }
+  document.addEventListener('keydown', (e) => {
+    if (state.view !== 'quiz' || !state.nzQuiz || isEditable(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    const z = state.nzQuiz;
+    if (z.pos >= z.queue.length) return;
+    if (e.code === 'Space') { e.preventDefault(); playItem(z.queue[z.pos].itemId, { loop: false }); }
+    else if (e.code === 'Enter' && z.picked) { e.preventDefault(); nextNz(); }
+  });
+
   function quizSetup() {
     const pool = learning();
     const titles = Array.from(new Set(pool.map((i) => i.title))).sort((a, b) => a.localeCompare(b, 'ko'));
@@ -1057,6 +1242,7 @@
       ]),
       el('div', { class: 'row' }, [
         el('button', { class: 'btn primary big', disabled: !pool.length || !state.extOk, onclick: startQuiz }, '퀴즈 시작'),
+        el('button', { class: 'btn big nz-start', disabled: !state.extOk || !nzQuestions().length, title: 'pen·pin 처럼 NZ 발음에서 비슷해지는 짝 단어가 든, 오디오 있는 저장 문장으로 만듭니다', onclick: startNzQuiz }, 'NZ 모음 미니 퀴즈' + (nzQuestions().length ? ' (' + nzQuestions().length + ')' : '')),
         el('span', { class: 'count' }, !state.extOk ? '확장 프로그램이 연결되어야 오디오를 들을 수 있습니다' : (pool.length ? (state.web.srs ? '오늘 복습 ' + due + '개 · ' : '') + '학습 중 ' + pool.length + '개 · 알고 있음 ' + known().length + '개' : '먼저 자막을 저장해 주세요')),
         infoBtn('keys'),
       ]),
@@ -1112,6 +1298,7 @@
         el('div', { class: 'answer en', text: it.text }),
         el('div', { class: 'ko', text: it.translation || '' }),
         buildRecRow(it.id),
+        it.missed ? reasonRow(it) : null,
         el('div', { class: 'grade' }, [
           el('button', { class: 'btn forgot', onclick: () => grade('forgot') }, 'Z  잊어버렸어 — 다음에 또 나옴'),
           el('button', { class: 'btn know', onclick: () => grade('know') }, 'C  알고 있어 — 알고 있는 표현으로'),
@@ -1130,6 +1317,9 @@
     if (state.web.weakWords) {
       const missing = q.result.ops.filter((o) => o.type === 'missing').map((o) => String(o.word).toLowerCase().replace(/[^a-z']/g, '')).filter(Boolean);
       if (missing.length) B.request('stats.weak', { words: missing }).catch(() => {});
+      // 놓친 단어가 축약·연음 구간이면 패턴(gonna, didja …)으로도 센다
+      const red = Sp && Sp.reductionMisses ? Sp.reductionMisses(it.text, missing) : [];
+      if (red.length) B.request('stats.reduction', { patterns: red.map((r) => ({ to: r.pattern, src: r.src })) }).catch(() => {});
     }
     render();
   }
@@ -1193,7 +1383,7 @@
       else if (e.code === 'KeyR') toggleRecord(it.id);
       return;
     }
-    if (state.view !== 'quiz' || !state.quiz) return;
+    if ((state.view !== 'quiz' && todayStageKind() !== 'dict') || !state.quiz) return; // 오늘의 훈련의 받아쓰기 단계도 같은 키
     const q = state.quiz;
     const it = currentQuizItem();
     if (!it) return;
@@ -1364,7 +1554,7 @@
     ]);
   }
   document.addEventListener('keydown', (e) => {
-    if (state.view !== 'words' || !state.wordReview) return;
+    if ((state.view !== 'words' && todayStageKind() !== 'words') || !state.wordReview) return; // 오늘의 훈련의 단어 단계도 같은 키
     if (e.ctrlKey || e.metaKey || e.altKey || isEditable(e.target)) return;
     const rv = state.wordReview;
     if (rv.pos >= rv.queue.length) return;
@@ -1424,6 +1614,7 @@
       ]),
       el('section', null, [
         el('h3', null, ['데이터', infoBtn('storedAudio')]),
+        renderBackupLine(),
         el('div', { class: 'row' }, [
           el('button', { class: 'btn', disabled: !state.extOk, onclick: () => {
             const blob = new Blob([JSON.stringify({ app: 'SubTutor', exportedAt: new Date().toISOString(), items: state.items, words: state.words }, null, 2)], { type: 'application/json' });
@@ -1447,6 +1638,8 @@
           } }, '녹음 모두 삭제'),
         ]),
       ]),
+      renderPhoneSync(),
+      renderSiteLinks(),
       el('section', null, [
         el('h3', null, ['확장 프로그램', infoBtn('audioStore')]),
         el('p', null, [state.extOk ? '연결됨 · 버전 ' + (B.version || '') : '감지되지 않음', ' · ', el('a', { href: README_URL, target: '_blank', rel: 'noopener' }, '설치 방법·사용법'), ' · ', el('button', { class: 'link', onclick: () => showInfo('keys') }, '⌨ 단축키')]),
@@ -1454,6 +1647,226 @@
     );
     return wrap;
   }
+
+  // ── 지원 사이트: 전용 어댑터 4곳 + 범용 어댑터 사이트(sites.js) + "아무 사이트" 안내 ──
+  function renderSiteLinks() {
+    const dedicated = [
+      ['Netflix', 'https://www.netflix.com/', '영화·드라마 (구독)'],
+      ['YouTube', 'https://www.youtube.com/', '무료 — 자막(CC) 있는 영상이면 어디든'],
+      ['Prime Video', 'https://www.primevideo.com/', '영화·드라마 (구독)'],
+      ['Disney+', 'https://www.disneyplus.com/', '영화·드라마 (구독, 실험적 지원)'],
+    ];
+    const generic = ((typeof SubTutorSites !== 'undefined' && SubTutorSites.SITES) || []).filter((x) => x.home);
+    const row = (label, href, about) => el('li', { class: 'site-row' }, [
+      el('a', { class: 'site-link', href, target: '_blank', rel: 'noopener' }, label),
+      about ? el('span', { class: 'site-about' }, about) : null,
+    ]);
+    return el('section', null, [
+      el('h3', null, ['확장 프로그램이 되는 사이트', infoBtn('anySite')]),
+      el('p', { class: 'count' }, '확장 프로그램을 켠 크롬에서 아래 사이트의 영상을 재생하면 자막 패널이 뜹니다. 저장한 대사는 이 웹과 아이폰으로 이어집니다.'),
+      el('ul', { class: 'site-links' }, dedicated.map((d) => row(d[0], d[1], d[2]))),
+      el('ul', { class: 'site-links' }, generic.map((x) => row(x.label, x.home, x.about))),
+      el('p', { class: 'count' }, '여기 없는 영상 사이트는 그 사이트를 연 채 확장 아이콘(팝업)에서 "이 사이트에서 켜기"를 누르면 똑같이 동작합니다 (플레이어가 자막을 글(WebVTT·DASH·HLS 등)로 받는 사이트).'),
+    ]);
+  }
+
+  // ── 아이폰 동기화 (SubTutor Pocket): 대사·단어장·보관 MP3 를 Supabase 로 올린다. 아이폰 앱이 같은 계정으로 내려받는다 ──
+  // 기본 접속 정보: 본인 Supabase 프로젝트(supabase/schema.sql 참고)를 만들면 아래 두 상수에 넣는다.
+  // 그러면 웹·아이폰 모두 이메일·비밀번호만 입력하면 된다 (anon 키는 공개용 키 — RLS 가 본인 데이터만 지킨다)
+  const SUPA_DEFAULT_URL = '';
+  const SUPA_DEFAULT_KEY = '';
+  const supa = {
+    url: localStorage.getItem('st.supaUrl') || SUPA_DEFAULT_URL,
+    key: localStorage.getItem('st.supaKey') || SUPA_DEFAULT_KEY,
+    email: localStorage.getItem('st.supaEmail') || '',
+    refresh: localStorage.getItem('st.supaRefresh') || '',   // 로그인 유지용 (비밀번호는 저장하지 않는다)
+    auto: localStorage.getItem('st.supaAuto') !== '0',       // 자동 동기화 (기본 켬)
+    lastAt: +(localStorage.getItem('st.supaLastAt') || 0),   // 마지막 올리기 (자동이든 버튼이든)
+    token: null, userId: null, exp: 0, busy: false,
+  };
+  // 이미 올라간 오디오 id (자동 동기화 때 새 소리만 올리려고 기억해 둔다)
+  const supaUploaded = new Set(JSON.parse(localStorage.getItem('st.supaUp') || '[]'));
+  const saveSupaUploaded = () => { try { localStorage.setItem('st.supaUp', JSON.stringify(Array.from(supaUploaded))); } catch (e) { /* 용량 초과면 다음에 다시 올린다 */ } };
+  const supaSafeName = (x) => String(x).replace(/[^A-Za-z0-9._-]/g, '_'); // 아이폰 앱 Item.safeName 과 같은 규칙이어야 한다
+  function supaBase() { return supa.url.trim().replace(/\/+$/, ''); }
+  async function supaFetch(path, opts) {
+    let r;
+    try { r = await fetch(supaBase() + path, opts); }
+    catch (e) { throw new Error('서버에 닿지 못했습니다 — URL 을 확인하세요'); }
+    if (!r.ok) {
+      let msg = '';
+      try { const j = await r.json(); msg = j.error_description || j.msg || j.message || j.error || ''; } catch (e) { /* 본문 없음 */ }
+      throw new Error(msg || ('HTTP ' + r.status));
+    }
+    return r;
+  }
+  async function supaSignIn(password, signup) {
+    if (!supaBase() || !supa.key.trim()) throw new Error('프로젝트 URL 과 anon 키를 먼저 넣으세요');
+    if (!supa.email.trim() || !password) throw new Error('이메일과 비밀번호를 넣으세요');
+    const r = await supaFetch(signup ? '/auth/v1/signup' : '/auth/v1/token?grant_type=password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', apikey: supa.key.trim() },
+      body: JSON.stringify({ email: supa.email.trim(), password }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!j.access_token) throw new Error('확인 메일이 켜진 프로젝트입니다 — 메일함에서 확인한 뒤 "로그인"을 누르세요');
+    supaSession(j);
+  }
+  function supaSession(j) {
+    supa.token = j.access_token;
+    supa.userId = (j.user && j.user.id) || supa.userId || '';
+    supa.exp = Date.now() + Math.max(60, (j.expires_in || 3600) - 60) * 1000;
+    if (j.refresh_token) { supa.refresh = j.refresh_token; try { localStorage.setItem('st.supaRefresh', j.refresh_token); } catch (e) { /* ignore */ } }
+  }
+  // 로그인 유지: 저장해 둔 refresh 토큰으로 조용히 다시 로그인한다 (만료 전이면 그대로)
+  async function supaEnsureToken() {
+    if (supa.token && Date.now() < supa.exp) return;
+    if (!supa.refresh) throw new Error('먼저 로그인하세요');
+    const r = await supaFetch('/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', apikey: supa.key.trim() },
+      body: JSON.stringify({ refresh_token: supa.refresh }),
+    }).catch((e) => { supa.refresh = ''; localStorage.removeItem('st.supaRefresh'); throw new Error('로그인이 풀렸습니다 — 다시 로그인하세요 (' + e.message + ')'); });
+    supaSession(await r.json().catch(() => ({})));
+    if (!supa.token) throw new Error('로그인이 풀렸습니다 — 다시 로그인하세요');
+  }
+  function supaSignOut() {
+    supa.token = null; supa.userId = null; supa.refresh = ''; supa.exp = 0;
+    localStorage.removeItem('st.supaRefresh');
+  }
+  async function supaUpload(onStep, opts) {
+    await supaEnsureToken();
+    if (supa.busy) throw new Error('이미 올리는 중입니다');
+    supa.busy = true;
+    try { return await supaUploadInner(onStep, opts || {}); } finally { supa.busy = false; }
+  }
+  async function supaUploadInner(onStep, opts) {
+    const H = { apikey: supa.key.trim(), Authorization: 'Bearer ' + supa.token };
+    // 1) 보관(또는 폴더) MP3 — 올라간 것만 has_audio 로 표시한다. 자동(incremental)일 때는 아직 안 올라간 소리만
+    let audioOk = 0, audioFail = 0;
+    for (let k = 0; k < state.items.length; k++) {
+      const it = state.items[k];
+      if (opts.incremental && supaUploaded.has(it.id)) continue;
+      if (onStep) onStep('소리 올리는 중 ' + (k + 1) + '/' + state.items.length + '…');
+      let blob = null;
+      try { blob = await localAudioBlob(it.id); } catch (e) { blob = null; }
+      if (!blob) continue; // 소리 없는 대사
+      try {
+        await supaFetch('/storage/v1/object/audio/' + encodeURIComponent(supa.userId) + '/' + encodeURIComponent(supaSafeName(it.id)) + '.mp3', {
+          method: 'POST', headers: Object.assign({ 'Content-Type': blob.type || 'audio/mpeg', 'x-upsert': 'true' }, H), body: blob,
+        });
+        supaUploaded.add(it.id); audioOk++;
+      } catch (e) { audioFail++; }
+    }
+    saveSupaUploaded();
+    // 2) 대사 목록 upsert (아이폰 앱이 읽는 컬럼으로)
+    if (onStep) onStep('대사 목록 올리는 중…');
+    const rows = state.items.map((it) => { const r = effRange(it); return {
+      id: it.id, title: it.title || '', episode: it.episode || '', platform: it.platform || '',
+      text: it.text || '', translation: it.translation || '',
+      start_ms: Math.round(r.startMs || 0), end_ms: Math.round(r.endMs || 0), saved_at: it.savedAt || 0,
+      box: it.box || 'learning', comment: it.comment || '', tags: it.tags || [],
+      missed: !!it.missed, miss_reason: it.missReason || '',
+      has_audio: supaUploaded.has(it.id), audio_ms: supaUploaded.has(it.id) ? Math.max(0, Math.round((r.endMs || 0) - (r.startMs || 0))) : 0,
+    }; });
+    if (rows.length) await supaFetch('/rest/v1/items', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' }, H), body: JSON.stringify(rows) });
+    // 3) 단어장 upsert
+    let wordCount = 0;
+    if (state.words.length) {
+      if (onStep) onStep('단어장 올리는 중…');
+      const ws = state.words.map((w) => ({ word: w.word, meaning: w.meaning || '', sentence: w.sentence || '', sentence_ko: w.sentenceKo || '', review: w.review || {}, saved_at: w.savedAt || 0 }));
+      await supaFetch('/rest/v1/words', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' }, H), body: JSON.stringify(ws) });
+      wordCount = ws.length;
+    }
+    supa.lastAt = Date.now();
+    try { localStorage.setItem('st.supaLastAt', String(supa.lastAt)); } catch (e) { /* ignore */ }
+    return { items: rows.length, words: wordCount, audioOk, audioFail };
+  }
+  // 자동 동기화: 접속하고 잠시 뒤 + 15분마다, 로그인이 유지돼 있으면 조용히 올린다
+  // (목록·단어 upsert 는 요청 두어 개, 소리는 새것만 — Supabase 무료 한도에 부담이 없다)
+  const SUPA_AUTO_MS = 15 * 60 * 1000;
+  async function supaAutoSync(force) {
+    if ((!supa.auto && !force) || supa.busy || !state.extOk) return;
+    if (!supaBase() || !supa.key.trim() || !supa.refresh) return;
+    if (!force && Date.now() - supa.lastAt < SUPA_AUTO_MS) return;
+    if (!state.items.length && !state.words.length) return;
+    try {
+      const r = await supaUpload(null, { incremental: true });
+      const lineEl = document.querySelector('.supa-line');
+      if (lineEl) lineEl.textContent = '자동 동기화 끝 (' + fmtDate(supa.lastAt) + ') — 대사 ' + r.items + '개' + (r.audioOk ? ' · 새 소리 ' + r.audioOk + '개' : '') + ' · 단어 ' + r.words + '개';
+    } catch (e) { console.warn('[SubTutor] 자동 동기화 실패:', e.message); }
+  }
+  setTimeout(() => supaAutoSync(false), 8000);
+  setInterval(() => supaAutoSync(false), 5 * 60 * 1000);
+  function renderPhoneSync() {
+    const line = el('p', { class: 'count supa-line' },
+      supa.refresh ? ('로그인 유지 중' + (supa.lastAt ? ' · 마지막 올리기 ' + fmtDate(supa.lastAt) : '') + (supa.auto ? '' : ' — 자동 동기화 꺼짐')) : '');
+    const save = () => { try { localStorage.setItem('st.supaUrl', supa.url); localStorage.setItem('st.supaKey', supa.key); localStorage.setItem('st.supaEmail', supa.email); } catch (e) { /* 시크릿 창 등 */ } };
+    const input = (cls, ph, key, type) => el('input', { class: 'supa-in ' + cls, type: type || 'text', placeholder: ph, value: supa[key] || '', autocomplete: 'off', spellcheck: 'false', oninput: (e) => { supa[key] = e.target.value; save(); } });
+    const pass = el('input', { class: 'supa-in supa-pass', type: 'password', placeholder: '비밀번호 (저장하지 않음)', autocomplete: 'new-password' });
+    const loginBtn = el('button', { class: 'btn supa-login' }, '로그인');
+    const signupBtn = el('button', { class: 'btn supa-signup' }, '회원가입');
+    const pushBtn = el('button', { class: 'btn primary supa-push' }, '아이폰으로 올리기 (전체)');
+    const outBtn = supa.refresh ? el('button', { class: 'btn supa-logout', onclick: () => { supaSignOut(); render(); toast('로그아웃했습니다 (아이폰에 받아 둔 것은 그대로)'); } }, '로그아웃') : null;
+    const busyBtns = [loginBtn, signupBtn, pushBtn];
+    const withBusy = (fn) => async () => { busyBtns.forEach((b) => { b.disabled = true; }); try { await fn(); } finally { busyBtns.forEach((b) => { b.disabled = false; }); } };
+    // 로그인하면 바로 한 번 올린다 — 유저는 이메일·비밀번호만 누르면 끝
+    const afterLogin = async () => {
+      line.textContent = '로그인됨 — 지금 것을 올립니다…';
+      try {
+        const r = await supaUpload((t) => { line.textContent = t; }, {});
+        line.textContent = '올렸습니다 — 대사 ' + r.items + '개 · 소리 ' + r.audioOk + '개' + (r.audioFail ? ' (실패 ' + r.audioFail + '개)' : '') + ' · 단어 ' + r.words + '개. 아이폰 앱에서 같은 이메일로 로그인하면 내려받습니다.';
+      } catch (e) { line.textContent = '로그인됨 — 올리기 실패: ' + e.message; }
+    };
+    loginBtn.onclick = withBusy(async () => { line.textContent = '로그인 중…'; try { await supaSignIn(pass.value, false); pass.value = ''; await afterLogin(); } catch (e) { line.textContent = '로그인 실패: ' + e.message; } });
+    signupBtn.onclick = withBusy(async () => { line.textContent = '회원가입 중…'; try { await supaSignIn(pass.value, true); pass.value = ''; await afterLogin(); } catch (e) { line.textContent = '회원가입 실패: ' + e.message; } });
+    pushBtn.onclick = withBusy(async () => {
+      try {
+        const r = await supaUpload((t) => { line.textContent = t; }, {});
+        line.textContent = '올렸습니다 — 대사 ' + r.items + '개 · 소리 ' + r.audioOk + '개' + (r.audioFail ? ' (실패 ' + r.audioFail + '개)' : '') + ' · 단어 ' + r.words + '개. 아이폰 앱에서 "동기화"를 누르세요.';
+        toast('아이폰으로 올렸습니다');
+      } catch (e) { line.textContent = '올리기 실패: ' + e.message; }
+    });
+    const autoSw = el('label', { class: 'switch-row supa-auto-row' }, [el('span', null, '자동 동기화 — 접속할 때와 15분마다, 새 소리만'), el('input', { type: 'checkbox', class: 'switch supa-auto', checked: supa.auto, onchange: (e) => { supa.auto = e.target.checked; try { localStorage.setItem('st.supaAuto', supa.auto ? '1' : '0'); } catch (err) { /* ignore */ } if (supa.auto) supaAutoSync(false); } })]);
+    const haveDefaults = !!(SUPA_DEFAULT_URL && SUPA_DEFAULT_KEY);
+    const urlKeyRow = el('div', { class: 'row supa-row' }, [input('supa-url', '프로젝트 URL (https://xxxx.supabase.co)', 'url', 'url'), input('supa-key', 'anon public 키', 'key')]);
+    return el('section', null, [
+      el('h3', null, ['아이폰 동기화 (SubTutor Pocket)', infoBtn('phoneSync')]),
+      el('p', { class: 'count' }, '여기 저장한 대사·단어장·보관 소리를 Supabase 로 올리면, 아이폰 앱이 같은 계정으로 내려받아 인터넷 없이도 듣습니다. 한 번 로그인하면 유지됩니다.'),
+      haveDefaults ? el('details', { class: 'supa-adv' }, [el('summary', null, '고급 — 다른 Supabase 서버 쓰기'), urlKeyRow]) : urlKeyRow,
+      el('div', { class: 'row supa-row' }, [input('supa-email', '이메일', 'email', 'email'), pass, loginBtn, signupBtn, pushBtn, outBtn]),
+      autoSw,
+      line,
+    ]);
+  }
+
+  // 자동 백업 상태 줄: 폴더가 지정돼 있으면 마지막 백업·다음 조건, 아니면 백업 권장 안내
+  function renderBackupLine() {
+    const line = el('p', { class: 'backup-line count' });
+    const btn = el('button', { class: 'btn mini backup-now', disabled: true, onclick: async () => {
+      btn.disabled = true;
+      try {
+        const r = await B.request('backup.now', {}, 30000);
+        toast(r && r.ok ? '백업 완료: ' + r.path : '백업하지 못했습니다' + (r && r.reason === 'none' ? ' — 먼저 팝업에서 저장 폴더를 지정하세요' : (r && (r.reason === 'prompt' || r.reason === 'denied') ? ' — 팝업 "폴더 권한 허용"을 누르세요' : '')), 6000);
+      } catch (e) { toast('백업 실패: ' + e.message); }
+      btn.disabled = false;
+      fill();
+    } }, '지금 백업');
+    const wrap = el('div', { class: 'row backup-row' }, [line, btn, infoBtn('backup')]);
+    line.textContent = state.extOk ? '자동 백업 확인 중…' : '확장 프로그램이 연결되면 자동 백업 상태가 보입니다';
+    async function fill() {
+      try {
+        const r = await B.request('backup.status');
+        const dir = r.dir || { state: 'none' };
+        const m = r.meta || {};
+        btn.disabled = !state.extOk;
+        if (dir.state === 'none') line.textContent = '자동 백업 꺼짐 — 팝업의 "저장 폴더 → 변경…"에서 폴더를 지정하면 학습 데이터가 7일마다 JSON 으로 백업됩니다 (지금은 이 크롬 안에만 있습니다)';
+        else if (dir.state !== 'granted') line.textContent = '자동 백업 멈춤 — "' + (dir.name || '') + '" 폴더 권한이 풀려 있습니다. 팝업의 "폴더 권한 허용"을 누르세요' + (m.lastAt ? ' · 마지막 백업 ' + fmtDate(m.lastAt) : '');
+        else line.textContent = '자동 백업: ' + (dir.name || '') + '/SubTutor/백업 — 7일마다 또는 변경 50건마다' + (m.lastAt ? ' · 마지막 ' + fmtDate(m.lastAt) : ' · 아직 없음') + (m.changes ? ' · 그 뒤 변경 ' + m.changes + '건' : '');
+      } catch (e) { line.textContent = '자동 백업 상태를 읽지 못했습니다'; }
+    }
+    if (state.extOk) fill();
+    return wrap;
+  }
+
   // 속도 사다리 세부 설정: 단계 수 · 단계별 배속(0.3~2.0) · 음높이 유지
   function renderLadderCfg() {
     const rates = ladderRates();
@@ -1482,8 +1895,35 @@
       ]),
       el('div', { class: 'rates' }, inputs),
       el('div', { class: 'row' }, [el('button', { class: 'btn mini ladder-reset', onclick: () => saveWebPrefs({ ladderRates: LADDER_PRESETS[4].slice(), ladderPitch: true }).then(render) }, '기본값 (0.8 → 0.9 → 1 → 1.15)')]),
+      renderFastCfg(),
     );
     return box;
+  }
+  // 고속 적응 프리셋 편집: 이해 확인한 문장용 가속 단계. 마지막 단계는 1배 고정 (정상 속도가 느리게 들리게)
+  function renderFastCfg() {
+    const rates = fastRates();
+    const steps = el('select', { class: 'fast-steps', title: '고속 적응 단계 수', onchange: (e) => saveWebPrefs({ fastRates: (FAST_PRESETS[+e.target.value] || FAST_PRESETS[4]).slice() }).then(render) },
+      [3, 4, 5, 6].map((n) => el('option', { value: n, selected: rates.length === n }, n + '단계')));
+    const inputs = rates.map((r, k) => {
+      const last = k === rates.length - 1;
+      return el('label', { class: 'rate-cell' + (last ? ' fixed' : '') }, [
+        el('span', { class: 'rate-n' }, String(k + 1)),
+        el('input', { type: 'number', class: 'rate fast-rate', 'data-step': k, min: 0.5, max: RATE_MAX, step: 0.05, value: fmtRate(r), disabled: last, title: last ? '마지막 단계는 1배 고정 — 정상 속도가 느리게 들리도록' : undefined, onchange: (e) => {
+          const v = Math.round(clampNum(parseFloat(e.target.value), 0.5, RATE_MAX) * 100) / 100;
+          const next = fastRates().slice();
+          next[k] = Number.isFinite(v) ? v : 1;
+          next[next.length - 1] = 1;
+          e.target.value = fmtRate(next[k]);
+          saveWebPrefs({ fastRates: next }).then(render);
+        } }),
+        el('span', { class: 'rate-x' }, '×'),
+      ]);
+    });
+    return el('div', { class: 'fast-cfg' }, [
+      el('div', { class: 'row' }, [el('b', { class: 'fast-cfg-title' }, '고속 적응 프리셋'), el('label', null, ['단계 수 ', steps]), infoBtn('fastLadder')]),
+      el('p', { class: 'fast-cfg-hint' }, '이해를 확인한 문장(받아쓰기 통과 · 알고 있어)에만 목록의 ⏩ 버튼이 나오고, 플레이어 ⚙ › 반복 고속 적응을 켜면 그 줄의 S 반복이 이 단계로 올라갑니다. 마지막은 1배 고정.'),
+      el('div', { class: 'rates' }, inputs),
+    ]);
   }
   // 더빙 녹음 배속: 플레이어 더빙 칸 ② 의 배속 버튼 (0.5~1배, 1~3개). 0.5배로 녹음하면 영상도 0.5배로 흐르고, 저장할 때 원래 속도로 맞춘다
   const DUB_REC_PRESETS = { 1: [1], 2: [0.5, 1], 3: [0.5, 0.7, 1] };
@@ -1525,18 +1965,39 @@
     body.textContent = '';
     const goal = state.web.goalDate ? new Date(state.web.goalDate + 'T00:00:00') : null;
     const days = goal && !isNaN(goal) ? Math.ceil((goal - Date.now()) / DAY) : null;
-    body.append(el('div', { class: 'dday' }, days === null ? '근무 시작일을 정하세요' : (days > 0 ? 'D-' + days : (days === 0 ? 'D-day' : 'D+' + (-days))) + ' · ' + state.web.goalDate));
+    // D-day 옆에 오늘의 훈련 연속 일수 (🔥)
+    body.append(el('div', { class: 'dday' }, [days === null ? '근무 시작일을 정하세요' : (days > 0 ? 'D-' + days : (days === 0 ? 'D-day' : 'D+' + (-days))) + ' · ' + state.web.goalDate, el('span', { class: 'dday-streak' }, streakLine()), infoBtn('today')]));
     const weeks = 8, nowT = Date.now();
     const bucket = (t) => Math.floor((nowT - t) / (7 * DAY));
-    const saved = new Array(weeks).fill(0), rev = new Array(weeks).fill(0);
+    const saved = new Array(weeks).fill(0), rev = new Array(weeks).fill(0), train = new Array(weeks).fill(0);
     state.items.forEach((i) => { const b = bucket(i.savedAt || 0); if (b >= 0 && b < weeks) saved[weeks - 1 - b]++; });
     (st.reviews || []).forEach((r) => { const b = bucket(r.t); if (b >= 0 && b < weeks) rev[weeks - 1 - b]++; });
+    // 훈련한 날: 그날 정오를 기준으로 주에 넣는다 (0~7일)
+    Object.keys(st.training || {}).forEach((d) => { const b = bucket(new Date(d + 'T12:00:00').getTime()); if (b >= 0 && b < weeks) train[weeks - 1 - b]++; });
     const max = Math.max(1, ...saved, ...rev);
-    const bars = el('div', { class: 'bars' }, saved.map((n, k) => el('div', { class: 'bar-col', title: (k === weeks - 1 ? '이번 주' : (weeks - 1 - k) + '주 전') + ': 저장 ' + n + ' · 복습 ' + rev[k] }, [
-      el('div', { class: 'bar-pair' }, [el('div', { class: 'bar saved', style: 'height:' + Math.max(2, Math.round((n / max) * 60)) + 'px' }), el('div', { class: 'bar rev', style: 'height:' + Math.max(2, Math.round((rev[k] / max) * 60)) + 'px' })]),
+    const bars = el('div', { class: 'bars' }, saved.map((n, k) => el('div', { class: 'bar-col', title: (k === weeks - 1 ? '이번 주' : (weeks - 1 - k) + '주 전') + ': 저장 ' + n + ' · 복습 ' + rev[k] + ' · 오늘의 훈련 ' + train[k] + '일' }, [
+      el('div', { class: 'bar-pair' }, [el('div', { class: 'bar saved', style: 'height:' + Math.max(2, Math.round((n / max) * 60)) + 'px' }), el('div', { class: 'bar rev', style: 'height:' + Math.max(2, Math.round((rev[k] / max) * 60)) + 'px' }), el('div', { class: 'bar train', 'data-days': String(train[k]), style: 'height:' + Math.max(2, Math.round((train[k] / 7) * 60)) + 'px' })]),
       el('span', { class: 'bar-l' }, k === weeks - 1 ? '이번 주' : (k === 0 ? (weeks - 1) + '주 전' : '')),
     ])));
-    body.append(el('div', { class: 'bars-wrap' }, [bars, el('div', { class: 'legend' }, [el('span', { class: 'lg saved' }, '저장'), el('span', { class: 'lg rev' }, '복습')])]));
+    body.append(el('div', { class: 'bars-wrap' }, [bars, el('div', { class: 'legend' }, [el('span', { class: 'lg saved' }, '저장'), el('span', { class: 'lg rev' }, '복습'), el('span', { class: 'lg train' }, '오늘의 훈련 (일, 7일 = 가득)')])]));
+    // 못 알아들은 원인별 비율 + 다음 훈련 추천 (Q 문장 복습에서 고른 원인)
+    const reasons = {};
+    state.items.forEach((i) => { if (i.missReason) reasons[i.missReason] = (reasons[i.missReason] || 0) + 1; });
+    const totalR = Object.values(reasons).reduce((a, b) => a + b, 0);
+    const miss = el('div', { class: 'miss-stats' }, [el('h4', null, ['못 알아들은 원인', infoBtn('missReason')])]);
+    if (!totalR) miss.append(el('p', { class: 'count' }, '받아쓰기·오늘의 훈련·목록에서 Q 문장의 원인을 고르면 여기에 모입니다.'));
+    else {
+      const top = MISS_REASONS.map(([k, label]) => [k, label, reasons[k] || 0]).filter((x) => x[2] > 0).sort((a, b) => b[2] - a[2]);
+      for (const [k, label, n] of top) {
+        miss.append(el('div', { class: 'miss-row' }, [
+          el('span', { class: 'miss-name' }, label),
+          el('div', { class: 'miss-bar-track' }, el('div', { class: 'miss-bar', 'data-why': k, style: 'width:' + Math.round((n / totalR) * 100) + '%' })),
+          el('span', { class: 'miss-n' }, n + '개 · ' + Math.round((n / totalR) * 100) + '%'),
+        ]));
+      }
+      miss.append(el('p', { class: 'miss-advice' }, '다음 훈련 추천: ' + MISS_RECOMMEND[top[0][0]]));
+    }
+    body.append(miss);
     const eps = Object.values(st.episodes || {}).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, 12);
     if (!eps.length) { body.append(el('p', { class: 'count' }, '플레이어에서 자막을 보면 에피소드별 기록이 쌓입니다.')); return; }
     const row = (e) => {
@@ -1551,19 +2012,28 @@
     };
     body.append(el('table', { class: 'eps' }, [el('thead', null, el('tr', null, ['작품', '본 줄', '1회차 이해율', '말 속도', '어휘'].map((h) => el('th', null, h)))), el('tbody', null, eps.map(row))]));
   }
-  // 약점 단어: 받아쓰기에서 놓친 단어 누적
+  // 약점 단어: 받아쓰기에서 놓친 단어 누적 + 자주 놓치는 축약 패턴 top 10
   function renderWeakWords() {
     const sec = el('section', null, [el('h3', null, ['약점 단어', infoBtn('weakWords')])]);
     const body = el('div', { class: 'weak' }, '…');
-    sec.append(body);
+    const redBox = el('div', { class: 'weak reductions' });
+    sec.append(body, el('h4', { class: 'red-title' }, ['자주 놓치는 축약 패턴', infoBtn('reductionStats')]), redBox);
     B.request('stats.get').then((r) => {
       const weak = (r && r.stats && r.stats.weak) || {};
       const top = Object.entries(weak).sort((a, b) => b[1] - a[1]).slice(0, 24);
       body.textContent = '';
-      if (!top.length) { body.append(el('span', { class: 'count' }, '받아쓰기 퀴즈를 하면 놓친 단어가 쌓입니다.')); return; }
-      const fn = Sp ? Sp.FUNCTION_WORDS : null;
-      top.forEach(([w, n]) => body.append(el('span', { class: 'tag weak-w' + (fn && fn.has(w) ? ' fnw' : ''), title: fn && fn.has(w) ? '기능어(약형): 연음·약화 때문에 놓치기 쉬움' : '' }, [w, el('span', { class: 'n' }, String(n))])));
-      body.append(el('button', { class: 'btn mini', onclick: async () => { if (confirm('약점 단어 기록을 지울까요?')) { await B.request('stats.weakReset').catch(() => {}); render(); } } }, '초기화'));
+      if (!top.length) body.append(el('span', { class: 'count' }, '받아쓰기 퀴즈를 하면 놓친 단어가 쌓입니다.'));
+      else {
+        const fn = Sp ? Sp.FUNCTION_WORDS : null;
+        top.forEach(([w, n]) => body.append(el('span', { class: 'tag weak-w' + (fn && fn.has(w) ? ' fnw' : ''), title: fn && fn.has(w) ? '기능어(약형): 연음·약화 때문에 놓치기 쉬움' : '' }, [w, el('span', { class: 'n' }, String(n))])));
+        body.append(el('button', { class: 'btn mini', onclick: async () => { if (confirm('약점 단어·축약 패턴 기록을 지울까요?')) { await B.request('stats.weakReset').catch(() => {}); render(); } } }, '초기화'));
+      }
+      // 축약 패턴: didja ×3 — 누르면 그 패턴("did you")이 든 저장 문장만 보여 준다
+      const red = (r && r.stats && r.stats.reductions) || {};
+      const rtop = Object.entries(red).sort((a, b) => b[1].n - a[1].n).slice(0, 10);
+      redBox.textContent = '';
+      if (!rtop.length) { redBox.append(el('span', { class: 'count' }, '받아쓰기에서 축약·연음 구간(gonna, didja, ’em …)의 단어를 놓치면 패턴별로 쌓입니다.')); return; }
+      rtop.forEach(([to, v]) => redBox.append(el('button', { class: 'tag red-pattern', 'data-src': v.src, title: '원래 모양: ' + v.src + ' — 누르면 이 패턴이 든 저장 문장을 봅니다', onclick: () => { state.search = v.src; state.filterTitle = ''; state.filterTag = ''; if (state.view !== 'list') location.hash = '#/list'; else render(); } }, [to, el('span', { class: 'n' }, String(v.n))])));
     }).catch(() => { body.textContent = ''; });
     return sec;
   }
@@ -1702,6 +2172,239 @@
     render();
   }
 
+  // ───────── 오늘의 훈련 (분산 연습: 매일 15분쯤, 버튼 하나로 이어서) ─────────
+  // 복습 때가 된 받아쓰기 → 단어장 카드 → 못 알아들은(Q) 문장 3개를 속도 사다리로 → 더빙 한 구간 권유 → 완료 기록(연속 일수·주별 그래프·D-day 옆)
+  // 그날 복습할 받아쓰기가 없으면 Q 문장과 최근 저장 문장으로 채운다. 근거: McBride (2011) — 같은 양이면 여러 날에 나눠 들은 쪽이 더 늘었다
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const dayKey = (d) => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  const TODAY_MIN = { dict: 1.2, words: 0.25, ladder: 0.6, dub: 2 }; // 하나에 걸리는 대략의 분
+  const TODAY_STAGE = { dict: '받아쓰기', words: '단어 카드', ladder: 'Q 문장 사다리', dub: '더빙' };
+  async function loadStats() {
+    try { const r = await B.request('stats.get'); state.stats = (r && r.stats) || {}; } catch (e) { /* ignore */ }
+  }
+  function planToday() {
+    const L = learning();
+    const missed = L.filter((i) => i.missed);
+    const recent = L.slice().sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+    const add = (arr, from, n) => { for (const it of from) { if (arr.length >= n) break; if (it && !arr.includes(it)) arr.push(it); } return arr; };
+    let dict = state.web.srs !== false ? L.filter(isDue).sort((a, b) => dueOf(a) - dueOf(b)).slice(0, 5) : [];
+    const filled = !dict.length;
+    if (filled) dict = add([], missed.concat(recent), 4);
+    const words = dueWords().sort((a, b) => wordDue(a) - wordDue(b)).slice(0, 12).map((w) => w.word);
+    const byOld = (a, b) => (a.lastReviewedAt || a.savedAt || 0) - (b.lastReviewedAt || b.savedAt || 0);
+    const ladder = add([], missed.slice().sort(byOld), 3);
+    if (ladder.length < 3) add(ladder, recent, 3);
+    const dub = missed.find((i) => !ladder.includes(i)) || missed[0] || recent[0] || null;
+    const stages = [];
+    if (dict.length) stages.push({ kind: 'dict', ids: dict.map((i) => i.id), filled });
+    if (words.length) stages.push({ kind: 'words', words });
+    if (ladder.length) stages.push({ kind: 'ladder', ids: ladder.map((i) => i.id) });
+    if (dub) stages.push({ kind: 'dub', id: dub.id });
+    const minutes = dict.length * TODAY_MIN.dict + words.length * TODAY_MIN.words + ladder.length * TODAY_MIN.ladder + (dub ? TODAY_MIN.dub : 0);
+    return { stages, minutes: Math.max(1, Math.round(minutes)), counts: { dict: dict.length, words: words.length, ladder: ladder.length, dub: dub ? 1 : 0 }, filled };
+  }
+  function trainingStreak() {
+    const tr = (state.stats && state.stats.training) || {};
+    const d = new Date();
+    const doneToday = !!tr[dayKey(d)];
+    if (!doneToday) d.setDate(d.getDate() - 1);
+    let n = 0;
+    while (tr[dayKey(d)] && n < 2000) { n++; d.setDate(d.getDate() - 1); }
+    return { n, doneToday };
+  }
+  function ddayText() {
+    const goal = state.web.goalDate ? new Date(state.web.goalDate + 'T00:00:00') : null;
+    const days = goal && !isNaN(goal) ? Math.ceil((goal - Date.now()) / DAY) : null;
+    return days === null ? '' : (days > 0 ? 'D-' + days : (days === 0 ? 'D-day' : 'D+' + (-days)));
+  }
+  // 🔥 연속 일수 한 줄: 오늘 했으면 오늘까지, 아직이면 어제까지 이어진 날 수
+  function streakLine() {
+    const s = trainingStreak();
+    if (s.doneToday) return '오늘 완료 ✓ · 🔥 ' + s.n + '일 연속';
+    return s.n ? '🔥 ' + s.n + '일 연속 · 오늘 하면 ' + (s.n + 1) + '일' : '오늘부터 연속 기록을 시작하세요';
+  }
+  const todayPlanText = (plan) => [plan.counts.dict ? '받아쓰기 ' + plan.counts.dict : '', plan.counts.words ? '단어 ' + plan.counts.words : '', plan.counts.ladder ? 'Q 문장 사다리 ' + plan.counts.ladder : '', plan.counts.dub ? '더빙 1' : ''].filter(Boolean).join(' · ') + ' · 약 ' + plan.minutes + '분';
+  // 첫 화면(저장한 자막) 맨 위의 카드
+  function todayCard() {
+    if (!state.extOk) return null;
+    const plan = planToday();
+    const s = trainingStreak();
+    const running = state.today && !state.today.finished;
+    return el('div', { class: 'today-card' + (s.doneToday ? ' done' : '') }, [
+      el('div', { class: 'today-main' }, [
+        el('div', { class: 'today-title' }, ['오늘의 훈련', infoBtn('today'), el('span', { class: 'today-dday' }, ddayText())]),
+        el('div', { class: 'today-plan' }, plan.stages.length ? todayPlanText(plan) : '먼저 플레이어에서 자막을 저장하세요 (☆ 또는 E)'),
+        el('div', { class: 'today-streak' }, streakLine()),
+      ]),
+      el('button', { class: 'btn primary big today-start', disabled: !plan.stages.length && !running, onclick: () => (running ? (location.hash = '#/today') : startToday()) }, running ? '이어 하기' : (s.doneToday ? '한 번 더' : '▶ 시작')),
+    ]);
+  }
+  function stopPlayback() {
+    state.ladderFor = null;
+    const cur = state.clip;
+    if (cur && ['playing', 'opening', 'loading'].includes(cur.state)) { setClip(cur.itemId, 'stopped'); stopLocalAudio(); if (!state.clipLocal) B.request('clip.stop').catch(() => {}); }
+    try { R.stop(); } catch (e) { /* ignore */ }
+  }
+  function startToday() {
+    const plan = planToday();
+    if (!plan.stages.length) { toast('훈련할 것이 없습니다 — 먼저 플레이어에서 자막을 저장하세요'); return; }
+    stopPlayback();
+    state.today = { plan, stages: plan.stages, idx: -1, startedAt: Date.now(), done: { dict: 0, words: 0, ladder: 0, dub: 0 }, finished: false };
+    if (location.hash !== '#/today') location.hash = '#/today';
+    nextTodayStage();
+  }
+  const todayStage = () => (state.today && !state.today.finished && state.today.idx >= 0 ? state.today.stages[state.today.idx] || null : null);
+  const todayStageKind = () => (state.view === 'today' && todayStage() ? todayStage().kind : '');
+  function nextTodayStage() {
+    const t = state.today;
+    if (!t || t.finished) return;
+    stopPlayback();
+    if (state.quiz && state.quiz.today) state.quiz = null;
+    if (state.wordReview && state.wordReview.today) state.wordReview = null;
+    t.idx++;
+    if (t.idx >= t.stages.length) { finishToday(); return; }
+    const st = t.stages[t.idx];
+    if (st.kind === 'dict') state.quiz = { queue: st.ids.slice(), pos: 0, phase: 'listen', input: '', result: null, hint: false, revealed: false, stats: { know: 0, forgot: 0 }, requeued: {}, autoplayedFor: null, today: true };
+    else if (st.kind === 'words') state.wordReview = { queue: st.words.slice(), pos: 0, flipped: false, stats: { know: 0, forgot: 0 }, requeued: {}, today: true };
+    else if (st.kind === 'ladder') { st.pos = 0; st.playedFor = null; st.finishedFor = null; }
+    render();
+  }
+  function todayHeader(t) {
+    return el('div', { class: 'today-head' }, [
+      el('b', null, ['오늘의 훈련', infoBtn('today')]),
+      el('div', { class: 'steps today-steps' }, t.stages.map((s, k) => el('span', { class: 'step' + (k === t.idx ? ' on' : (k < t.idx ? ' done' : '')), 'data-stage': s.kind }, (k + 1) + ' ' + TODAY_STAGE[s.kind]))),
+      el('button', { class: 'btn mini today-skip', title: '이 단계를 건너뛰고 다음 단계로', onclick: () => nextTodayStage() }, '이 단계 건너뛰기'),
+    ]);
+  }
+  function renderToday() {
+    const wrap = el('div', { class: 'quiz-wrap today-wrap' });
+    const t = state.today;
+    if (!t) {
+      const plan = planToday();
+      wrap.append(el('div', { class: 'quiz-setup' }, [
+        el('h2', null, ['오늘의 훈련', infoBtn('today')]),
+        el('p', null, plan.stages.length ? todayPlanText(plan) + (plan.filled ? ' (오늘 복습할 받아쓰기가 없어 Q 문장·최근 저장 문장으로 채움)' : '') : '먼저 플레이어에서 자막을 저장하세요.'),
+        el('p', { class: 'today-streak' }, streakLine() + (ddayText() ? ' · ' + ddayText() : '')),
+        el('div', { class: 'row' }, [el('button', { class: 'btn primary big today-start', disabled: !plan.stages.length || !state.extOk, onclick: startToday }, '▶ 시작')]),
+      ]));
+      return wrap;
+    }
+    if (t.finished) { wrap.append(todaySummary()); return wrap; }
+    const st = todayStage();
+    if (!st) return wrap;
+    wrap.append(todayHeader(t));
+    if (st.kind === 'dict') {
+      const q = state.quiz;
+      while (q && q.pos < q.queue.length && !state.items.find((i) => i.id === q.queue[q.pos])) q.pos++;
+      if (!q || q.pos >= q.queue.length) { t.done.dict = q ? q.stats.know + q.stats.forgot : t.done.dict; setTimeout(nextTodayStage, 0); return wrap; }
+      wrap.append(quizCard());
+    } else if (st.kind === 'words') {
+      const rv = state.wordReview;
+      while (rv && rv.pos < rv.queue.length && !state.words.find((w) => w.word === rv.queue[rv.pos])) rv.pos++;
+      if (!rv || rv.pos >= rv.queue.length) { t.done.words = rv ? rv.stats.know + rv.stats.forgot : t.done.words; setTimeout(nextTodayStage, 0); return wrap; }
+      wrap.append(wordCard());
+    } else if (st.kind === 'ladder') wrap.append(todayLadderCard(st));
+    else if (st.kind === 'dub') wrap.append(todayDubCard(st));
+    return wrap;
+  }
+  // Q 문장 사다리: 자막을 감춘 채 느린 배속부터 차례로 듣고, 다 들으면 글·뜻을 보여 준다
+  function todayLadderCard(st) {
+    const id = st.ids[st.pos];
+    const it = state.items.find((i) => i.id === id);
+    if (!it) { setTimeout(() => todayLadderNext(st), 0); return el('div'); }
+    const heard = st.finishedFor === id;
+    const card = el('div', { class: 'quiz-card today-ladder', 'data-clip-item': it.id }, [
+      el('div', { class: 'quiz-top' }, [el('span', null, it.title + (it.episode ? ' · ' + it.episode : '')), el('span', null, 'Q 문장 ' + (st.pos + 1) + ' / ' + st.ids.length)]),
+      el('p', { class: 'step-desc' }, ['못 알아들은 문장을 느린 배속부터 차례로 다시 듣습니다: ' + ladderRates().map(fmtRate).join(' → ') + '×', infoBtn('ladder')]),
+      el('div', { class: 'answer en' + (heard ? '' : ' veiled-text'), text: heard ? it.text : '다 들을 때까지 자막은 감춰 둡니다' }),
+      heard && it.translation ? el('div', { class: 'ko', text: it.translation }) : null,
+      heard && it.missed ? reasonRow(it) : null,
+      el('div', { class: 'quiz-audio' }, [
+        el('button', { class: 'btn primary big play', 'data-label': '사다리 다시', onclick: () => runTodayLadder(st, it.id) }, '⤴ 사다리 다시'),
+        el('span', { class: 'count' }, 'Space'),
+        el('span', { class: 'clip-state state' }),
+      ]),
+      el('div', { class: 'quiz-actions' }, [el('button', { class: 'btn primary today-next', onclick: () => todayLadderNext(st) }, (st.pos + 1 < st.ids.length ? '다음 문장' : '다음 단계') + ' (N)')]),
+    ]);
+    if (st.playedFor !== id) { st.playedFor = id; setTimeout(() => runTodayLadder(st, id), 80); }
+    return card;
+  }
+  async function runTodayLadder(st, id) {
+    if (todayStage() !== st || st.ids[st.pos] !== id) return;
+    stopPlayback();
+    const ok = await playRates(id, ladderRates());
+    // 끝까지 들었을 때만 자막·뜻을 연다. 중간에 끊겼으면(재생 실패 등) 감춘 채 두어 Space 로 다시 들을 수 있다
+    if (todayStage() === st && st.ids[st.pos] === id && ok && st.finishedFor !== id) { st.finishedFor = id; render(); }
+  }
+  function todayLadderNext(st) {
+    if (todayStage() !== st) return;
+    stopPlayback();
+    state.today.done.ladder++;
+    st.pos++;
+    if (st.pos >= st.ids.length) nextTodayStage(); else render();
+  }
+  // 더빙 권유: 플레이어 탭에서 그 줄의 더빙 칸(R)을 바로 연다
+  function todayDubCard(st) {
+    const it = state.items.find((i) => i.id === st.id);
+    return el('div', { class: 'quiz-card today-dub' }, [
+      el('div', { class: 'quiz-top' }, [el('span', null, it ? it.title + (it.episode ? ' · ' + it.episode : '') : ''), el('span', null, '마지막 단계')]),
+      el('h3', { class: 'today-dub-title' }, ['오늘의 더빙 한 구간', infoBtn('dub')]),
+      it ? el('div', { class: 'answer en', text: it.text }) : el('p', null, '더빙할 문장이 없습니다'),
+      it && it.translation ? el('div', { class: 'ko', text: it.translation }) : null,
+      el('p', { class: 'step-desc' }, '플레이어에서 이 줄의 더빙 칸이 열립니다: ① 배속 연습(J) → ② 녹음(K) → 내 목소리로 다시 보기. 하고 나서 여기로 돌아와 마치세요.'),
+      el('div', { class: 'quiz-actions' }, [
+        it ? el('button', { class: 'btn primary today-dub-open', onclick: () => openTodayDub(st, it) }, '🎙 플레이어에서 더빙하기 ↗') : null,
+        el('button', { class: 'btn today-finish', onclick: () => nextTodayStage() }, '오늘의 훈련 마치기'),
+      ]),
+      el('div', { class: 'count today-dub-state' }, st.msg || ''),
+    ]);
+  }
+  async function openTodayDub(st, it) {
+    stopPlayback();
+    st.msg = '플레이어 여는 중…';
+    render();
+    try {
+      const r = await B.request('item.dub', { itemId: it.id }, 60000);
+      if (r && r.ok) { state.today.done.dub = 1; st.msg = '플레이어에서 더빙 칸을 열었습니다 (플레이어 탭을 보세요)'; } else st.msg = '열지 못했습니다: ' + ((r && r.error) || '');
+    } catch (e) { st.msg = '열지 못했습니다: ' + e.message; }
+    if (todayStage() === st) render();
+  }
+  async function finishToday() {
+    const t = state.today;
+    if (!t || t.finished) return;
+    t.finished = true;
+    t.endedAt = Date.now();
+    stopPlayback();
+    const data = { dict: t.done.dict, words: t.done.words, ladder: t.done.ladder, dub: t.done.dub, minutes: Math.max(1, Math.round((t.endedAt - t.startedAt) / 60000)), planned: t.plan.counts };
+    try {
+      const r = await B.request('stats.training', { day: dayKey(new Date()), data });
+      if (r && r.training) { state.stats = state.stats || {}; state.stats.training = r.training; }
+    } catch (e) { toast('훈련 기록을 저장하지 못했습니다: ' + e.message); }
+    render();
+  }
+  function todaySummary() {
+    const t = state.today;
+    const s = trainingStreak();
+    const num = (n, label) => el('div', null, [el('b', null, String(n)), label]);
+    return el('div', { class: 'quiz-card summary today-summary' }, [
+      el('h2', null, '오늘의 훈련 끝! 🎉'),
+      el('div', { class: 'nums' }, [num(t.done.dict, '받아쓰기'), num(t.done.words, '단어 카드'), num(t.done.ladder, 'Q 문장 사다리'), num(t.done.dub ? '✓' : '–', '더빙')]),
+      el('p', { class: 'today-streak-big' }, '🔥 ' + s.n + '일 연속' + (ddayText() ? ' · ' + ddayText() : '')),
+      el('p', { class: 'count' }, '매일 짧게 나눠 하는 것이 몰아서 하는 것보다 듣기 발달에 좋습니다 (ⓘ).'),
+      el('div', { class: 'row', style: 'display:flex;gap:10px;justify-content:center' }, [
+        el('button', { class: 'btn primary big', onclick: () => { state.today = null; location.hash = '#/list'; } }, '목록으로'),
+        el('button', { class: 'btn big', onclick: () => { state.today = null; location.hash = '#/settings'; } }, '진행 상황 보기'),
+      ]),
+    ]);
+  }
+  document.addEventListener('keydown', (e) => {
+    const st = todayStage();
+    if (state.view !== 'today' || !st || st.kind !== 'ladder') return;
+    if (e.ctrlKey || e.metaKey || e.altKey || isEditable(e.target)) return;
+    if (e.code === 'KeyN' || e.code === 'Enter') { e.preventDefault(); todayLadderNext(st); }
+    else if (e.code === 'Space') { e.preventDefault(); runTodayLadder(st, st.ids[st.pos]); }
+  });
+
   // ───────── 시작 ─────────
   window.__subtutorDebug = { get state() { return state; }, log: [] }; // 테스트·진단용
   async function init() {
@@ -1711,13 +2414,13 @@
     await B.waitReady(2000);
     state.extOk = B.detect();
     renderExtStatus();
-    B.on('ready', () => { if (!state.extOk) { state.extOk = true; renderExtStatus(); loadItems(); loadWords(); } });
+    B.on('ready', () => { if (!state.extOk) { state.extOk = true; renderExtStatus(); loadStats().then(() => loadItems()); loadWords(); } });
     B.on('items.changed', () => loadItems());
     B.on('words.changed', () => loadWords());
     setInterval(updateWordCount, 60000);
     $('#info-close').addEventListener('click', () => $('#info-dialog').close());
     $('#info-dialog').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
-    if (state.extOk) { await loadWebPrefs(); await loadTagNames(); await loadWords(); await loadItems(true); } else render();
+    if (state.extOk) { await loadWebPrefs(); await loadTagNames(); await loadWords(); await loadStats(); await loadItems(true); } else render();
   }
   init();
 })();
