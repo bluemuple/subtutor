@@ -5,6 +5,128 @@ import SwiftUI
 
 func rateText(_ r: Double) -> String { abs(r - 1) < 0.001 ? "1" : String(format: "%g", r) }
 
+// 펼치기: 내용의 실제 높이를 재 두고 0 ↔ 그 높이로 바꿔, 위는 그대로 두고 아래로 커튼처럼 펼치고 위로 접는다
+// (목록 행 안에서 if 로 넣고 빼면 행 높이가 바뀌는 동안 내용이 가운데 기준으로 움직여 위·아래 줄과 겹쳐 보인다)
+private struct HeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+struct Reveal<Content: View>: View {
+    let open: Bool
+    @ViewBuilder let content: Content
+    @State private var height: CGFloat = 0
+    var body: some View {
+        content
+            .fixedSize(horizontal: false, vertical: true)
+            .background(GeometryReader { g in Color.clear.preference(key: HeightKey.self, value: g.size.height) })
+            .onPreferenceChange(HeightKey.self) { height = $0 }
+            .frame(height: open ? height : 0, alignment: .top)
+            .clipped()
+            .opacity(open ? 1 : 0)
+            .accessibilityHidden(!open)
+    }
+}
+
+// 작품으로 거르기: 한 작품의 모든 회차, 또는 한 회차 (Work.id = 제목 + \u{1} + 회차)
+enum WorkFilter: Equatable {
+    case title(String)
+    case work(String)
+    func matches(_ it: Item) -> Bool {
+        switch self {
+        case .title(let t): return it.title == t
+        case .work(let id): return it.title + "\u{1}" + it.episode == id
+        }
+    }
+}
+
+extension View {
+    // 아이폰에서도 시트가 아니라 말풍선(드롭다운)으로 띄운다
+    @ViewBuilder func popoverOnPhone() -> some View {
+        if #available(iOS 16.4, *) { self.presentationCompactAdaptation(.popover) } else { self }
+    }
+}
+
+// 작품 고르기 드롭다운: 맨 위 "전체 작품", 그 아래 작품명(최근 저장 순). 회차가 여럿인 작품은 누르면 그 아래로
+// "이 작품 전체"와 시즌·회차가 펼쳐지고, 다시 누르면 접힌다. 회차가 하나뿐인 작품은 누르면 바로 고른다
+struct WorkPicker: View {
+    @EnvironmentObject var store: Store
+    @Binding var selection: WorkFilter?
+    let done: () -> Void
+    @State private var expanded: Set<String> = []
+
+    private struct TitleGroup: Identifiable {
+        let id: String          // 작품명
+        let works: [Work]       // 회차들 (시즌·회차 순)
+        var count: Int { works.reduce(0) { $0 + $1.items.count } }
+    }
+    private var groups: [TitleGroup] {
+        var byTitle: [String: [Work]] = [:]
+        for w in Store.group(store.items) { byTitle[w.title, default: []].append(w) }
+        return byTitle.map { t, ws in TitleGroup(id: t, works: ws.sorted { $0.episode.localizedStandardCompare($1.episode) == .orderedAscending }) }
+            .sorted { ($0.works.map(Store.latest).max() ?? 0) > ($1.works.map(Store.latest).max() ?? 0) }
+    }
+
+    var body: some View {
+        let gs = groups
+        let rows = 1 + gs.count + gs.filter { expanded.contains($0.id) }.reduce(0) { $0 + 1 + $1.works.count }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                row("전체 작품", count: store.items.count, on: selection == nil, indent: false) { pick(nil) }
+                ForEach(gs) { g in
+                    Divider()
+                    if g.works.count == 1, let w = g.works.first {
+                        row(g.id + (w.episode.isEmpty ? "" : " · " + w.episode), count: g.count, on: selection == .work(w.id) || selection == .title(g.id), indent: false) { pick(.work(w.id)) }
+                    } else {
+                        Button { withAnimation(.easeInOut(duration: 0.2)) { toggle(g.id) } } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(Color.accentColor)
+                                    .opacity(selection == .title(g.id) || g.works.contains { selection == .work($0.id) } ? 1 : 0)   // 접혀 있어도 이 안을 골랐으면 표시
+                                Text(g.id).lineLimit(1)
+                                Text("\(g.works.count)회차").font(.caption).foregroundStyle(.secondary)
+                                Spacer()
+                                Text("\(g.count)").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                                Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.secondary)
+                                    .rotationEffect(.degrees(expanded.contains(g.id) ? 90 : 0))
+                            }
+                            .padding(.horizontal, 14).padding(.vertical, 11)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint(expanded.contains(g.id) ? "회차 접기" : "회차 펼치기")
+                        if expanded.contains(g.id) {
+                            row("이 작품 전체", count: g.count, on: selection == .title(g.id), indent: true) { pick(.title(g.id)) }
+                            ForEach(g.works) { w in
+                                row(w.episode.isEmpty ? "(회차 없음)" : w.episode, count: w.items.count, on: selection == .work(w.id), indent: true) { pick(.work(w.id)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 300, height: min(460, CGFloat(rows) * 43 + 8))
+        .onAppear {   // 지금 고른 회차가 들어 있는 작품은 펼쳐 둔다
+            if case .work(let id)? = selection, let t = id.components(separatedBy: "\u{1}").first { expanded.insert(t) }
+            if case .title(let t)? = selection { expanded.insert(t) }
+        }
+    }
+
+    private func row(_ title: String, count: Int, on: Bool, indent: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(Color.accentColor).opacity(on ? 1 : 0)
+                Text(title).lineLimit(1)
+                Spacer()
+                Text("\(count)").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            }
+            .padding(.leading, indent ? 30 : 14).padding(.trailing, 14).padding(.vertical, 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+    private func toggle(_ t: String) { if expanded.contains(t) { expanded.remove(t) } else { expanded.insert(t) } }
+    private func pick(_ f: WorkFilter?) { selection = f; done() }
+}
+
 // 화면에 띄우는 시트는 하나로 (같은 화면에 .sheet 를 둘 달면 서로 막아 안 열리는 일이 있다)
 enum ActiveSheet: Identifiable {
     case settings
@@ -23,6 +145,8 @@ struct RootView: View {
     @State private var sheet: ActiveSheet?
     @State private var query = ""
     @State private var tagFilter: String?      // nil = 전체
+    @State private var workFilter: WorkFilter? // nil = 전체 작품
+    @State private var showWorkPicker = false
 
     var body: some View {
         NavigationStack {
@@ -127,7 +251,7 @@ struct RootView: View {
         return List {
             Section { filterBar }
             if sections.isEmpty {
-                Text(query.isEmpty ? "이 태그가 붙은 대사가 없습니다" : "찾는 대사가 없습니다").foregroundStyle(.secondary)
+                Text(query.isEmpty ? "고른 작품·태그에 맞는 대사가 없습니다" : "찾는 대사가 없습니다").foregroundStyle(.secondary)
             }
             ForEach(sections) { work in
                 Section {
@@ -156,6 +280,18 @@ struct RootView: View {
                         .font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
                         .background(Capsule().fill(Color.secondary.opacity(0.15)))
                 }
+                Button { showWorkPicker = true } label: {
+                    Label(workLabel, systemImage: "film").lineLimit(1).frame(maxWidth: 190)
+                        .font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
+                        .foregroundStyle(workFilter == nil ? Color.primary : Color.white)
+                        .background(Capsule().fill(workFilter == nil ? Color.secondary.opacity(0.15) : Color.indigo))
+                }
+                .buttonStyle(.borderless)
+                .popover(isPresented: $showWorkPicker, arrowEdge: .top) {
+                    WorkPicker(selection: $workFilter) { showWorkPicker = false }
+                        .environmentObject(store)
+                        .popoverOnPhone()
+                }
                 chip("전체 \(store.items.count)", on: tagFilter == nil) { tagFilter = nil }
                 ForEach(store.allTags, id: \.self) { t in
                     chip("#\(t) \(store.tagCount(t))", on: tagFilter == t) { tagFilter = (tagFilter == t ? nil : t) }
@@ -167,6 +303,15 @@ struct RootView: View {
             .padding(.vertical, 2)
         }
         .listRowSeparator(.hidden)
+    }
+    private var workLabel: String {
+        switch workFilter {
+        case nil: return "전체 작품"
+        case .title(let t)?: return t
+        case .work(let id)?:
+            let parts = id.components(separatedBy: "\u{1}")
+            return parts[0] + (parts.count > 1 && !parts[1].isEmpty ? " · " + parts[1] : "")
+        }
     }
     private func chip(_ title: String, on: Bool, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -182,6 +327,7 @@ struct RootView: View {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let list = store.items.filter { it in
             if let t = tagFilter, !it.tags.contains(t) { return false }
+            if let w = workFilter, !w.matches(it) { return false }
             if q.isEmpty { return true }
             return [it.text, it.translation, it.comment, it.title, it.episode, it.tags.joined(separator: " ")]
                 .contains { $0.lowercased().contains(q) }
@@ -279,7 +425,7 @@ struct ItemRow: View {
                         savedBadge
                         if item.missed { Text("Q").font(.caption2.bold()).foregroundStyle(.red) }
                         if !memo.isEmpty {
-                            Button { withAnimation { showMemo.toggle() } } label: {
+                            Button { withAnimation(.easeInOut(duration: 0.25)) { showMemo.toggle() } } label: {
                                 Image(systemName: "note.text").foregroundStyle(showMemo ? Color.yellow : Color.secondary)
                             }
                             .buttonStyle(.borderless)
@@ -287,18 +433,22 @@ struct ItemRow: View {
                         }
                         recControls
                     }
-                    if showMemo && !memo.isEmpty {
-                        Text(memo).font(.subheadline)
-                            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.yellow.opacity(0.14)))
-                    }
-                    if showCheck, let last = recorder.takes(item).last, let r = recorder.result(for: last) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("들린 문장: " + r.heard).font(.caption)
-                            if !r.missed.isEmpty { Text("놓친 단어: " + r.missed.joined(separator: ", ")).font(.caption).foregroundStyle(.red) }
+                    if !memo.isEmpty {
+                        Reveal(open: showMemo) {
+                            Text(memo).font(.subheadline)
+                                .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.yellow.opacity(0.14)))
                         }
-                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.12)))
+                    }
+                    if let last = recorder.takes(item).last, let r = recorder.result(for: last) {
+                        Reveal(open: showCheck) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("들린 문장: " + r.heard).font(.caption)
+                                if !r.missed.isEmpty { Text("놓친 단어: " + r.missed.joined(separator: ", ")).font(.caption).foregroundStyle(.red) }
+                            }
+                            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.12)))
+                        }
                     }
                 }
             }
@@ -307,6 +457,8 @@ struct ItemRow: View {
             .onLongPressGesture { revealText = true; revealKo = true }
         }
         .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)   // 행 높이가 바뀌는 동안 내용은 위에 붙어 있게
+        .clipped()                                                                     // 바뀌는 동안 위·아래 줄로 넘쳐 그리지 않게
         .listRowBackground(isCurrent ? Color.accentColor.opacity(0.12) : nil)
     }
 
@@ -392,7 +544,7 @@ struct ItemRow: View {
                 if recorder.checking.contains(last) {
                     ProgressView().controlSize(.mini)
                 } else if let r = recorder.result(for: last) {
-                    Button { withAnimation { showCheck.toggle() } } label: {
+                    Button { withAnimation(.easeInOut(duration: 0.25)) { showCheck.toggle() } } label: {
                         Text("\(r.score)%").font(.caption2.bold()).foregroundStyle(.white)
                             .padding(.horizontal, 5).padding(.vertical, 2)
                             .background(Capsule().fill(r.score >= 80 ? Color.green : (r.score >= 50 ? Color.orange : Color.red)))
