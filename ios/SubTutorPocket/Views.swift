@@ -1,14 +1,22 @@
 // SubTutor Pocket – 화면: 작품별 대사 목록(탭 = 받아서 재생, Saved 아이콘, 🎙 녹음, 같이 듣기),
 // 상단 바(앱 아이콘 · ⬇ 전체 다운로드 · 자막/뜻 가림 · 반복 토글(길게 = 재생 속도) · 설정), 검색 · 정렬 · 태그,
-// 대사별 속도 사다리 · 메모 펼치기 · 발음 확인, 하단 연속 듣기 막대, 설정(동기화)
+// 대사별 속도 사다리 · 메모 펼치기 · 발음 확인, 하단 연속 듣기 막대, 아래로 당기면 동기화, 설정(동기화)
 import SwiftUI
 import UIKit
 
-// 손끝 진동: 재생·사다리·메모·녹음·같이 듣기·반복·알아요
+// 손끝 진동: 재생·사다리·메모·녹음·같이 듣기·반복·알아요·가림 보기·당겨서 동기화
 enum Haptic {
     static func tap() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
     static func press() { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
     static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+    static func error() { UINotificationFeedbackGenerator().notificationOccurred(.error) }
+}
+
+// 당겨서 동기화한 결과를 목록 위에 잠깐 띄운다
+struct Toast: Equatable {
+    let id = UUID()
+    let text: String
+    let ok: Bool
 }
 
 func rateText(_ r: Double) -> String { abs(r - 1) < 0.001 ? "1" : String(format: "%g", r) }
@@ -157,12 +165,14 @@ struct RootView: View {
     @State private var workFilter: WorkFilter? // nil = 전체 작품
     @State private var showKnown = false       // ✓ 알아요 칩: 알아요로 옮긴 대사만 (평소에는 숨김)
     @State private var showWorkPicker = false
+    @State private var toast: Toast?
 
     var body: some View {
         NavigationStack {
             Group {
                 if store.items.isEmpty { emptyView } else { listView }
             }
+            .overlay(alignment: .top) { toastView }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -247,15 +257,68 @@ struct RootView: View {
     }
 
     private var emptyView: some View {
-        VStack(spacing: 14) {
-            Image("Logo").resizable().frame(width: 72, height: 72)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            Text("아직 받아 온 대사가 없습니다").font(.headline)
-            Text("맥의 SubTutor 웹 › 설정 › 아이폰 동기화에서 회원가입한 뒤,\n여기 설정에서 같은 이메일·비밀번호로 로그인하면 자동으로 받아 옵니다.")
-                .multilineTextAlignment(.center).font(.subheadline).foregroundStyle(.secondary)
-            Button("설정 열기") { sheet = .settings }.buttonStyle(.borderedProminent)
+        GeometryReader { geo in
+            ScrollView {   // 비어 있어도 아래로 당겨 다시 받을 수 있게
+                VStack(spacing: 14) {
+                    Image("Logo").resizable().frame(width: 72, height: 72)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    Text("아직 받아 온 대사가 없습니다").font(.headline)
+                    Text(store.signedIn
+                         ? "맥의 SubTutor 웹(같은 계정)에서 대사가 올라간 뒤\n화면을 아래로 당기면 받아 옵니다."
+                         : "맥의 SubTutor 웹 › 설정 › 아이폰 동기화에서 회원가입한 뒤,\n여기 설정에서 같은 이메일·비밀번호로 로그인하면 자동으로 받아 옵니다.")
+                        .multilineTextAlignment(.center).font(.subheadline).foregroundStyle(.secondary)
+                    Button("설정 열기") { sheet = .settings }.buttonStyle(.borderedProminent)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, minHeight: geo.size.height)
+            }
+            .refreshable { await pullSync() }
         }
-        .padding()
+    }
+
+    // 목록을 아래로 당기면: 바로 동기화 (켤 때 자동 동기화가 돌고 있으면 그것이 끝난 뒤 한 번 더). 끝나면 진동 + 결과를 위에 잠깐
+    // 당기는 동안 화면이 다시 그려지면 SwiftUI 가 당기기 작업을 취소해 요청이 끊기므로(-999) 동기화는 따로 떼어 끝까지 돌린다
+    private func pullSync() async {
+        await Task { await runPullSync() }.value
+    }
+
+    private func runPullSync() async {
+        guard store.signedIn else {
+            Haptic.error()
+            showToast("로그인해야 동기화할 수 있습니다 — ⚙ 설정에서 로그인", ok: false)
+            return
+        }
+        Haptic.tap()
+        while store.syncing { try? await Task.sleep(nanoseconds: 200_000_000) }
+        let ok = await store.sync()
+        if ok { Haptic.success() } else { Haptic.error() }
+        showToast(store.syncStatus, ok: ok)
+        playLog.info("pull sync ok=\(ok)")
+    }
+
+    private func showToast(_ text: String, ok: Bool) {
+        let t = Toast(text: text, ok: ok)
+        withAnimation(.easeOut(duration: 0.2)) { toast = t }
+        DispatchQueue.main.asyncAfter(deadline: .now() + (ok ? 2.5 : 4)) {   // 실패는 조금 더 오래 (눌러서 바로 닫을 수도 있다)
+            if toast == t { withAnimation(.easeIn(duration: 0.2)) { toast = nil } }
+        }
+    }
+
+    @ViewBuilder private var toastView: some View {
+        if let t = toast {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: t.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(t.ok ? Color.green : Color.orange)
+                Text(t.text).foregroundStyle(.primary)
+            }
+            .font(.footnote)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.regularMaterial))
+            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            .padding(.horizontal, 16).padding(.top, 6)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .onTapGesture { withAnimation(.easeIn(duration: 0.2)) { toast = nil } }
+        }
     }
 
     private var listView: some View {
@@ -284,6 +347,7 @@ struct RootView: View {
             }
         }
         .listStyle(.plain)
+        .refreshable { await pullSync() }
     }
 
     // 목록 위: 정렬 · 태그로 거르기
@@ -403,7 +467,7 @@ struct WorkHeader: View {
     }
 }
 
-// 대사 한 줄: 탭 = 재생(저장 안 돼 있으면 받아서 재생·저장) · 계단 = 속도 사다리 · Saved · 태그 · 메모 · 🎙 녹음 · 발음 확인 · 같이 듣기
+// 대사 한 줄: 탭 = 재생(저장 안 돼 있으면 받아서 재생·저장) · 길게 = 가린 자막·뜻 보기/다시 가리기 · 계단 = 속도 사다리 · Saved · 태그 · 메모 · 🎙 녹음 · 발음 확인 · 같이 듣기
 struct ItemRow: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var player: Player
@@ -442,7 +506,7 @@ struct ItemRow: View {
                     if !item.translation.isEmpty {
                         if store.veilKo && !revealKo {
                             Text("뜻 가림").font(.caption2).foregroundStyle(.tertiary).italic()
-                                .onTapGesture { revealKo = true }
+                                .onTapGesture { Haptic.tap(); revealKo = true }
                         } else {
                             Text(item.translation).font(.subheadline).foregroundStyle(.orange)
                         }
@@ -486,12 +550,26 @@ struct ItemRow: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { tapPlay() }
-            .onLongPressGesture { revealText = true; revealKo = true }
+            .onLongPressGesture { toggleReveal() }
         }
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)   // 행 높이가 바뀌는 동안 내용은 위에 붙어 있게
         .clipped()                                                                     // 바뀌는 동안 위·아래 줄로 넘쳐 그리지 않게
         .listRowBackground(isCurrent ? Color.accentColor.opacity(0.12) : nil)
+        .onChange(of: store.veilText) { _ in revealText = false; revealKo = false }   // 가리기 설정을 바꾸면 열어 둔 대사도 처음 상태로 (웹과 같게)
+        .onChange(of: store.veilKo) { _ in revealText = false; revealKo = false }
+    }
+
+    // 길게 누르기: 가려 둔 자막·뜻을 보이고, 다시 길게 누르면 도로 가린다 (가리기가 꺼져 있으면 아무 일도 없다)
+    private func toggleReveal() {
+        let veilText = store.veilText
+        let veilKo = store.veilKo && !item.translation.isEmpty
+        guard veilText || veilKo else { return }
+        let show = (veilText && !revealText) || (veilKo && !revealKo)   // 하나라도 가려져 있으면 모두 보이게
+        Haptic.press()
+        revealText = show
+        revealKo = show
+        playLog.info("reveal \(show ? "show" : "hide", privacy: .public)")
     }
 
     // 펼치기·접기: 칸 높이는 애니메이션 없이 바로 바꾼다 — 목록 행은 높이가 애니메이션되는 동안 내용을 가운데 기준으로 다시 맞춰
@@ -740,7 +818,7 @@ struct SettingsView: View {
                     }
                     if !store.syncStatus.isEmpty { Text(store.syncStatus).font(.footnote).foregroundStyle(.secondary) }
                     if let t = store.lastSyncAt { Text("마지막 동기화: \(t.formatted(date: .abbreviated, time: .shortened))").font(.footnote).foregroundStyle(.secondary) }
-                    Text("한 번 로그인하면 유지되고, 앱을 켤 때마다 자동으로 동기화합니다 (10분에 한 번).").font(.footnote).foregroundStyle(.secondary)
+                    Text("한 번 로그인하면 유지되고, 앱을 켤 때마다 자동으로 동기화합니다 (10분에 한 번). 목록을 아래로 당기면 바로 동기화합니다.").font(.footnote).foregroundStyle(.secondary)
                     if store.signedIn { Button("로그아웃", role: .destructive) { store.signOut() } }
                 }
                 Section("오디오 내려받기") {
@@ -785,11 +863,15 @@ struct SettingsView: View {
                 } header: {
                     Text("말하기 연습")
                 } footer: {
-                    Text("🎙 로 녹음을 마치면 iOS 음성 인식이 내 발음을 영어로 받아 적어 원래 대사와 비교합니다 — 녹음 옆 숫자(%)를 누르면 들린 문장과 놓친 단어가 보입니다. 가능하면 기기 안에서(인터넷 없이) 인식합니다.\n한→영 말하기: 위 눈 아이콘으로 영어 자막을 가리고 \"뜻\"을 켜 두면, 한국어 뜻만 보고 영어로 말해 본 뒤 길게 눌러 확인할 수 있습니다.")
+                    Text("🎙 로 녹음을 마치면 iOS 음성 인식이 내 발음을 영어로 받아 적어 원래 대사와 비교합니다 — 녹음 옆 숫자(%)를 누르면 들린 문장과 놓친 단어가 보입니다. 가능하면 기기 안에서(인터넷 없이) 인식합니다.\n한→영 말하기: 위 눈 아이콘으로 영어 자막을 가리고 \"뜻\"을 켜 두면, 한국어 뜻만 보고 영어로 말해 본 뒤 길게 눌러 확인하고, 다시 길게 누르면 도로 가려집니다.")
                 }
-                Section("표시") {
-                    Toggle("자막 가리기 (길게 눌러 보기)", isOn: $store.veilText)
-                    Toggle("뜻 가리기 (눌러서 보기)", isOn: $store.veilKo)
+                Section {
+                    Toggle("자막 가리기", isOn: $store.veilText)
+                    Toggle("뜻 가리기", isOn: $store.veilKo)
+                } header: {
+                    Text("표시")
+                } footer: {
+                    Text("가린 대사를 길게 누르면 자막과 뜻이 보이고, 다시 길게 누르면 도로 가려집니다(누를 때 진동). \"뜻 가림\"은 눌러서 뜻만 볼 수도 있습니다. 가리기를 다시 켜면 열어 둔 대사도 모두 다시 가려집니다.")
                 }
                 Section("저장소") {
                     LabeledContent("대사", value: "\(store.items.count)개 (소리 저장 \(store.audioCount)개)")

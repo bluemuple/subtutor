@@ -201,8 +201,9 @@ final class Store: ObservableObject {
     }
 
     // 목록만 받는다 (가볍게). 소리(MP3)는 목록의 다운로드 버튼(전체·작품별)이나 대사를 눌렀을 때 받아 저장한다
-    func sync() async {
-        guard !syncing else { return }
+    @discardableResult
+    func sync() async -> Bool {
+        guard !syncing else { return false }
         syncing = true
         defer { syncing = false }
         saveSettings()
@@ -215,14 +216,18 @@ final class Store: ObservableObject {
                 if let t = e.tags { fetched[i].tags = t }
                 if let b = e.box { fetched[i].box = b }
             }
+            let before = Set(items.map(\.id))
             items = fetched.sorted { $0.savedAt > $1.savedAt }
             persist()
             lastSyncAt = Date()
             UserDefaults.standard.set(lastSyncAt, forKey: "lastSyncAt")
             let need = items.filter { $0.hasAudio && !hasLocalAudio($0) }.count
-            syncStatus = "목록 동기화 끝 — 대사 \(items.count)개" + (need > 0 ? " · 안 받은 소리 \(need)개 (⬇ 전체/작품별 다운로드)" : "")
+            let added = items.filter { !before.contains($0.id) }.count
+            syncStatus = "목록 동기화 끝 — 대사 \(items.count)개" + (added > 0 ? " (새 \(added)개)" : "") + (need > 0 ? " · 안 받은 소리 \(need)개 (⬇ 전체/작품별 다운로드)" : "")
+            return true
         } catch {
             syncStatus = "동기화 실패: \(Supa.describe(error))"
+            return false
         }
     }
 
