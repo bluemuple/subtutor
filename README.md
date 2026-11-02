@@ -1,11 +1,28 @@
 # SubTutor – 자막 튜터
 
-넷플릭스·유튜브·프라임 비디오(디즈니+는 실험적) 자막으로 영어를 공부하는 크롬 확장 프로그램과, 저장한 자막을 복습하는 웹사이트입니다. Language Reactor와 비슷한 흐름을 개인용으로 만든 것입니다.
+넷플릭스·유튜브·프라임 비디오·디즈니+(실험적)와 뉴질랜드 사이트(TVNZ+·ThreeNow·NZ On Screen·MĀORI+), TED·Vimeo, 그리고 사용자가 켠 아무 영상 사이트의 자막으로 영어를 공부하는 크롬 확장 프로그램과, 저장한 자막을 복습하는 웹사이트입니다. Language Reactor와 비슷한 흐름을 개인용으로 만든 것입니다.
 
 > **코드를 고친 뒤에는** `chrome://extensions` 에서 SubTutor 카드의 새로고침(↻) 버튼을 누르고, 열려 있던 넷플릭스/유튜브 탭을 새로고침해야 새 코드가 적용됩니다. 압축해제된 확장 프로그램은 자동으로 갱신되지 않습니다.
 
 - 웹사이트(저장 목록 · 코멘트 · 녹음 · 받아쓰기 퀴즈): **https://bluemuple.github.io/subtutor/**
 - 확장 프로그램: 이 저장소의 `extension/` 폴더 (크롬에 "압축해제된 확장 프로그램"으로 설치)
+
+## 지원 사이트 (v1.15)
+
+| 사이트 | 자막을 읽는 곳 | 확인 |
+|---|---|---|
+| 넷플릭스 · 유튜브 · 프라임 비디오 · 디즈니+ | 사이트별 전용 방식 | 실제 사이트 (디즈니+ 는 실험적) |
+| **TVNZ+** (tvnz.co.nz) | 플레이어가 받는 DASH 재생 목록(MPD)의 wvtt 자막 조각. 광고가 영상에 이어 붙어 있어(SSAI) 기간(Period)으로 **광고를 뺀 본편 시간**을 계산한다 | 실제 TVNZ+ 에서 TVNZ 자체 자막과 21/23 순간 일치 (2026-11-02, 어긋난 2번은 자막이 바뀌는 0.25초 경계) |
+| **NZ On Screen** (nzonscreen.com) | Brightcove 재생 정보(JSON)의 WebVTT | 실제 페이지에서 자막 파일 구조 확인 |
+| **TED** (ted.com) | 플레이어가 받는 언어별 통째 자막 파일 (영어·한국어만 고른다) | 실제 페이지에서 구조 확인 |
+| **Vimeo** (vimeo.com) | `<track>` 요소의 WebVTT | 실제 페이지에서 구조 확인 |
+| **ThreeNow** · **MĀORI+** | 위의 일반 방식(재생 목록·자막 파일·Brightcove·JSON 안 자막 주소·텍스트 트랙) | 로그인이 필요해 실제로는 확인 못 함 |
+| **아무 사이트** | 그 사이트에서 툴바 아이콘(팝업) → "이 사이트에서 SubTutor 켜기" (크롬이 그 사이트 접근 권한을 묻는다). "이 사이트 목록에서 빼기"로 되돌린다 | 등록 방식만 E2E 로 확인 |
+
+- 모든 사이트에서 **재생 화면에 ST 켜기/끄기 버튼**이 붙는다: TVNZ+ 는 오른쪽 묶음의 전체 화면 버튼 왼쪽(컨트롤이 숨었다 다시 생기면 다시 붙인다), video.js(Brightcove) 는 컨트롤 바의 전체 화면 버튼 왼쪽, 그 밖은 영상 플레이어 안의 전체 화면 버튼 왼쪽. 자리를 못 찾으면 **영상 왼쪽 위에 떠 있는 ST 버튼**(꺼도 남아 있어 다시 켤 수 있다).
+- 사이트 자체 자막(Shaka·video.js·JW·Vimeo 등)은 숨기고, 페이지 안에 놓인 플레이어는 페이지를 패널 왼쪽까지로 줄인다.
+- TVNZ+ 광고 중에는 영상 위 자막을 감추고 더빙을 멈춘다. 줄 이동·반복·저장한 대사의 웹 재생은 모두 본편 시간 기준이라 광고를 건너뛴 자리로 간다.
+- 팝업의 "지원 사이트"에서 각 사이트를 열 수 있다.
 
 ## 듣기 훈련 기능 (v1.5, 연구 근거는 각 기능의 ⓘ 에)
 
@@ -119,6 +136,8 @@ extension/
   src/page/prime-page.js     프라임 비디오: 재생 리소스 JSON의 subtitleUrls 수집, 제목 조회
   src/page/youtube-page.js   유튜브: 플레이어 응답의 captionTracks(json3) + 자동 번역 트랙, 제목/채널
   src/page/disney-page.js    디즈니+: HLS 마스터 플레이리스트 URL·제목 수집, React 트리에서 플레이어 객체를 찾아 실제 콘텐츠 시간으로 제어
+  src/page/generic-page.js   범용 사이트(TVNZ+·NZ On Screen·TED·Vimeo·사용자가 켠 사이트): 플레이어가 받는 MPD·HLS·자막 파일·Brightcove/JW/Vimeo JSON·TVNZ 카탈로그를 함께 읽는다
+  src/lib/sites.js           범용 사이트 목록과 주소 → 영상 ID 규칙 (콘텐츠 스크립트·서비스 워커·팝업 공용)
   src/content/adapters.js    플랫폼별 video 요소/시간/탐색/네이티브 자막 숨기기 어댑터
   src/content/content.js     패널·오버레이(화면 고정, video 사각형 추적)·단축키·반복·AP·쉐도잉·저장·오디오 캡처·원격 재생·시간 보정
   src/lib/audio.js           PCM 자르기, 벽시계↔영상시간 맞추기, 리샘플, MP3(lamejs)/WAV 인코딩
@@ -126,7 +145,7 @@ extension/
   src/lib/fs.js              오디오 저장 폴더 핸들(File System Access) 보관·권한 확인·파일 쓰기 (서비스 워커/팝업/설정 페이지 공용)
   options/                   설정 페이지: 저장 폴더 선택, 권한 허용, "다시 묻지 않게 고정"(매번 허용) 안내
   vendor/lamejs/             LAME MP3 인코더의 자바스크립트 포팅 (LGPL, 오디오 저장에만 사용)
-  src/lib/subtitles.js       WebVTT/SRT/TTML(DFXP·IMSC) 파서, HLS 세그먼트 병합, 영↔한 타이밍 병합, 받아쓰기 비교
+  src/lib/subtitles.js       WebVTT/SRT/TTML(DFXP·IMSC) 파서, HLS 세그먼트 병합, DASH(MPD) 기간·광고 표와 MP4 자막(wvtt·stpp), 영↔한 타이밍 병합, 받아쓰기 비교
   src/background.js          저장 데이터 관리, 기계 번역(캐시), 플레이어 탭 찾기/열기, 웹 ↔ 플레이어 원격 재생 중계
   src/content/bridge.js      웹사이트와 확장 프로그램을 잇는 브리지
 docs/                        GitHub Pages 웹사이트 (정적, 빌드 없음)
@@ -142,13 +161,14 @@ tests/                       파서 단위 테스트, 모의 넷플릭스 + 실�
 ## 개발 · 테스트
 
 ```bash
-npm test                      # 파서·오디오·어휘(단어 목록)·디즈니+ 시계 단위 테스트 (node --test, ffprobe 필요)
+npm test                      # 파서·오디오·어휘(단어 목록)·디즈니+ 시계·DASH/MP4 자막·사이트 주소 규칙 단위 테스트 (node --test, ffprobe 필요)
 npm run sync-lib              # extension/src/lib/subtitles.js → docs/subtitles.js 복사 (둘은 같은 파일이어야 함)
 # E2E: Chrome for Testing(puppeteer) + 실제 확장 프로그램 + 모의 넷플릭스(https://www.netflix.com → 127.0.0.1:8443) + 웹사이트(localhost:8766)
 npm i -D puppeteer            # 최초 1회 (Chrome for Testing 내려받음)
 openssl req -x509 -newkey rsa:2048 -nodes -keyout tests/e2e/.tmp/key.pem -out tests/e2e/.tmp/cert.pem -days 60 -subj "/CN=www.netflix.com"
-npm run e2e                   # 81개 시나리오: 에피소드 전환· 모의 디즈니+(계단식 재생 위치·잦은 미세 이동·플레이어 이벤트 없음·실제처럼 탐색마다 시계가 바뀜(녹음 → 다음 줄 반복)·더빙 녹음 연속성·되감기 없음·자동 별표·새로고침 뒤 더빙·더빙 켬/끔·진단 기록·이어 붙은 자막 따라하기)·더빙 녹음 흐름·더빙 칸 J/K·스크롤·단어 목록·웹 단어장·유튜브 패널 너비·패널/오버레이/단축키/AP/쉐도잉/저장/켜기끄기/시간보정/유튜브/오디오 캡처·폴더 저장/웹 재생·정지·반복·대사별 배속 버튼/PC 파일 읽기·MP3 폴더 불러오기/편집 모드 삭제/감추기/코멘트/녹음/퀴즈
+npm run e2e                   # 89개 시나리오: 범용 사이트(모의 TVNZ+ 광고 낀 DASH·wvtt, Brightcove, <track>, 언어별 자막 파일, 떠 있는 ST, 아무 사이트 등록, TVNZ+ 대사 웹 재생)· 에피소드 전환· 모의 디즈니+(계단식 재생 위치·잦은 미세 이동·플레이어 이벤트 없음·실제처럼 탐색마다 시계가 바뀜(녹음 → 다음 줄 반복)·더빙 녹음 연속성·되감기 없음·자동 별표·새로고침 뒤 더빙·더빙 켬/끔·진단 기록·이어 붙은 자막 따라하기)·더빙 녹음 흐름·더빙 칸 J/K·스크롤·단어 목록·웹 단어장·유튜브 패널 너비·패널/오버레이/단축키/AP/쉐도잉/저장/켜기끄기/시간보정/유튜브/오디오 캡처·폴더 저장/웹 재생·정지·반복·대사별 배속 버튼/PC 파일 읽기·MP3 폴더 불러오기/편집 모드 삭제/감추기/코멘트/녹음/퀴즈
 E2E_ONLY=disney npm run e2e   # 모의 디즈니+ 부분만 (약 1분)
+E2E_ONLY=sites npm run e2e    # 모의 TVNZ+·NZ On Screen·Vimeo·TED·아무 사이트 등록 (약 1분)
 ```
 
 E2E는 헤드리스로 돌며 `tests/e2e/.tmp/shots/`에 스크린샷을 남깁니다. 모의 영상은 ffmpeg로 생성됩니다.

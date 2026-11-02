@@ -170,7 +170,7 @@
     if (!msg || !msg.type) return;
     switch (msg.type) {
       case 'status':
-        sendResponse({ platform: adapter.name, videoId: state.videoId, ready: isPlayerReady(), cues: state.cues.length, title: state.meta && state.meta.title, enabled: isEnabled(), offsetMs: state.offsetMs });
+        sendResponse({ platform: adapter.name, label: adapter.label, generic: !!adapter.generic, custom: !!adapter.custom, videoId: state.videoId, ready: isPlayerReady(), cues: state.cues.length, title: state.meta && state.meta.title, enabled: isEnabled(), offsetMs: state.offsetMs });
         break;
       case 'playRange': startClip(msg); sendResponse({ ok: true }); break;
       case 'stopClip': stopClip('stopped'); sendResponse({ ok: true }); break;
@@ -199,8 +199,12 @@
       case 'reply': page.handleReply(d); break;
       case 'tracks': onTracks(d); break;
       case 'video': if (d.videoId && d.videoId !== pageVideoId) { pageVideoId = d.videoId; checkVideo(); } break;
-      case 'master': onMaster(d.url); break;
-      case 'meta': if (d.meta && d.meta.title && (!d.videoId || d.videoId === state.videoId)) { pageMeta = d.meta; setMeta(d.meta); } break;
+      case 'master': onMaster(d.url, d); break;
+      case 'dash': onDash(d); break;
+      case 'meta':
+        if (adapter.generic) { if (d.meta && d.meta.title && forThisVideo(d)) { pageMeta = d.meta; setMeta(d.meta); } break; }
+        if (d.meta && d.meta.title && (!d.videoId || d.videoId === state.videoId)) { pageMeta = d.meta; setMeta(d.meta); }
+        break;
       case 'time': {
         const v = adapter.usesPageTime ? adapter.video() : null;
         // 재생 중인지는 영상 요소로 본다. 플레이어의 '재생 중' 이벤트(MEDIA_RESUMED 등)는 실제 디즈니+ 에서 오지 않는다(진단 기록: 재생 이벤트 0번).
@@ -243,10 +247,11 @@
     const active = !!(id && v && playerShown);
     if (active !== state.active) {
       state.active = active;
-      if (active) { mountUI(); applySettings(); registerPlayer(); }
+      if (active) { state.activeAt = now(); mountUI(); applySettings(); registerPlayer(); }
       else { cancelModesPending(); closeDubBox(); stopDubPlay(); state.loop = false; state.loopIdx = -1; if (ui.root) { ui.overlay.classList.add('st-hidden'); applySettings(); } }
     }
     if (active) { ensureOverlayMounted(); mountControlButton(); if (adapter.deep && (state.tickCount % 4 === 0)) syncShadowNativeStyles(); }
+    if (adapter.generic) syncFloatToggle();
     if (ui.root) { syncPanelWidth(); fitVideoBesidePanel(); }
   }
   function startVideo(id) {
@@ -261,6 +266,8 @@
     closeDubBox(); stopDubPlay(); closeWordView();
     state.dubSegs = [];
     dubBuffers.clear(); dubReady.clear(); dubBroken.clear();
+    state.pageTracks = []; state.videoStartedWall = Date.now(); clearTimeout(state.pageTracksTimer);
+    if (adapter.generic) A.shared.dash = null; // 광고 기간 표는 영상마다 (새 MPD 가 오면 다시 만든다)
     state.userScrollAt = 0; // 새 에피소드에서는 패널이 지금 줄로 바로 따라가게 (이전 에피소드에서 손으로 스크롤한 기록은 버린다)
     if (ui.root) { renderList(); renderOverlay(true); updateModeUI(); }
     if (!id) return;
@@ -392,11 +399,67 @@
     return cands[0];
   }
   function onTracks(d) {
+    if (adapter.generic && d.platform === 'generic' && Array.isArray(d.tracks)) { mergePageTracks(d.tracks.filter((t) => forThisVideo(t))); return; }
     if (d.platform !== adapter.name || !Array.isArray(d.tracks)) return;
     const vid = d.videoId || currentVideoId();
     if (!vid) return;
     trackCache.set(vid, d.tracks);
     if (vid === state.videoId) applyTracks(d.tracks);
+  }
+  // ───────── 범용 사이트: 페이지 스크립트가 잡은 자막 모으기 ─────────
+  // 페이지 스크립트는 받은 것마다 그 순간의 주소(href)를 붙여 보낸다. 지금 영상의 주소에서 받은 것만 쓴다.
+  // 영상 주소가 아닌 곳(작품 페이지 등)에서 미리 받아 둔 것은 이 영상을 연 앞뒤 15초 안에 받은 것만 쓴다
+  function forThisVideo(d) {
+    if (!d || !state.videoId) return false;
+    let vid = null;
+    try { vid = d.href ? adapter.videoIdFromUrl(d.href) : state.videoId; } catch (e) { vid = null; }
+    if (vid) return vid === state.videoId;
+    return Number.isFinite(d.at) && Math.abs(d.at - (state.videoStartedWall || 0)) < 15000;
+  }
+  const langOf = (t) => String((t && t.lang) || '').toLowerCase().split(/[-_]/)[0];
+  // 같은 트랙은 하나로 (DASH 자막은 재생 목록을 다시 받으면 주소의 세션 값만 바뀌므로 언어·역할·이름으로 묶는다)
+  function mergePageTracks(list) {
+    let changed = false;
+    for (const t of list || []) {
+      if (!t || !(t.url || t.text || t.dash)) continue;
+      const id = t.id || t.url;
+      const i = state.pageTracks.findIndex((x) => x.id === id);
+      if (i >= 0) { if ((t.text && !state.pageTracks[i].text) || t.dash) { state.pageTracks[i] = Object.assign({}, state.pageTracks[i], t, { id }); } continue; }
+      state.pageTracks.push(Object.assign({}, t, { id }));
+      changed = true;
+    }
+    if (!changed) return;
+    clearTimeout(state.pageTracksTimer);
+    state.pageTracksTimer = setTimeout(applyPageTracks, 400); // 여러 곳에서 잇달아 오므로 잠깐 모았다가 고른다
+  }
+  function applyPageTracks() {
+    const all = state.pageTracks.slice();
+    if (!all.length) return;
+    // 언어를 모르는 자막('und')은 영어 자막이 따로 없을 때만 영어로 본다
+    const hasEn = all.some((t) => langOf(t) === 'en');
+    const list = all.map((t) => (!hasEn && langOf(t) === 'und' ? Object.assign({}, t, { lang: 'en' }) : t));
+    const en = pickTrack(list, 'en'), ko = pickTrack(list, 'ko');
+    // 이미 같은 영어 트랙으로 보여 주고 있으면, 한국어 트랙이 새로 생긴 경우에만 다시 불러온다
+    if (state.cues.length && state.enTrack && en && en.id === state.enTrack.id && (!ko || (state.koTrack && state.koTrack.id === ko.id))) return;
+    trackCache.set(state.videoId, list);
+    applyTracks(list);
+  }
+  // DASH 재생 목록(MPD): 광고 기간을 뺀 본편 시간 표를 어댑터에 주고, 자막 세트를 트랙으로
+  let pendingDash = null;
+  function onDash(d) {
+    if (!adapter.generic || !d || typeof d.text !== 'string') return;
+    if (!forThisVideo(d)) { pendingDash = d; return; }
+    let mpd;
+    try { mpd = S.parseMPD(d.text, d.url); } catch (e) { dl('mpd parse failed: ' + (e && e.message)); return; }
+    A.shared.dash = mpd.map.length ? { map: mpd.map, hasAds: mpd.hasAds, url: d.url, periods: mpd.periods.length } : null;
+    dl('mpd periods=' + mpd.periods.length + ' content=' + mpd.map.length + ' ads=' + mpd.hasAds + ' text=' + mpd.textTracks.map((t) => t.lang + '/' + t.codecs + '/' + (t.url ? 'file' : t.parts.reduce((a, p) => a + p.segUrls.length, 0))).join(','));
+    mergePageTracks(mpd.textTracks.map((t) => ({ id: 'dash:' + t.lang + ':' + t.role + ':' + t.label, lang: t.lang, label: t.label || t.lang, cc: /caption/i.test(t.role + ' ' + t.label), dash: t, format: t.codecs, href: d.href, at: d.at })));
+  }
+  // <video> 의 <track> 요소 (Vimeo 등): 파일 주소가 있으면 통째로 받는다
+  function trackElementTracks() {
+    const v = adapter.video();
+    if (!v) return [];
+    return Array.from(v.querySelectorAll('track[src]')).filter((t) => /captions|subtitles/i.test(t.kind || 'subtitles')).map((t) => ({ id: t.src, url: t.src, lang: String(t.srclang || '').toLowerCase() || 'und', label: t.label || t.srclang || '', cc: t.kind === 'captions', format: /\.srt(?:[?#]|$)/i.test(t.src) ? 'srt' : 'vtt' }));
   }
   async function fetchText(url) {
     try {
@@ -409,13 +472,48 @@
       throw new Error('fetch failed: ' + (e && e.message));
     }
   }
+  // 바이너리(MP4 자막 조각): 페이지 출처로 받고(CORS), 안 되면 서비스 워커로
+  async function fetchBytes(url) {
+    try {
+      const r = await page.request({ type: 'fetchBytes', url }, 25000);
+      if (r && r.ok && r.bytes && r.bytes.byteLength !== undefined) return new Uint8Array(r.bytes);
+      throw new Error((r && r.error) || 'page fetch failed');
+    } catch (e) {
+      const r = await bg({ type: 'fetch.bytes', url });
+      if (r && typeof r.b64 === 'string' && globalThis.SubTutorAudio) return globalThis.SubTutorAudio.base64ToBytes(r.b64);
+      throw new Error('fetch failed: ' + (e && e.message));
+    }
+  }
   async function loadTrackCues(track) {
+    if (track.dash) return loadDashCues(track.dash);
+    if (typeof track.text === 'string' && track.text) return S.parseAny(track.text, track.format).cues; // 페이지 스크립트가 플레이어 응답에서 이미 읽어 둔 파일
     if (Array.isArray(track.urls)) {
       const texts = await mapLimit(track.urls, 6, (u) => fetchText(u));
       return S.parseSegments(texts, track.format).cues;
     }
     const text = await fetchText(track.url);
     return S.parseAny(text, track.format).cues;
+  }
+  // DASH 자막: 본편 기간마다 조각(wvtt·stpp)을 받아 큐로 만들고, 조각의 미디어 시각을 본편 시간으로 옮긴다 (TVNZ+ 는 6초 조각 200여 개)
+  async function loadDashCues(t) {
+    if (t.url) {
+      const off = (t.urlContentStart || 0) * 1000;
+      return S.parseAny(await fetchText(t.url), t.codecs).cues.map((c) => ({ start: c.start + off, end: c.end + off, text: c.text }));
+    }
+    const total = t.parts.reduce((a, p) => a + p.segUrls.length, 0);
+    let done = 0;
+    const all = [];
+    for (const part of t.parts) {
+      const init = part.initUrl ? await fetchBytes(part.initUrl).catch(() => null) : null;
+      const segs = await mapLimit(part.segUrls, 8, async (u) => {
+        const b = await fetchBytes(u).catch(() => null);
+        if (++done % 25 === 0 && !state.cues.length) setStatus('자막 조각 받는 중… ' + done + '/' + total);
+        return b;
+      });
+      const off = (part.contentStart - part.pto) * 1000; // 조각의 미디어 시각 → 본편 시간
+      for (const c of S.parseMp4Text(segs.filter(Boolean), init, { timescale: part.timescale, codecs: t.codecs })) all.push({ start: c.start + off, end: c.end + off, text: c.text });
+    }
+    return S.finalizeCues(S.mergeSplitCues(all));
   }
   async function mapLimit(items, limit, fn) {
     const out = new Array(items.length);
@@ -483,6 +581,20 @@
     const token = state.runToken;
     const cached = trackCache.get(vid);
     if (cached) { applyTracks(cached); return; }
+    if (adapter.generic) {
+      // 범용 사이트: 페이지 스크립트가 지금까지 잡은 것(재생 목록·자막 파일) + <track> 요소. 더 오면 그때마다 모은다
+      try {
+        const r = await page.request({ type: 'getTracks' }, 4000);
+        if (token !== state.runToken) return;
+        if (r && r.dash) onDash(r.dash);
+        if (r && r.master) onMaster(r.master.url, r.master);
+        if (r && Array.isArray(r.tracks)) mergePageTracks(r.tracks.filter((t) => forThisVideo(t)));
+      } catch (e) { /* 페이지 스크립트가 아직 없음 */ }
+      if (pendingDash && forThisVideo(pendingDash)) { const d = pendingDash; pendingDash = null; onDash(d); }
+      mergePageTracks(trackElementTracks());
+      setTimeout(() => { if (token === state.runToken && !state.cues.length) fallbackTracks(vid, token); }, 7000);
+      return;
+    }
     try {
       const r = await page.request({ type: 'getTracks', videoId: vid }, 4000);
       if (token !== state.runToken) return;
@@ -507,6 +619,15 @@
       }
       return;
     }
+    if (adapter.generic) {
+      // 범용 사이트: 그사이 생긴 <track> 요소 → 플레이어의 텍스트 트랙(꺼져 있으면 숨김 상태로 켜서 큐를 받는다)
+      mergePageTracks(trackElementTracks());
+      if (state.pageTracks.length) return;
+      if (tryTextTracks()) return;
+      setStatus('이 영상에서 아직 자막을 찾지 못했습니다. 플레이어에서 자막(CC)을 켜거나 새로고침해 보세요.', true);
+      startTextTrackPoll();
+      return;
+    }
     if (adapter.supportsTextTracks && tryTextTracks()) return;
     setStatus(adapter.name === 'youtube' ? '이 영상에는 자막 트랙이 없습니다.' : '자막을 아직 못 찾았습니다. 플레이어에서 자막을 영어로 켜 보세요.', true);
     if (adapter.supportsTextTracks) startTextTrackPoll();
@@ -514,6 +635,8 @@
   function readTextTrackCues() {
     const v = adapter.video();
     if (!v || !v.textTracks) return null;
+    // 범용 사이트: 꺼진(disabled) 영어 트랙은 큐를 받지 않으므로 '숨김'으로 켠다 (화면에는 그대로 안 보인다)
+    if (adapter.generic) for (const tt of v.textTracks) { const l = String(tt.language || '').toLowerCase(); if (tt.mode === 'disabled' && /captions|subtitles/.test(tt.kind) && (!l || l.startsWith('en'))) { try { tt.mode = 'hidden'; } catch (e) { /* ignore */ } } }
     let best = null;
     for (const tt of v.textTracks) {
       if (!tt.cues || !tt.cues.length) continue;
@@ -539,6 +662,7 @@
   function startTextTrackPoll() {
     stopTextTrackPoll();
     state.ttPoll = setInterval(() => {
+      if (adapter.generic && !state.cues.length) { const fresh = trackElementTracks().filter((t) => !state.pageTracks.some((x) => x.id === t.id)); if (fresh.length) { mergePageTracks(fresh); return; } }
       const cues = readTextTrackCues();
       if (!cues) return;
       if (!state.cues.length || (state.enTrack && state.enTrack.id === 'texttrack' && cues.length !== state.cues.length)) {
@@ -551,12 +675,13 @@
   }
   function stopTextTrackPoll() { if (state.ttPoll) { clearInterval(state.ttPoll); state.ttPoll = null; } }
 
-  async function onMaster(url) {
-    if (adapter.name !== 'disney' || !url || url === masterUrlPending) return;
+  async function onMaster(url, d) {
+    if (!(adapter.name === 'disney' || adapter.generic) || !url || url === masterUrlPending) return;
+    if (adapter.generic && !forThisVideo(d)) return;
     masterUrlPending = url;
     const token = state.runToken;
     try {
-      setStatus('자막 목록 읽는 중…');
+      if (!state.cues.length) setStatus('자막 목록 읽는 중…');
       const master = S.parseM3U8(await fetchText(url), url);
       const subs = master.subtitles.filter((s) => !s.forced && !/--forced--/i.test(s.name));
       const tracks = [];
@@ -569,11 +694,12 @@
         tracks.push({ id: s.uri, lang: s.lang, label: s.name || s.lang, cc: /sdh|\[cc\]|accessibility/i.test(s.name + ' ' + s.characteristics), forced: false, urls, format: 'vtt' });
       }
       if (token !== state.runToken) return;
+      if (adapter.generic) { mergePageTracks(tracks); return; }
       const vid = state.videoId || currentVideoId();
       if (vid) trackCache.set(vid, tracks);
       applyTracks(tracks);
     } catch (e) {
-      if (token === state.runToken) setStatus('자막 목록을 읽지 못했습니다: ' + (e && e.message), true);
+      if (token === state.runToken && !state.cues.length) setStatus('자막 목록을 읽지 못했습니다: ' + (e && e.message), true);
     } finally {
       masterUrlPending = null;
     }
@@ -856,7 +982,8 @@
       try {
         const r = await page.request({ type: 'getMeta', videoId: state.videoId }, 3000);
         if (token !== state.runToken) return;
-        if (r && r.meta && r.meta.title) { setMeta(r.meta); return; }
+        // 범용 사이트의 페이지 스크립트는 마지막으로 본 제목을 그 주소와 함께 준다 → 이 영상의 것일 때만
+        if (r && r.meta && r.meta.title && (!adapter.generic || forThisVideo({ href: r.meta.href, at: NaN }))) { setMeta(r.meta); return; }
       } catch (e) { /* ignore */ }
       const dom = adapter.domTitle();
       if (dom && dom.title) setMeta(dom);
@@ -1004,6 +1131,7 @@
     s.setProperty('--st-clearance', clearance + 'px');
     if (ui.toast) { ui.toast.style.left = (r.left + r.width / 2) + 'px'; ui.toast.style.top = (r.top + r.height * 0.1) + 'px'; }
     if (ui.chip) { ui.chip.style.left = (r.left + r.width - 14) + 'px'; ui.chip.style.top = (r.top + 14) + 'px'; }
+    positionFloat();
   }
   function setPanelOpen(open) { saveSettings({ panelOpen: !!open }); }
   // 디즈니+처럼 자막을 열린 shadow DOM 안에 그리는 플레이어는 문서의 <style> 이 닿지 않으므로, 각 shadow root 에도 같은 스타일을 넣는다
@@ -1134,6 +1262,7 @@
     if (settings.cloze && settings.cloze !== 'off') ui.ovModes.append(el('span', { class: 'st-ov-chip on-cloze' }, '▭ 빈칸 (V 공개)'));
     if (settings.secondPass) ui.ovModes.append(el('span', { class: 'st-ov-chip on-pass' }, '2회차'));
     if (ui.ctlBtn) { ui.ctlBtn.classList.toggle('off', !isEnabled()); ui.ctlBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기'; }
+    if (ui.floatBtn) { ui.floatBtn.classList.toggle('off', !isEnabled()); ui.floatBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기'; }
     if (ui.rateCtl) ui.rateCtl.style.display = isEnabled() ? '' : 'none'; // SubTutor 를 끄면 배속 버튼도 숨긴다 (단축키도 같이 꺼진다)
   }
   function computeProfile() {
@@ -1194,6 +1323,9 @@
     '.st-ctl-netflix { width: 100%; height: 100%; min-width: 2.4em; } .st-ctl-netflix .st-ctl-svg { width: 2em; height: 2em; min-width: 30px; min-height: 30px; }',
     '.st-ctl-youtube { width: 48px; height: 100%; } .st-ctl-youtube .st-ctl-svg { width: 26px; height: 26px; }',
     '.st-ctl-prime, .st-ctl-disney { width: 2.6em; height: 100%; margin: 0 .2em; min-width: 40px; } .st-ctl-prime .st-ctl-svg, .st-ctl-disney .st-ctl-svg { width: 32px; height: 32px; }',
+    '.st-ctl-generic { width: 2.6em; min-width: 38px; height: 100%; margin: 0 .15em; } .st-ctl-generic .st-ctl-svg { width: 28px; height: 28px; }',
+    '.st-ctl-float { width: 44px; height: 34px; border-radius: 8px; background: rgba(0,0,0,.45); opacity: .6; } .st-ctl-float:hover { opacity: 1; } .st-ctl-float .st-ctl-svg { width: 30px; height: 30px; }',
+    '.st-rate-generic { margin: 0 .2em; }',
     /* 배속 조절 (ST 버튼 왼쪽): ‹ 1× › */
     '.st-rate { display: inline-flex; align-items: center; gap: 1px; height: 100%; color: #fff; font: 700 13px/1 -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; text-shadow: 0 1px 2px rgba(0,0,0,.55); }',
     '.st-rate button { all: unset; cursor: pointer; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; color: #fff; opacity: .92; border-radius: 4px; font: inherit; transition: background .12s ease, opacity .12s ease; }',
@@ -1239,6 +1371,7 @@
     let anchor = null;
     try { anchor = adapter.controlAnchor(); } catch (e) { anchor = null; }
     if (!anchor || !anchor.parentElement) return null;
+    if (adapter.controlPlace === 'exact') return { before: anchor, wrapper: anchor }; // 앵커 바로 앞 (TVNZ+: 오른쪽 묶음 안, 전체 화면 버튼 왼쪽)
     const wrapper = controlWrapperOf(anchor);
     if (adapter.controlPlace === 'groupStart' && wrapper.parentElement) {
       const first = Array.from(wrapper.parentElement.children).find((c) => c !== ui.ctlMount && c !== ui.rateCtl); // 우리가 넣은 것들은 기준에서 뺀다 (매 틱 다시 꽂히는 것을 막는다)
@@ -1252,7 +1385,29 @@
     ui.rateDown = el('button', { class: 'st-rate-step st-rate-down', type: 'button', title: '한 단계 느리게 (Shift+<)', 'aria-label': '재생 속도 한 단계 느리게' }, '‹');
     ui.rateNow = el('button', { class: 'st-rate-now', type: 'button', title: '보통 속도로 (\\)', 'aria-label': '재생 속도' }, '1×');
     ui.rateUp = el('button', { class: 'st-rate-step st-rate-up', type: 'button', title: '한 단계 빠르게 (Shift+>)', 'aria-label': '재생 속도 한 단계 빠르게' }, '›');
-    ui.rateCtl = el('div', { class: 'st-rate st-rate-' + adapter.name }, [ui.rateDown, ui.rateNow, ui.rateUp]);
+    ui.rateCtl = el('div', { class: 'st-rate st-rate-' + adapter.name + (adapter.generic ? ' st-rate-generic' : '') }, [ui.rateDown, ui.rateNow, ui.rateUp]);
+  }
+  // 컨트롤 바에서 ST 버튼 자리를 못 찾은 범용 사이트: 영상 왼쪽 위에 떠 있는 ST 버튼으로 켜고 끈다 (꺼도 남아 있어 다시 켤 수 있다)
+  function syncFloatToggle() {
+    const want = adapter.generic && state.active && !(ui.ctlMount && ui.ctlMount.isConnected) && now() - (state.activeAt || 0) > 2500;
+    if (!want) { if (ui.floatBtn && ui.floatBtn.isConnected) ui.floatBtn.remove(); return; }
+    if (!ui.floatBtn) {
+      ui.floatBtn = el('button', { id: 'st-float', class: 'st-ctl st-ctl-float', type: 'button', 'aria-label': 'SubTutor 켜기/끄기' });
+      ui.floatBtn.innerHTML = CTL_ICON;
+    }
+    const host = overlayHost();
+    if (ui.floatBtn.parentElement !== host) { host.append(ui.floatBtn); ensureControlStyle(ui.floatBtn); }
+    ui.floatBtn.classList.toggle('off', !isEnabled());
+    ui.floatBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기';
+    positionFloat();
+  }
+  function positionFloat() {
+    if (!ui.floatBtn || !ui.floatBtn.isConnected) return;
+    const v = adapter.video();
+    if (!v) return;
+    const r = v.getBoundingClientRect();
+    ui.floatBtn.style.left = Math.round(r.left + 10) + 'px';
+    ui.floatBtn.style.top = Math.round(r.top + 10) + 'px';
   }
   function mountControlButton() {
     if (!adapter.controlAnchor) return;
@@ -1263,7 +1418,7 @@
     const rateOk = !RATE_UI || (ui.rateCtl && ui.rateCtl.isConnected && ui.rateCtl.nextElementSibling === ui.ctlMount);
     if (ui.ctlMount && ui.ctlMount.isConnected && ui.ctlMount.nextElementSibling === pt.before && rateOk) return;
     if (!ui.ctlBtn) {
-      ui.ctlBtn = el('button', { class: 'st-ctl st-ctl-' + adapter.name, title: 'SubTutor 끄기', 'aria-label': 'SubTutor 켜기/끄기', type: 'button' });
+      ui.ctlBtn = el('button', { class: 'st-ctl st-ctl-' + adapter.name + (adapter.generic ? ' st-ctl-generic' : ''), title: 'SubTutor 끄기', 'aria-label': 'SubTutor 켜기/끄기', type: 'button' });
       ui.ctlBtn.innerHTML = CTL_ICON;
       ui.ctlWrap = el('div', { class: 'st-ctl-wrap' });
     }
@@ -1293,7 +1448,7 @@
   const CTL_EVENT_RANK = { pointerdown: 3, mousedown: 2, click: 1 };
   let ctlEventKind = '';
   function ctlTargets() {
-    return [[ui.ctlBtn, () => setEnabled(!isEnabled())], [ui.rateDown, () => stepRate(-1)], [ui.rateNow, () => changeRate(0)], [ui.rateUp, () => stepRate(1)]];
+    return [[ui.ctlBtn, () => setEnabled(!isEnabled())], [ui.floatBtn, () => setEnabled(!isEnabled())], [ui.rateDown, () => stepRate(-1)], [ui.rateNow, () => changeRate(0)], [ui.rateUp, () => stepRate(1)]];
   }
   function onCtlPointer(e) {
     const path = e.composedPath ? e.composedPath() : [];
@@ -1469,9 +1624,10 @@
       'dub segs=' + state.dubSegs.length + ' chosen=' + state.dubSegs.filter((s) => chosenTake(s)).length + ' playback=' + (settings.dubPlayback !== false) + ' play=' + (state.dubPlay ? state.dubPlay.take.id + '@' + state.dubPlay.offset.toFixed(2) : '-') + ' rec=' + (state.dubRec ? state.dubRec.phase : '-') + ' ladder=' + (state.dubLadder ? state.dubLadder.step : '-') + ' mic=' + (state.dubMic ? 'open' : 'closed') + ' ctx=' + (dubCtx ? dubCtx.state : '-') + ' resyncs=' + dubRestartsTotal,
       'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' clip=' + JSON.stringify(state.clip) + ' capturing=' + !!state.capturing + ' tabId=' + state.tabId,
       'layout panel=' + !!(settings.panelOpen && state.active) + ' videoRight=' + (v ? Math.round(v.getBoundingClientRect().right) : '-') + '/' + window.innerWidth + ' fit=' + (fit.el ? describeEl(fit.el) : '-') + ' shadowRoots=' + (adapter.deep ? A.deepRoots().length - 1 : 0) + ' nativeHidden=' + nativeHiddenCount() + ' cueEl=' + (adapter.nativeCueSelector ? A.qsaDeep(adapter.nativeCueSelector).map(describeEl).slice(0, 2).join(',') : '-'),
+      adapter.generic ? 'site=' + adapter.name + ' pageTracks=' + JSON.stringify(state.pageTracks.map((t) => t.lang + ':' + (t.dash ? 'dash' : (t.text ? 'text' : (t.urls ? 'hls' : 'url'))) + (t.source ? '/' + t.source : ''))) + ' dash=' + (A.shared.dash ? 'periods ' + A.shared.dash.periods + ' content ' + A.shared.dash.map.map((m) => fx(m.presStart, 1) + '-' + fx(m.presEnd, 1) + '→' + fx(m.contentStart, 1)).join(' ') + (A.shared.dash.hasAds ? ' (ads)' : '') : '-') + ' ad=' + !!(adapter.isAdPlaying && adapter.isAdPlaying()) + ' ctl=' + !!(ui.ctlMount && ui.ctlMount.isConnected) + ' float=' + !!(ui.floatBtn && ui.floatBtn.isConnected) : null,
       '── 최근 40초 기록 (초 · 0 = 복사한 순간) ──',
       dlogText(40) || '(기록 없음)',
-    ].join('\n');
+    ].filter((x) => x !== null).join('\n');
   }
 
   function describeEl(e) {
@@ -1783,7 +1939,12 @@
     if (!state.cues.length) return;
     const t = nowMs();
     if (state.current >= 0) goToCue(state.current + 1);
-    else { const i = S.nextStartingIndex(state.cues, isFinite(t) ? t : 0); goToCue(i < 0 ? state.cues.length - 1 : i); }
+    else {
+      let i = S.nextStartingIndex(state.cues, isFinite(t) ? t : 0);
+      // 방금 D 로 옮긴 줄의 앞 여유(자막 시작 전) 동안 다시 누르면 같은 줄이 다시 잡힌다 → 그다음 줄로 (연달아 누르면 그만큼 넘어간다)
+      if (i >= 0 && i === state.lastShown && now() - state.lastSeekAt < 2000) i = Math.min(state.cues.length - 1, i + 1);
+      goToCue(i < 0 ? state.cues.length - 1 : i);
+    }
   }
   function replayCue() {
     const i = anchorIndex();
@@ -2749,7 +2910,14 @@
     state.tickCount++;
     if (state.tickCount % 3 === 0) positionOverlay(false);
     const raw = rawMs();
-    if (!isFinite(raw)) return;
+    if (!isFinite(raw)) {
+      // 광고 중(TVNZ+ 처럼 광고가 영상에 이어 붙은 곳은 본편 시간이 없다): 영상 위 자막을 감추고 내 더빙도 멈춘다
+      if (adapter.isAdPlaying && adapter.isAdPlaying()) {
+        if (state.dubPlay) stopDubPlay('ad');
+        if (state.lastDisplayIdx !== -3 && ui.overlay) { state.lastDisplayIdx = -3; ui.overlay.classList.add('st-hidden'); }
+      }
+      return;
+    }
     if (state.videoEl) state.lastCT = state.videoEl.currentTime;
     const paused = adapter.isPaused();
     const t = raw + effectiveOffset();

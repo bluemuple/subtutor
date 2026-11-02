@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "SubTutor - 자막 튜터",
-  "version": "1.14.1",
-  "description": "넷플릭스·유튜브·프라임 비디오·디즈니+ 자막으로 영어 공부: 자막 목록, 한국어 번역, A/S/D 반복 단축키, 자동 일시정지, 쉐도잉, 자막·오디오 저장, 받아쓰기 퀴즈",
+  "version": "1.15.0",
+  "description": "넷플릭스·유튜브·프라임 비디오·디즈니+·TVNZ+·NZ On Screen·TED·Vimeo 등 영상 자막으로 영어 공부: 자막 목록, 한국어 번역, A/S/D 반복 단축키, 자동 일시정지, 쉐도잉, 더빙, 자막·오디오 저장, 받아쓰기 퀴즈",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -35,11 +35,15 @@
     "downloads",
     "activeTab",
     "offscreen",
-    "contextMenus"
+    "contextMenus",
+    "scripting"
   ],
   "commands": {
     "save-cue": {
-      "suggested_key": { "default": "Alt+E", "mac": "Alt+E" },
+      "suggested_key": {
+        "default": "Alt+E",
+        "mac": "Alt+E"
+      },
       "description": "지금 자막 별표 저장 (이 탭의 오디오 녹음 허용 포함)"
     }
   },
@@ -55,7 +59,22 @@
     "https://*.amazon.com.au/*",
     "https://*.disneyplus.com/*",
     "https://translate.googleapis.com/*",
-    "https://clients5.google.com/*"
+    "https://clients5.google.com/*",
+    "https://*.tvnz.co.nz/*",
+    "https://*.threenow.co.nz/*",
+    "https://*.nzonscreen.com/*",
+    "https://nzonscreen.com/*",
+    "https://*.maoriplus.co.nz/*",
+    "https://*.ted.com/*",
+    "https://vimeo.com/*",
+    "https://*.vimeo.com/*",
+    "https://*.brightcove.com/*",
+    "https://*.brightcovecdn.com/*",
+    "https://*.boltdns.net/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
   ],
   "content_scripts": [
     {
@@ -125,6 +144,54 @@
         "src/lib/speech.js",
         "src/lib/vocab.js",
         "src/lib/explain.js",
+        "src/lib/sites.js",
+        "src/content/adapters.js",
+        "src/content/content.js"
+      ],
+      "css": [
+        "src/content/content.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.tvnz.co.nz/*",
+        "https://www.threenow.co.nz/*",
+        "https://www.nzonscreen.com/*",
+        "https://nzonscreen.com/*",
+        "https://www.maoriplus.co.nz/*",
+        "https://www.ted.com/*",
+        "https://vimeo.com/*",
+        "https://www.vimeo.com/*"
+      ],
+      "js": [
+        "src/page/generic-page.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.tvnz.co.nz/*",
+        "https://www.threenow.co.nz/*",
+        "https://www.nzonscreen.com/*",
+        "https://nzonscreen.com/*",
+        "https://www.maoriplus.co.nz/*",
+        "https://www.ted.com/*",
+        "https://vimeo.com/*",
+        "https://www.vimeo.com/*"
+      ],
+      "js": [
+        "src/lib/subtitles.js",
+        "vendor/lamejs/lame.min.js",
+        "src/lib/audio.js",
+        "src/lib/stretch.js",
+        "src/data/freq-en.js",
+        "src/data/kiwi.js",
+        "src/lib/speech.js",
+        "src/lib/vocab.js",
+        "src/lib/explain.js",
+        "src/lib/sites.js",
         "src/content/adapters.js",
         "src/content/content.js"
       ],

@@ -15,7 +15,9 @@
   const RATE_MIN = 0.3, RATE_MAX = 2, LADDER_MAX_STEPS = 6;
   const fmtRate = (r) => String(Math.round(r * 100) / 100);
   const $ = (sel, root) => (root || document).querySelector(sel);
-  const PLATFORM_NAMES = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+', youtube: '유튜브' };
+  const PLATFORM_NAMES = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+', youtube: '유튜브', tvnz: 'TVNZ+', threenow: 'ThreeNow', nzonscreen: 'NZ On Screen', maoriplus: 'MĀORI+', ted: 'TED', vimeo: 'Vimeo' };
+  // 사용자가 팝업에서 켠 사이트는 'site:<호스트>' → 호스트 이름
+  const platformName = (p) => PLATFORM_NAMES[p] || String(p || '').replace(/^site:(www\.)?/, '');
   const README_URL = 'https://github.com/bluemuple/subtutor#readme';
 
   const state = {
@@ -938,7 +940,7 @@
         if (sort === 'group-new-top') g.items.sort(bySaved(-1));
         else if (sort === 'group-new-bottom') g.items.sort(bySaved(1));
         else g.items.sort((a, b) => a.startMs - b.startMs);
-        const plat = g.items.every((i) => i.platform === g.items[0].platform) ? (PLATFORM_NAMES[g.items[0].platform] || g.items[0].platform) : '';
+        const plat = g.items.every((i) => i.platform === g.items[0].platform) ? platformName(g.items[0].platform) : '';
         const gEl = el('div', { class: 'group' }, [
           el('h3', { class: 'group-title' }, [g.title + (plat ? ' (' + plat + ')' : ''), g.episode ? el('small', null, g.episode) : null, el('small', null, g.items.length + '개'), state.edit.on ? el('button', { class: 'btn mini group-pick', title: '이 묶음의 대사를 모두 선택/해제', onclick: () => togglePickMany(g.items.map((i) => i.id)) }, '묶음 선택') : null]),
         ]);
@@ -985,7 +987,7 @@
       el('div', { class: 'ko', text: it.translation || '' }),
       el('button', { class: 'veil veil-ko-btn', title: '뜻 보기', onclick: () => setItemVeil(it.id, 'ko', false) }, '뜻 감춤 · 눌러서 보기'),
       el('div', { class: 'meta' }, [
-        opts.showWork ? el('span', { class: 'work' }, it.title + ' (' + (PLATFORM_NAMES[it.platform] || it.platform) + ')' + (it.episode ? ' · ' + it.episode : '')) : null,
+        opts.showWork ? el('span', { class: 'work' }, it.title + ' (' + platformName(it.platform) + ')' + (it.episode ? ' · ' + it.episode : '')) : null,
         el('span', { class: 'span' }, timeText(it)),
         fmtBadge(it),
         el('span', null, '저장 ' + fmtDate(it.savedAt || Date.now())),
@@ -1576,8 +1578,13 @@
     ['Wellington Paranormal', 'Netflix · YouTube 클립', '뉴질랜드 경찰 코미디. 무표정 키위 유머', 'https://www.youtube.com/results?search_query=Wellington+Paranormal'],
     ['Hunt for the Wilderpeople · Boy', '영화', '타이카 와이티티. 키위 아이와 어른의 말', 'https://www.youtube.com/results?search_query=Hunt+for+the+Wilderpeople+scene'],
     ['The Breaker Upperers', 'Netflix', '뉴질랜드 코미디 영화', 'https://www.netflix.com/search?q=The%20Breaker%20Upperers'],
-    ['Shortland Street', 'TVNZ+ · YouTube 클립', '뉴질랜드 일일 드라마. 일상 대화', 'https://www.youtube.com/results?search_query=Shortland+Street'],
-    ['뉴질랜드 교실 영상', 'YouTube', '"structured literacy New Zealand classroom", "PB4L classroom NZ" 검색 — 실제 교실 말', 'https://www.youtube.com/results?search_query=structured+literacy+New+Zealand+classroom'],
+    ['Shortland Street', 'TVNZ+', '뉴질랜드 일일 드라마(병원). 빠른 일상 대화 · SubTutor 가 TVNZ+ 자막(광고 사이)을 그대로 읽는다', 'https://www.tvnz.co.nz/tvseries/shortland-street'],
+    ['TVNZ+ 뉴스 · 1News', 'TVNZ+', '뉴질랜드 뉴스 클립. 학교·교육 소식으로 교사 대화의 배경지식', 'https://www.tvnz.co.nz/news'],
+    ['Westside', 'NZ On Screen', '오클랜드 서부 가족 드라마(Outrageous Fortune 앞 이야기). 가입 없이 자막 포함', 'https://www.nzonscreen.com/title/westside-episode-one-2015'],
+    ['NZ On Screen 교육·다큐', 'NZ On Screen', '뉴질랜드 학교·교육을 다룬 다큐와 드라마 보관소', 'https://www.nzonscreen.com/'],
+    ['Kiri and Lou', 'MĀORI+', '마오리 말과 영어가 섞인 어린이 애니메이션. 교실에서 쓰는 마오리 단어', 'https://www.maoriplus.co.nz/show/kiri-and-lou'],
+    ['Do schools kill creativity? (Ken Robinson)', 'TED', '교육 강연. 영어·한국어 자막이 다 있어 시작하기 좋다', 'https://www.ted.com/talks/sir_ken_robinson_do_schools_kill_creativity'],
+    ['뉴질랜드 교실 영상', 'YouTube · Vimeo', '"structured literacy New Zealand classroom", "PB4L classroom NZ" 검색 — 실제 교실 말 (Vimeo 의 교사 연수 영상도 SubTutor 로 볼 수 있다)', 'https://www.youtube.com/results?search_query=structured+literacy+New+Zealand+classroom'],
   ];
   function renderRecommend() {
     return el('section', null, [

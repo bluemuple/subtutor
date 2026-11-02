@@ -322,6 +322,116 @@ globalThis.SubTutorAdapters = (() => {
     pageUrl(videoId) { return 'https://www.youtube.com/watch?v=' + videoId; },
   };
 
+  // ───────── 범용 어댑터 (TVNZ+ · ThreeNow · NZ On Screen · MĀORI+ · TED · Vimeo · 사용자가 켠 사이트) ─────────
+  // 자막은 페이지 스크립트(generic-page.js)가 플레이어가 받는 파일에서 함께 읽고, 재생 위치는 <video> 요소로 읽는다.
+  // TVNZ+ 처럼 광고가 같은 영상 안에 이어 붙은 DASH 는 MPD 의 기간(Period)으로 본편 시간을 계산한다 (shared.dash):
+  //   영상 시각 → 본편 시간, 광고 중이면 NaN(영상 위 자막을 감춘다) · 본편 시간으로 옮기면 광고를 건너뛴 영상 시각으로
+  shared.dash = null; // { map: [{ presStart, presEnd, contentStart }], hasAds, url }
+  const GENERIC_HIDE = ['.shaka-text-container', '.vjs-text-track-display', '.jw-captions', '.jw-text-track-container', '.vp-captions', '[class*="CaptionsRenderer"]', '.bmpui-ui-subtitle-overlay', '.theoplayer-texttracks', '.fp-captions'];
+  const GENERIC_CUES = '.shaka-text-container span, .vjs-text-track-cue, .jw-text-track-cue, .vp-captions, [class*="CaptionsRenderer"], .bmpui-ui-subtitle-label';
+  const GENERIC_BARS = ['.vjs-control-bar', '.jw-controlbar', '.shaka-bottom-controls', '.shaka-controls-button-panel', '.vp-controls', '.bmpui-ui-controlbar', '[class*="control-bar"]', '[class*="controlbar"]', '[class*="ControlBar"]', '[class*="controls-bar"]'];
+  const GENERIC_FULLSCREEN = ['.vjs-fullscreen-control', '.jw-icon-fullscreen', '.shaka-fullscreen-button', '[data-fullscreen-button]', '.bmpui-ui-fullscreentogglebutton'];
+  // 사이트별: 본편 영상 · ST 버튼 자리 · 플랫폼 자막 · 컨트롤 바 · 제목 (실제 페이지에서 확인한 구조)
+  const SITE_UI = {
+    // TVNZ+ (2026-11-02 실제 페이지): Angular 앱 — app-player > div.player > video#video-player · div.shaka-text-container(자막) ·
+    // app-video-player > div.player-bottom > div.player-bottom-options > … > div.player-bottom-options-right > app-player-fullscreen
+    // 컨트롤은 마우스가 멈추면 DOM 에서 빠졌다가 다시 생긴다 (ST 버튼은 생길 때마다 다시 넣는다)
+    tvnz: {
+      video: 'app-player video',
+      anchor: () => document.querySelector('app-player app-player-fullscreen'),
+      place: 'exact',
+      hide: '.shaka-text-container',
+      cue: '.shaka-text-container span',
+      bars: ['.player-bottom'],
+      title() {
+        const m = /^((?:Season|Series)\s[^:]+?,\s*Episode\s[^:]+?):\s*(.+)$/i.exec(document.title || '');
+        if (m) return { title: m[2].trim(), episode: m[1].trim() };
+        const t = (document.title || '').replace(/\s*\|\s*TVNZ\+?.*$/i, '').trim();
+        return t && !/^TVNZ/i.test(t) ? { title: t, episode: '' } : null;
+      },
+    },
+    // NZ On Screen: Brightcove(video.js) 플레이어 — .vjs-control-bar 안 전체 화면 버튼 왼쪽
+    nzonscreen: { video: '.video-js video', anchor: () => document.querySelector('.vjs-control-bar .vjs-fullscreen-control') },
+    threenow: { anchor: () => document.querySelector('.vjs-control-bar .vjs-fullscreen-control') },
+  };
+  const visibleSize = (v) => { const r = v.getBoundingClientRect(); return r.width >= 160 && r.height >= 90 ? r.width * r.height : 0; };
+  // 본편 영상: 화면에 보이는 것 가운데 가장 긴 것 (광고·미리보기 영상은 짧다), 길이가 같으면 큰 것
+  function pickMainVideo(selector) {
+    const own = selector ? Array.from(document.querySelectorAll(selector)) : [];
+    const all = own.concat(qsaDeep('video').filter((v) => !own.includes(v)));
+    const vis = all.filter((v) => visibleSize(v) > 0);
+    if (!vis.length) return all[0] || null;
+    const dur = (v) => (v.duration === Infinity ? 1e7 : (Number.isFinite(v.duration) ? v.duration : 0));
+    return vis.slice().sort((a, b) => (own.includes(b) - own.includes(a)) || (dur(b) - dur(a)) || (visibleSize(b) - visibleSize(a)))[0];
+  }
+  function genericTitle() {
+    const og = document.querySelector('meta[property="og:title"]');
+    let t = String((og && og.content) || document.title || '').replace(/\s+/g, ' ').trim();
+    const cut = /^(.{3,}?)\s+[|–—]\s+[^|–—]{2,48}$/.exec(t) || /^(.{3,}?)\s+-\s+[^-]{2,30}$/.exec(t); // "작품 | 사이트 이름" 의 사이트 이름을 뗀다
+    if (cut) t = cut[1].trim();
+    return t ? { title: t, episode: '' } : null;
+  }
+  const dashMap = () => (shared.dash && shared.dash.map && shared.dash.map.length ? shared.dash.map : null);
+  const Subs = () => globalThis.SubTutorSubs;
+  function makeGeneric(site) {
+    const ui = SITE_UI[site.key] || {};
+    return {
+      name: site.key,
+      label: site.label,
+      generic: true,
+      custom: !!site.custom,
+      site,
+      usesPageTime: false,
+      supportsTextTracks: true,
+      videoIdFromUrl(href) { try { return site.videoId(new URL(href || location.href)) || null; } catch (e) { return null; } },
+      video() { return pickMainVideo(ui.video); },
+      // 미리보기·광고처럼 작은 영상에는 패널을 띄우지 않는다
+      isPlayerActive(v) { if (!v || !v.isConnected) return false; const r = v.getBoundingClientRect(); return r.width >= 240 && r.height >= 135 && getComputedStyle(v).visibility !== 'hidden'; },
+      timeMs() {
+        const v = this.video();
+        if (!v) return NaN;
+        const map = dashMap();
+        if (!map) return v.currentTime * 1000;
+        const c = Subs().presToContent(map, v.currentTime);
+        return Number.isFinite(c) ? c * 1000 : NaN;
+      },
+      isPaused: videoPaused,
+      seek(ms) {
+        const v = this.video();
+        if (!v) return;
+        const sec = Math.max(0, ms / 1000);
+        const map = dashMap();
+        try { v.currentTime = map ? Subs().contentToPres(map, sec) : sec; } catch (e) { /* ignore */ }
+      },
+      play: elementPlay,
+      pause: elementPause,
+      isAdPlaying() {
+        const v = this.video(), map = dashMap();
+        return !!(v && map && shared.dash.hasAds && !Number.isFinite(Subs().presToContent(map, v.currentTime)));
+      },
+      controlRoot() { const v = this.video(); return (v && v.closest('.video-js, .jw-wrapper, [data-shaka-player-container], app-player, .player')) || document.body; },
+      nativeHideCss: [ui.hide].concat(GENERIC_HIDE).filter(Boolean).join(', ') + ' { visibility: hidden !important; }\nvideo::cue { color: transparent !important; background: transparent !important; text-shadow: none !important; }',
+      controlBars: ui.bars || GENERIC_BARS,
+      // 페이지 안에 놓인 플레이어(TED·Vimeo·NZ On Screen)는 페이지를 패널 왼쪽까지로 줄이고, 화면을 채우는 플레이어(TVNZ+)는 아래 구조 탐색으로 줄인다
+      layoutCss: 'html.st-panel-open:not(.st-fs-hidden) body { margin-right: var(--st-panel-w, 400px) !important; }',
+      fitVideo: true,
+      nativeCueSelector: ui.cue || GENERIC_CUES,
+      // ST 버튼 자리: 사이트별로 확인한 곳 → 흔한 플레이어(video.js·JW·Shaka·Vimeo)의 전체 화면 버튼 왼쪽 → 영상과 같은 플레이어 안의 전체 화면 버튼.
+      // 못 찾으면 콘텐츠 스크립트가 영상 왼쪽 위에 떠 있는 ST 버튼을 둔다
+      controlAnchor() {
+        if (ui.anchor) { const a = ui.anchor(); if (a) return a; }
+        for (const sel of GENERIC_FULLSCREEN) { const e = document.querySelector(sel); if (e && !isOurs(e)) return e; }
+        const v = this.video();
+        const btn = findButton(document, /full ?screen|전체 ?화면/i);
+        if (btn && v) { let p = v.parentElement; for (let i = 0; i < 8 && p && p !== document.body; i++, p = p.parentElement) if (p.contains(btn)) return btn; }
+        return null;
+      },
+      controlPlace: ui.place || 'before',
+      domTitle() { return (ui.title && ui.title()) || genericTitle(); },
+      pageUrl() { return location.origin + location.pathname + location.search; },
+    };
+  }
+
   function detect() {
     const h = location.hostname;
     let a = null;
@@ -329,9 +439,15 @@ globalThis.SubTutorAdapters = (() => {
     else if (/(^|\.)primevideo\.com$/.test(h) || /(^|\.)amazon\.(com|co\.uk|co\.jp|de|com\.au)$/.test(h)) a = prime;
     else if (/(^|\.)disneyplus\.com$/.test(h)) a = disney;
     else if (h === 'www.youtube.com' || h === 'youtube.com' || h === 'm.youtube.com') a = youtube;
+    else {
+      // 그 밖은 범용: 목록에 있는 사이트이거나, 사용자가 팝업에서 켠 사이트 (콘텐츠 스크립트는 그런 곳에만 들어간다)
+      const Sites = globalThis.SubTutorSites;
+      const site = Sites && (Sites.forHost(h) || Sites.custom(h));
+      if (site) a = makeGeneric(site);
+    }
     roots.deep = !!(a && a.deep);
     return a;
   }
 
-  return { shared, page, detect, pickVideo, findButton, qsaDeep, deepRoots, noteContentTime, resetContentTime, preciseClock };
+  return { shared, page, detect, pickVideo, pickMainVideo, findButton, qsaDeep, deepRoots, noteContentTime, resetContentTime, preciseClock };
 })();

@@ -72,6 +72,8 @@
 /* 패널 열기 버튼 (오른쪽 가장자리) */
 #st-toggle { position: fixed; right: 0; top: 50%; transform: translateY(-50%); z-index: 2147483000; width: 26px; height: 56px; border: none; border-radius: 10px 0 0 10px; background: rgba(124,58,237,.85); color: #fff; font-size: 20px; cursor: pointer; opacity: .55; transition: opacity .15s; }
 #st-toggle:hover { opacity: 1; }
+/* 컨트롤 바에 자리를 못 찾은 범용 사이트: 영상 왼쪽 위에 떠 있는 ST 버튼 */
+#st-float { position: fixed; z-index: 2147482600; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; color: #fff; }
 #st-toggle.st-hidden { display: none; }
 
 /* 영상이 패널만큼 줄어들도록 (플랫폼별 규칙은 어댑터가 추가) */

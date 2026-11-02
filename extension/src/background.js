@@ -3,7 +3,9 @@
  * 저장한 자막(items) 관리, 기계 번역(캐시), 플레이어 탭 찾기/열기, 웹사이트 ↔ 플레이어 원격 재생 중계.
  */
 import './lib/fs.js';
+import './lib/sites.js';
 const FS = globalThis.SubTutorFS;
+const Sites = globalThis.SubTutorSites;
 const SITE_URL = 'https://bluemuple.github.io/subtutor/';
 const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
@@ -31,6 +33,8 @@ const PLATFORM_URL_PATTERNS = {
   prime: ['https://www.primevideo.com/*', 'https://*.amazon.com/*', 'https://*.amazon.co.uk/*', 'https://*.amazon.co.jp/*', 'https://*.amazon.de/*', 'https://*.amazon.com.au/*'],
   disney: ['https://www.disneyplus.com/*'],
 };
+// 범용 사이트(TVNZ+ 등)와 사용자가 켠 사이트의 주소 패턴은 sites.js 에서
+const urlPatternsFor = (platform) => PLATFORM_URL_PATTERNS[platform] || ((Sites && Sites.byKey(platform)) || {}).patterns || [];
 
 // ───────── 저장소 ─────────
 async function getItems() {
@@ -208,6 +212,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 function videoIdFromUrl(platform, url) {
+  if (Sites && Sites.byKey(platform)) return Sites.videoIdFor(platform, url);
   try {
     const u = new URL(url);
     let m = null;
@@ -230,7 +235,8 @@ async function findPlayerTab(item) {
   for (const [tabId, info] of Object.entries(reg)) {
     if (info.platform === item.platform && String(info.videoId) === String(item.videoId) && await tabAlive(+tabId)) return { tabId: +tabId, same: true };
   }
-  const tabs = await chrome.tabs.query({ url: PLATFORM_URL_PATTERNS[item.platform] || [] });
+  const patterns = urlPatternsFor(item.platform);
+  const tabs = patterns.length ? await chrome.tabs.query({ url: patterns }) : [];
   const same = tabs.find((t) => videoIdFromUrl(item.platform, t.url || '') === String(item.videoId));
   if (same) return { tabId: same.id, same: true };
   const registered = tabs.find((t) => reg[t.id] && reg[t.id].platform === item.platform);
@@ -512,6 +518,87 @@ globalThis.__subtutorInvoke = invokeOnTab; // 테스트용
 if (chrome.commands) chrome.commands.onCommand.addListener((command, tab) => { if (command === 'save-cue') invokeOnTab(tab, 'command'); });
 if (chrome.contextMenus) chrome.contextMenus.onClicked.addListener((info, tab) => { if (info.menuItemId === 'st-save-cue') invokeOnTab(tab, 'menu'); });
 
+// ───────── 사용자가 켠 사이트 (목록에 없는 아무 사이트) ─────────
+// 팝업에서 "이 사이트에서 SubTutor 켜기"를 누르면 팝업이 그 사이트의 접근 권한을 받고, 여기서 콘텐츠 스크립트를 등록한다
+// (범용 페이지 스크립트 + 범용 어댑터). 등록은 브라우저를 다시 열어도 남고, 지금 탭에도 바로 넣는다
+const CONTENT_JS = ['src/lib/subtitles.js', 'vendor/lamejs/lame.min.js', 'src/lib/audio.js', 'src/lib/stretch.js', 'src/data/freq-en.js', 'src/data/kiwi.js', 'src/lib/speech.js', 'src/lib/vocab.js', 'src/lib/explain.js', 'src/lib/sites.js', 'src/content/adapters.js', 'src/content/content.js'];
+const siteScriptIds = (host) => ['st-page-' + host, 'st-content-' + host];
+const sitePatterns = (host) => ['https://' + host + '/*', 'http://' + host + '/*'];
+function builtInHost(host) {
+  const h = String(host || '').toLowerCase();
+  return /(^|\.)netflix\.com$/.test(h) || /(^|\.)primevideo\.com$/.test(h) || /(^|\.)amazon\.(com|co\.uk|co\.jp|de|com\.au)$/.test(h) || /(^|\.)disneyplus\.com$/.test(h) || /(^|\.)youtube\.com$/.test(h) || !!(Sites && Sites.forHost(h));
+}
+async function getCustomSites() {
+  const { customSites } = await chrome.storage.local.get('customSites');
+  return Array.isArray(customSites) ? customSites : [];
+}
+async function hasHostPermission(host) {
+  try { return (await chrome.permissions.contains({ origins: ['https://' + host + '/*'] })) || (await chrome.permissions.contains({ origins: ['http://' + host + '/*'] })); } catch (e) { return false; }
+}
+async function registerSiteScripts(host) {
+  if (!chrome.scripting || !chrome.scripting.registerContentScripts) throw new Error('이 크롬은 사이트 추가를 지원하지 않습니다 (크롬 102 이상 필요)');
+  const ids = siteScriptIds(host);
+  const have = await chrome.scripting.getRegisteredContentScripts({ ids }).catch(() => []);
+  if (have.length) await chrome.scripting.unregisterContentScripts({ ids: have.map((s) => s.id) }).catch(() => {});
+  await chrome.scripting.registerContentScripts([
+    { id: ids[0], matches: sitePatterns(host), js: ['src/page/generic-page.js'], runAt: 'document_start', world: 'MAIN', persistAcrossSessions: true },
+    { id: ids[1], matches: sitePatterns(host), js: CONTENT_JS, css: ['src/content/content.css'], runAt: 'document_idle', persistAcrossSessions: true },
+  ]);
+}
+async function addCustomSite(origin, tabId) {
+  let u;
+  try { u = new URL(origin); } catch (e) { throw new Error('사이트 주소가 올바르지 않습니다'); }
+  if (!/^https?:$/.test(u.protocol)) throw new Error('http·https 사이트에서만 켤 수 있습니다');
+  const host = u.hostname.toLowerCase();
+  if (builtInHost(host)) return { ok: true, host, builtIn: true };
+  if (!(await hasHostPermission(host))) return { ok: false, host, error: '이 사이트에 접근할 권한이 없습니다 (팝업에서 허용해야 합니다)' };
+  await registerSiteScripts(host);
+  const list = (await getCustomSites()).filter((s) => s.host !== host);
+  list.push({ host, origin: u.origin, addedAt: Date.now() });
+  await chrome.storage.local.set({ customSites: list });
+  let injected = false;
+  // 지금 탭에도 바로 넣는다. 페이지 스크립트가 늦게 들어가 이미 받은 자막은 못 볼 수 있다 → 팝업이 새로고침을 권한다
+  if (Number.isInteger(tabId)) {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['src/page/generic-page.js'], world: 'MAIN' });
+      await chrome.scripting.insertCSS({ target: { tabId }, files: ['src/content/content.css'] });
+      await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_JS });
+      injected = true;
+    } catch (e) { injected = false; }
+  }
+  await refreshContextMenu();
+  return { ok: true, host, injected };
+}
+async function removeCustomSite(host) {
+  const h = String(host || '').toLowerCase();
+  if (chrome.scripting && chrome.scripting.unregisterContentScripts) await chrome.scripting.unregisterContentScripts({ ids: siteScriptIds(h) }).catch(() => {});
+  await chrome.storage.local.set({ customSites: (await getCustomSites()).filter((s) => s.host !== h) });
+  try { await chrome.permissions.remove({ origins: sitePatterns(h) }); } catch (e) { /* 이미 없음 */ }
+  await refreshContextMenu();
+  return { ok: true, host: h };
+}
+// 서비스 워커가 깨어날 때: 저장된 사이트의 등록이 빠졌으면(확장 프로그램을 다시 불러온 경우 등) 다시 넣고, 권한이 없어진 사이트는 목록에서 뺀다
+async function syncCustomSites() {
+  if (!chrome.scripting || !chrome.scripting.getRegisteredContentScripts) return;
+  const list = await getCustomSites();
+  const keep = [];
+  for (const s of list) {
+    if (!(await hasHostPermission(s.host))) continue;
+    keep.push(s);
+    const have = await chrome.scripting.getRegisteredContentScripts({ ids: siteScriptIds(s.host) }).catch(() => []);
+    if (have.length < 2) await registerSiteScripts(s.host).catch(() => {});
+  }
+  if (keep.length !== list.length) await chrome.storage.local.set({ customSites: keep });
+}
+// 재생 화면 우클릭 메뉴 "지금 자막 저장": 지원 사이트 + 사용자가 켠 사이트
+async function refreshContextMenu() {
+  if (!chrome.contextMenus) return;
+  const patterns = Object.values(PLATFORM_URL_PATTERNS).flat().concat(Sites ? Sites.allPatterns() : [], (await getCustomSites()).flatMap((s) => sitePatterns(s.host)));
+  await new Promise((resolve) => chrome.contextMenus.removeAll(() => { void chrome.runtime.lastError; resolve(); }));
+  chrome.contextMenus.create({ id: 'st-save-cue', title: 'SubTutor: 지금 자막 저장 (오디오 녹음 허용)', contexts: ['page', 'video', 'frame'], documentUrlPatterns: patterns }, () => void chrome.runtime.lastError);
+}
+syncCustomSites().catch(() => {});
+
 // ───────── 메시지 처리 ─────────
 function updateItem(items, id, patch) {
   const it = items.find((i) => i.id === id);
@@ -580,6 +667,15 @@ async function handleMessage(msg, sender) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return { text: await res.text() };
     }
+    case 'fetch.bytes': { // DASH 자막 조각(MP4) — 페이지에서 받지 못했을 때
+      const res = await fetch(msg.url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return { b64: bytesToBase64(new Uint8Array(await res.arrayBuffer())) };
+    }
+    // 아무 사이트에서 켜기 (팝업이 그 사이트의 권한을 받은 뒤)
+    case 'sites.list': return { sites: await getCustomSites(), builtIn: Sites ? Sites.SITES.map((s) => ({ key: s.key, label: s.label, home: s.home, about: s.about })) : [] };
+    case 'sites.add': return addCustomSite(msg.origin, msg.tabId);
+    case 'sites.remove': return removeCustomSite(msg.host);
     case 'settings.get': return { settings: await getSettings() };
     case 'settings.set': {
       const s = Object.assign(await getSettings(), msg.patch || {});
@@ -687,10 +783,5 @@ chrome.runtime.onInstalled.addListener(async () => {
   const { settings } = await chrome.storage.local.get('settings');
   if (!settings) await chrome.storage.local.set({ settings: DEFAULT_SETTINGS });
   // 재생 화면 우클릭 메뉴: 아이콘을 누르지 않고도 저장 + 이 탭의 녹음 허용
-  if (chrome.contextMenus) {
-    chrome.contextMenus.removeAll(() => {
-      void chrome.runtime.lastError;
-      chrome.contextMenus.create({ id: 'st-save-cue', title: 'SubTutor: 지금 자막 저장 (오디오 녹음 허용)', contexts: ['page', 'video', 'frame'], documentUrlPatterns: Object.values(PLATFORM_URL_PATTERNS).flat() }, () => void chrome.runtime.lastError);
-    });
-  }
+  await refreshContextMenu();
 });

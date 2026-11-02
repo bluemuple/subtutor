@@ -14,6 +14,10 @@
     </div>
   </header>
 
+  <section id="siteBox" class="hidden">
+    <div class="row"><span><b>이 사이트에서 SubTutor 켜기</b><button class="info" data-key="anySite">i</button></span><button id="addSite" class="small primary-small">켜기</button></div>
+    <div class="hint" id="siteHint"></div>
+  </section>
   <section>
     <label class="row" id="enabledRow"><span><b>이 사이트에서 SubTutor 사용</b><button class="info" data-key="enabled">i</button></span><input type="checkbox" id="enabled" class="switch"></label>
     <label class="row"><span>자막 패널 열기<button class="info" data-key="panel">i</button></span><input type="checkbox" id="panelOpen" class="switch"></label>
@@ -39,13 +43,16 @@
     <div class="hint hidden" id="audioHint"></div>
   </section>
 
+  <div class="hint hidden" id="customHint"><span id="customText"></span> <button id="removeSite" class="small">이 사이트 목록에서 빼기</button></div>
   <section class="buttons">
     <button id="openSite" class="primary">웹에서 저장 목록 · 퀴즈 열기</button>
-    <button id="openNetflix">넷플릭스 열기</button>
+    <button id="openNetflix" title="넷플릭스·TVNZ+·NZ On Screen 같은 지원 사이트 목록">지원 사이트</button>
     <button id="keysBtn" class="small" title="단축키">⌨</button>
   </section>
   <div id="infobox" class="infobox hidden"><div class="infobox-head"><b id="infoTitle"></b><button id="infoClose" class="small">닫기</button></div><div id="infoBody" class="infobox-body"></div></div>
+  <div id="sitesBox" class="infobox hidden"><div class="infobox-head"><b>지원 사이트</b><button id="sitesClose" class="small">닫기</button></div><div id="sitesBody" class="infobox-body"></div></div>
   <script src="../src/lib/fs.js"></script>
+  <script src="../src/lib/sites.js"></script>
   <script src="../src/lib/explain.js"></script>
   <script src="popup.js"></script>
 </body>

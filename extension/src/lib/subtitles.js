@@ -346,9 +346,335 @@
     return { subtitles, segments };
   }
 
+  // ───────── DASH (MPD) ─────────
+  // 범용 사이트(TVNZ+ 등)의 플레이어가 받는 MPD 에서 자막 조각 주소와, 광고가 끼워진 기간(Period)을 빼고 본편 시간을 계산할 표를 만든다.
+  // 브라우저가 아닌 곳(node 테스트)에서도 돌도록 아주 작은 XML 해석기를 쓴다 (MPD 는 단순한 XML 이다)
+  function parseXml(text) {
+    const src = String(text || '');
+    const root = { name: '#root', attrs: {}, children: [], text: '' };
+    const stack = [root];
+    const re = /<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|<\?[\s\S]*?\?>|<!DOCTYPE[^>]*>|<\/([\w:.-]+)\s*>|<([\w:.-]+)((?:\s+[\w:.-]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>|([^<]+)/g;
+    let m;
+    while ((m = re.exec(src))) {
+      const top = stack[stack.length - 1];
+      if (m[1] !== undefined) { top.text += m[1]; continue; }
+      if (m[2]) { for (let i = stack.length - 1; i > 0; i--) if (stack[i].name === m[2]) { stack.length = i; break; } continue; }
+      if (m[3]) {
+        const node = { name: m[3], local: m[3].replace(/^.*:/, ''), attrs: {}, children: [], text: '' };
+        const attrRe = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+        let a;
+        while ((a = attrRe.exec(m[4] || ''))) node.attrs[a[1].replace(/^.*:/, '')] = decodeEntities(a[2] !== undefined ? a[2] : a[3]);
+        top.children.push(node);
+        if (!m[5]) stack.push(node);
+        continue;
+      }
+      if (m[6] !== undefined) top.text += decodeEntities(m[6]);
+    }
+    return root;
+  }
+  const xmlKids = (n, name) => (n ? n.children.filter((c) => c.local === name) : []);
+  const xmlKid = (n, name) => xmlKids(n, name)[0] || null;
+  /** ISO 8601 기간(PT10M29.7S) → 초 */
+  function parseIsoDuration(s) {
+    const n = '(\\d+(?:\\.\\d+)?)';
+    const m = new RegExp('^P(?:' + n + 'Y)?(?:' + n + 'M)?(?:' + n + 'W)?(?:' + n + 'D)?(?:T(?:' + n + 'H)?(?:' + n + 'M)?(?:' + n + 'S)?)?$').exec(String(s || '').trim());
+    if (!m || String(s).trim() === 'P' || String(s).trim() === 'PT') return NaN;
+    const v = (i) => +(m[i] || 0);
+    return v(1) * 31536000 + v(2) * 2592000 + v(3) * 604800 + v(4) * 86400 + v(5) * 3600 + v(6) * 60 + v(7);
+  }
+  function fillTemplate(tpl, vars) {
+    return String(tpl).replace(/\$(RepresentationID|Number|Time|Bandwidth)(?:%0(\d+)d)?\$|\$\$/g, (m, k, w) => {
+      if (!k) return '$';
+      if (vars[k] === undefined) return m;
+      const v = String(vars[k]);
+      return w ? v.padStart(+w, '0') : v;
+    });
+  }
+  const resolveUrl = (base, rel) => { try { return new URL(rel, base).href; } catch (e) { return rel; } };
+  const isTextSet = (as, rep) => {
+    const mime = (as.attrs.mimeType || (rep && rep.attrs.mimeType) || '').toLowerCase();
+    const codecs = (as.attrs.codecs || (rep && rep.attrs.codecs) || '').toLowerCase();
+    return as.attrs.contentType === 'text' || /^text\/|ttml|vtt/.test(mime) || /wvtt|stpp|ttml/.test(codecs);
+  };
+  /**
+   * MPD → { duration, periods:[{id,start,dur,content}], map:[{presStart,presEnd,contentStart}], hasAds, textTracks:[{lang,label,role,codecs,parts|url}] }
+   * - 광고(SSAI) 기간: 자막 세트가 있는 기간이 하나라도 있으면 자막 세트가 없는 기간을 광고로 본다 (TVNZ+ 는 광고 기간에 자막·presentationTimeOffset 이 없다)
+   * - 본편 시간(contentStart): 본편 기간들의 presentationTimeOffset 이 이어지면 그 값(TVNZ+ 는 본편의 원래 시각), 아니면 본편 기간 길이의 누적
+   * - 자막 조각의 미디어 시각 M(초) → 본편 시간 = contentStart + (M − pto)
+   */
+  function parseMPD(text, mpdUrl) {
+    const doc = parseXml(text);
+    const mpd = xmlKid(doc, 'MPD');
+    if (!mpd) throw new Error('MPD 가 아닙니다');
+    const baseOf = (node, parent) => { const b = xmlKid(node, 'BaseURL'); return b && b.text.trim() ? resolveUrl(parent, b.text.trim()) : parent; };
+    const mpdBase = baseOf(mpd, mpdUrl || '');
+    const total = parseIsoDuration(mpd.attrs.mediaPresentationDuration);
+    const periods = [];
+    let cursor = 0;
+    xmlKids(mpd, 'Period').forEach((p, i) => {
+      const start = p.attrs.start != null ? parseIsoDuration(p.attrs.start) : cursor;
+      const dur = p.attrs.duration != null ? parseIsoDuration(p.attrs.duration) : NaN;
+      periods.push({ node: p, id: p.attrs.id || String(i), start: Number.isFinite(start) ? start : cursor, dur });
+      cursor = periods[i].start + (Number.isFinite(dur) ? dur : 0);
+    });
+    periods.forEach((p, i) => {
+      if (Number.isFinite(p.dur)) return;
+      const next = periods[i + 1];
+      p.dur = next ? next.start - p.start : (Number.isFinite(total) ? total - p.start : 0);
+    });
+    // 세그먼트 템플릿은 AdaptationSet 과 Representation 에 나뉘어 있을 수 있다 (Representation 이 덮는다)
+    const templateOf = (as, rep) => {
+      const a = xmlKid(as, 'SegmentTemplate'), r = rep ? xmlKid(rep, 'SegmentTemplate') : null;
+      if (!a && !r) return null;
+      const attrs = Object.assign({}, a ? a.attrs : {}, r ? r.attrs : {});
+      const timeline = xmlKid(r, 'SegmentTimeline') || xmlKid(a, 'SegmentTimeline');
+      return { attrs, timeline, hasPto: attrs.presentationTimeOffset != null };
+    };
+    const ptoOf = (period) => {
+      for (const as of xmlKids(period.node, 'AdaptationSet')) {
+        const rep = xmlKid(as, 'Representation');
+        const t = templateOf(as, rep);
+        if (t && t.hasPto) return { pto: (+t.attrs.presentationTimeOffset || 0) / (+t.attrs.timescale || 1), explicit: true };
+      }
+      return { pto: 0, explicit: false };
+    };
+    const textSetsOf = (period) => xmlKids(period.node, 'AdaptationSet').filter((as) => isTextSet(as, xmlKid(as, 'Representation')));
+    const anyText = periods.some((p) => textSetsOf(p).length);
+    const anyPto = periods.some((p) => ptoOf(p).explicit);
+    periods.forEach((p) => { p.content = anyText ? textSetsOf(p).length > 0 : (anyPto ? ptoOf(p).explicit : true); });
+    if (!periods.some((p) => p.content)) periods.forEach((p) => { p.content = true; });
+    const content = periods.filter((p) => p.content);
+    // 본편 시간: presentationTimeOffset 이 본편 기간마다 이어지면(앞 본편의 끝 = 다음 본편의 시작) 그 값을 쓴다
+    const ptos = content.map((p) => ptoOf(p));
+    const ptoChain = ptos.every((x) => x.explicit) && content.every((p, i) => !i || Math.abs(ptos[i].pto - (ptos[i - 1].pto + content[i - 1].dur)) < 1.5);
+    let cum = ptos.length ? ptos[0].pto : 0;
+    content.forEach((p, i) => { p.pto = ptos[i].pto; p.contentStart = ptoChain ? p.pto : cum; cum = p.contentStart + p.dur; });
+    const map = content.map((p) => ({ presStart: p.start, presEnd: p.start + p.dur, contentStart: p.contentStart }));
+    // 자막 트랙: 같은 언어·역할의 자막 세트를 본편 기간마다 모은다
+    const tracks = new Map();
+    for (const p of content) {
+      const pBase = baseOf(p.node, mpdBase);
+      for (const as of textSetsOf(p)) {
+        const rep = xmlKid(as, 'Representation');
+        const aBase = baseOf(as, pBase);
+        const rBase = rep ? baseOf(rep, aBase) : aBase;
+        const lang = String(as.attrs.lang || (rep && rep.attrs.lang) || 'und');
+        const role = xmlKids(as, 'Role').map((r) => r.attrs.value).join(',');
+        const label = (xmlKid(as, 'Label') && xmlKid(as, 'Label').text.trim()) || as.attrs.label || '';
+        const codecs = String(as.attrs.codecs || (rep && rep.attrs.codecs) || (/vtt/i.test(as.attrs.mimeType || '') ? 'vtt' : (/ttml/i.test(as.attrs.mimeType || '') ? 'ttml' : ''))).toLowerCase();
+        const key = lang + '|' + role + '|' + label;
+        if (!tracks.has(key)) tracks.set(key, { lang, label, role, codecs, mime: as.attrs.mimeType || '', parts: [], url: '' });
+        const tr = tracks.get(key);
+        const tpl = templateOf(as, rep);
+        const vars = { RepresentationID: rep ? rep.attrs.id : '', Bandwidth: rep ? rep.attrs.bandwidth : '' };
+        const part = { presStart: p.start, dur: p.dur, pto: p.pto, contentStart: p.contentStart, timescale: 1, initUrl: '', segUrls: [] };
+        if (tpl) {
+          const ts = +tpl.attrs.timescale || 1;
+          const ptoTicks = +tpl.attrs.presentationTimeOffset || 0;
+          const startNumber = tpl.attrs.startNumber != null ? +tpl.attrs.startNumber : 1;
+          part.timescale = ts;
+          part.pto = ptoTicks / ts;
+          if (tpl.attrs.initialization) part.initUrl = resolveUrl(rBase, fillTemplate(tpl.attrs.initialization, vars));
+          const media = tpl.attrs.media || '';
+          if (tpl.timeline) {
+            let t = 0, n = startNumber;
+            for (const s of xmlKids(tpl.timeline, 'S')) {
+              const d = +s.attrs.d;
+              if (!(d > 0)) continue;
+              if (s.attrs.t != null) t = +s.attrs.t;
+              let r = s.attrs.r != null ? +s.attrs.r : 0;
+              if (r < 0) r = Math.max(0, Math.ceil((ptoTicks + p.dur * ts - t) / d) - 1);
+              for (let k = 0; k <= r && part.segUrls.length < 5000; k++) { part.segUrls.push(resolveUrl(rBase, fillTemplate(media, Object.assign({}, vars, { Number: n, Time: t })))); t += d; n++; }
+            }
+          } else if (+tpl.attrs.duration > 0) {
+            const d = +tpl.attrs.duration;
+            const count = Math.min(5000, Math.ceil((p.dur * ts) / d));
+            for (let k = 0; k < count; k++) part.segUrls.push(resolveUrl(rBase, fillTemplate(media, Object.assign({}, vars, { Number: startNumber + k, Time: ptoTicks + k * d }))));
+          }
+        } else {
+          const list = xmlKid(rep, 'SegmentList') || xmlKid(as, 'SegmentList');
+          if (list) {
+            part.timescale = +list.attrs.timescale || 1;
+            const init = xmlKid(list, 'Initialization');
+            if (init && init.attrs.sourceURL) part.initUrl = resolveUrl(rBase, init.attrs.sourceURL);
+            for (const su of xmlKids(list, 'SegmentURL')) if (su.attrs.media) part.segUrls.push(resolveUrl(rBase, su.attrs.media));
+          } else if (rBase && rBase !== mpdUrl) {
+            // 자막 파일 하나(사이드카): 본편 기간마다 같은 파일이면 한 번만 쓴다
+            if (!tr.url) { tr.url = rBase; tr.urlContentStart = p.contentStart - p.pto; }
+            continue;
+          }
+        }
+        if (part.segUrls.length) tr.parts.push(part);
+      }
+    }
+    const textTracks = Array.from(tracks.values()).filter((t) => t.url || t.parts.length);
+    return {
+      duration: Number.isFinite(total) ? total : (periods.length ? periods[periods.length - 1].start + periods[periods.length - 1].dur : 0),
+      periods: periods.map((p) => ({ id: p.id, start: p.start, dur: p.dur, content: p.content })),
+      map, hasAds: periods.some((p) => !p.content), textTracks,
+    };
+  }
+  /** 영상 시각(초, 광고 포함) → 본편 시간(초). 광고 기간이면 NaN */
+  function presToContent(map, pres) {
+    if (!map || !map.length) return pres;
+    for (const m of map) if (pres >= m.presStart - 0.05 && pres < m.presEnd + 0.05) return m.contentStart + Math.max(0, pres - m.presStart);
+    return NaN;
+  }
+  /** 본편 시간(초) → 영상 시각(초). 본편 기간 밖이면 가장 가까운 본편으로 */
+  function contentToPres(map, content) {
+    if (!map || !map.length) return content;
+    let best = null;
+    for (const m of map) {
+      const len = m.presEnd - m.presStart;
+      if (content >= m.contentStart - 0.001 && content < m.contentStart + len) return m.presStart + (content - m.contentStart);
+      const dist = content < m.contentStart ? m.contentStart - content : content - (m.contentStart + len);
+      if (!best || dist < best.dist) best = { dist, pres: content < m.contentStart ? m.presStart : m.presEnd - 0.05 };
+    }
+    return best ? best.pres : content;
+  }
+
+  // ───────── MP4 자막 조각 (DASH 의 wvtt · stpp) ─────────
+  const u32 = (b, o) => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+  const u64 = (b, o) => u32(b, o) * 4294967296 + u32(b, o + 4);
+  const s32 = (b, o) => (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
+  const fourcc = (b, o) => String.fromCharCode(b[o], b[o + 1], b[o + 2], b[o + 3]);
+  function mp4Boxes(b, start, end) {
+    const out = [];
+    let off = start;
+    while (off + 8 <= end) {
+      let size = u32(b, off);
+      const type = fourcc(b, off + 4);
+      let hdr = 8;
+      if (size === 1) { if (off + 16 > end) break; size = u64(b, off + 8); hdr = 16; } else if (size === 0) size = end - off;
+      if (size < hdr || off + size > end) break;
+      out.push({ type, start: off, data: off + hdr, end: off + size });
+      off += size;
+    }
+    return out;
+  }
+  const findBox = (b, boxes, path) => {
+    let list = boxes, box = null;
+    for (const t of path) {
+      box = list.find((x) => x.type === t);
+      if (!box) return null;
+      list = mp4Boxes(b, box.data + (t === 'stsd' ? 8 : 0), box.end);
+    }
+    return box;
+  };
+  const utf8 = (b, s, e) => {
+    if (typeof TextDecoder !== 'undefined') return new TextDecoder('utf-8').decode(b.subarray(s, e));
+    return Buffer.from(b.subarray(s, e)).toString('utf8');
+  };
+  const toBytes = (x) => (x instanceof Uint8Array ? x : (x && x.byteLength !== undefined ? new Uint8Array(x.buffer ? x.buffer : x, x.byteOffset || 0, x.byteLength) : new Uint8Array(0)));
+  /** 초기화 조각(moov)에서 시간 단위·기본 샘플 길이·자막 형식(wvtt/stpp) */
+  function parseMp4Init(init) {
+    const b = toBytes(init);
+    const out = { timescale: 0, defaultDuration: 0, codec: '' };
+    if (!b.length) return out;
+    const top = mp4Boxes(b, 0, b.length);
+    const mdhd = findBox(b, top, ['moov', 'trak', 'mdia', 'mdhd']);
+    if (mdhd) out.timescale = b[mdhd.data] === 1 ? u32(b, mdhd.data + 20) : u32(b, mdhd.data + 12);
+    const trex = findBox(b, top, ['moov', 'mvex', 'trex']);
+    if (trex) out.defaultDuration = u32(b, trex.data + 12);
+    const stsd = findBox(b, top, ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd']);
+    if (stsd) { const e = mp4Boxes(b, stsd.data + 8, stsd.end)[0]; if (e) out.codec = e.type; }
+    return out;
+  }
+  /** 미디어 조각 하나 → 샘플 [{ t(틱), d(틱), bytes }] */
+  function mp4Samples(seg, defaultDuration) {
+    const b = toBytes(seg);
+    const out = [];
+    const top = mp4Boxes(b, 0, b.length);
+    for (let i = 0; i < top.length; i++) {
+      if (top[i].type !== 'moof') continue;
+      const moof = top[i];
+      const mdat = top.slice(i + 1).find((x) => x.type === 'mdat');
+      for (const traf of mp4Boxes(b, moof.data, moof.end).filter((x) => x.type === 'traf')) {
+        const kids = mp4Boxes(b, traf.data, traf.end);
+        const tfhd = kids.find((x) => x.type === 'tfhd'), tfdt = kids.find((x) => x.type === 'tfdt');
+        let base = moof.start, defDur = defaultDuration || 0, defSize = 0;
+        if (tfhd) {
+          const fl = u32(b, tfhd.data) & 0xffffff;
+          let o = tfhd.data + 8;
+          if (fl & 0x01) { base = u64(b, o); o += 8; }
+          if (fl & 0x02) o += 4;
+          if (fl & 0x08) { defDur = u32(b, o); o += 4; }
+          if (fl & 0x10) { defSize = u32(b, o); o += 4; }
+        }
+        let t = tfdt ? (b[tfdt.data] === 1 ? u64(b, tfdt.data + 4) : u32(b, tfdt.data + 4)) : 0;
+        for (const trun of kids.filter((x) => x.type === 'trun')) {
+          const fl = u32(b, trun.data) & 0xffffff;
+          const n = u32(b, trun.data + 4);
+          let o = trun.data + 8;
+          let pos = mdat ? mdat.data : 0;
+          if (fl & 0x01) { pos = base + s32(b, o); o += 4; }
+          if (fl & 0x04) o += 4;
+          for (let k = 0; k < n && k < 100000; k++) {
+            let d = defDur, size = defSize;
+            if (fl & 0x100) { d = u32(b, o); o += 4; }
+            if (fl & 0x200) { size = u32(b, o); o += 4; }
+            if (fl & 0x400) o += 4;
+            if (fl & 0x800) o += 4;
+            if (pos + size > b.length) break;
+            out.push({ t, d, bytes: b.subarray(pos, pos + size) });
+            pos += size; t += d;
+          }
+        }
+      }
+    }
+    return out;
+  }
+  /**
+   * DASH 의 MP4 자막 조각들(wvtt: WebVTT-in-MP4, stpp: TTML-in-MP4) → 큐 [{start, end, text}] (미디어 시각 ms).
+   * 같은 대사가 여러 샘플·조각에 걸쳐 나뉘어 있으면(다른 대사가 겹쳐 시작할 때마다 나뉜다) 하나로 잇는다
+   */
+  function parseMp4Text(segments, init, opts) {
+    const o = opts || {};
+    const info = parseMp4Init(init);
+    const ts = info.timescale || o.timescale || 1000;
+    const codec = String(info.codec || o.codecs || '').toLowerCase();
+    const raw = [];
+    for (const seg of segments || []) {
+      for (const s of mp4Samples(seg, info.defaultDuration)) {
+        const start = (s.t / ts) * 1000, end = ((s.t + s.d) / ts) * 1000;
+        if (!s.bytes.length) continue;
+        if (codec.startsWith('stpp') || (!codec.startsWith('wvtt') && /^\s*<\?xml|^\s*<tt/.test(utf8(s.bytes, 0, Math.min(64, s.bytes.length))))) {
+          const r = parseTTML(utf8(s.bytes, 0, s.bytes.length));
+          // TTML 시각은 대개 미디어 시각 그대로지만, 샘플 기준(0부터)인 경우도 있다 → 샘플 구간 밖이면 샘플 시작을 더한다
+          const absolute = r.cues.every((c) => c.start >= start - 1000 && c.start <= end + 1000);
+          for (const c of r.cues) raw.push({ start: absolute ? c.start : c.start + start, end: absolute ? c.end : c.end + start, text: c.text });
+          continue;
+        }
+        for (const box of mp4Boxes(s.bytes, 0, s.bytes.length)) {
+          if (box.type !== 'vttc') continue;
+          const payl = mp4Boxes(s.bytes, box.data, box.end).find((x) => x.type === 'payl');
+          if (!payl) continue;
+          const text = cleanCueText(utf8(s.bytes, payl.data, payl.end));
+          if (text) raw.push({ start, end, text });
+        }
+      }
+    }
+    return mergeSplitCues(raw);
+  }
+  /** 바로 이어지는(40ms 안) 같은 글의 큐를 하나로 */
+  function mergeSplitCues(cues) {
+    const sorted = (cues || []).slice().sort((a, b) => a.start - b.start || a.end - b.end);
+    const out = [];
+    const open = new Map(); // 글 → 마지막 큐
+    for (const c of sorted) {
+      const prev = open.get(c.text);
+      if (prev && c.start <= prev.end + 40) { prev.end = Math.max(prev.end, c.end); continue; }
+      const n = { start: c.start, end: c.end, text: c.text };
+      out.push(n);
+      open.set(c.text, n);
+    }
+    return out;
+  }
+
   return {
     decodeEntities, cleanCueText, parseVttTime, parseTtmlTime, parseVTT, parseTTML, parseJson3, parseAny, parseSegments,
     finalizeCues, findCueIndex, lastStartedIndex, nextStartingIndex, mergeTranslations,
     normalizeForCompare, diffWords, formatTime, parseM3U8,
+    parseXml, parseIsoDuration, parseMPD, presToContent, contentToPres, parseMp4Init, parseMp4Text, mergeSplitCues,
   };
 });

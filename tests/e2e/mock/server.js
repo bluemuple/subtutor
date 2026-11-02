@@ -26,11 +26,90 @@ function sendFile(req, res, file, extraHeaders) {
   fs.createReadStream(file).pipe(res);
 }
 
+// ── 모의 TVNZ+: 광고가 영상에 이어 붙은 DASH (실제 TVNZ+ 와 같은 모양, 2026-11-02 확인) ──
+// 영상 시각: 0–4초 광고 · 4–22초 본편(본편 0–18초) · 22–26초 광고 · 26–48초 본편(본편 18–40초)
+// 자막은 wvtt(WebVTT-in-MP4) 6초 조각, 시간 단위 600, 본편 기간마다 presentationTimeOffset = 본편 시각
+const TVNZ_CUES = [
+  [1.0, 3.5, 'Kia ora, welcome to Ferndale.'],
+  [4.2, 6.8, "<c.cyan>- My dog Raffie bites all the time</c>\n<c.cyan>when he's playing,</c>"],
+  [7.5, 10.0, 'but my mum says, "You\'re not a dog, Rory,"'],
+  [10.8, 13.2, "and I say, 'Really? Let's look at the facts.'"],
+  [14.0, 16.5, "I like biting when I'm playing."],
+  [17.0, 19.6, 'Sweet as, see you at morning tea.'], // 본편 18초의 광고 경계를 넘는다 → 두 조각에 나뉘어 들어가도 한 줄로 이어야 한다
+  [20.5, 23.0, 'I can catch a frisbee in my mouth.'],
+  [24.0, 26.6, 'And I like eating with no hands.'],
+  [27.5, 30.0, "I don't think she's paying attention."],
+  [31.0, 34.0, "The only time I've been to the Principal's office"],
+];
+const TVNZ_TS = 600;
+const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n >>> 0); return b; };
+const u64 = (n) => Buffer.concat([u32(Math.floor(n / 4294967296)), u32(n % 4294967296)]);
+const box = (type, ...parts) => { const body = Buffer.concat(parts.map((p) => (Buffer.isBuffer(p) ? p : Buffer.from(p)))); return Buffer.concat([u32(8 + body.length), Buffer.from(type, 'ascii'), body]); };
+const fullHdr = (v, flags) => u32(((v & 0xff) << 24) | (flags & 0xffffff));
+function wvttInit() {
+  const mdhd = box('mdhd', fullHdr(0, 0), u32(0), u32(0), u32(TVNZ_TS), u32(0), u32(0));
+  const stsd = box('stsd', fullHdr(0, 0), u32(1), box('wvtt', Buffer.alloc(8), box('vttC', 'WEBVTT')));
+  return Buffer.concat([box('ftyp', 'iso6', u32(0)), box('moov', box('trak', box('mdia', mdhd, box('minf', box('stbl', stsd)))), box('mvex', box('trex', fullHdr(0, 0), u32(1), u32(1), u32(0), u32(0), u32(0))))]);
+}
+// [t0, t1) 초 구간의 조각: 대사가 바뀌는 곳마다 샘플을 나눈다 (대사 없는 곳은 vtte)
+function wvttSegment(t0, t1) {
+  const marks = new Set([t0, t1]);
+  for (const [s, e] of TVNZ_CUES) { if (s > t0 && s < t1) marks.add(s); if (e > t0 && e < t1) marks.add(e); }
+  const pts = Array.from(marks).sort((a, b) => a - b);
+  const samples = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const live = TVNZ_CUES.filter(([s, e]) => s <= a && e >= b);
+    const data = live.length ? Buffer.concat(live.map(([, , text]) => box('vttc', box('payl', text)))) : box('vtte');
+    samples.push({ d: Math.round((b - a) * TVNZ_TS), data });
+  }
+  const build = (off) => box('moof', box('mfhd', fullHdr(0, 0), u32(1)), box('traf', box('tfhd', fullHdr(0, 0x020000), u32(1)), box('tfdt', fullHdr(1, 0), u64(Math.round(t0 * TVNZ_TS))), box('trun', fullHdr(0, 0x000301), u32(samples.length), u32(off), ...samples.flatMap((s) => [u32(s.d), u32(s.data.length)]))));
+  const moof = build(build(0).length + 8);
+  return Buffer.concat([box('styp', 'msdh'), moof, box('mdat', Buffer.concat(samples.map((s) => s.data)))]);
+}
+function tvnzMpd() {
+  // 본편 1: 영상 4–22초 = 본편 0–18초 (조각 0·3600·7200) · 본편 2: 영상 26–48초 = 본편 18–40초 (조각 10800·14400·18000·21600)
+  const text = (pto, timeline) => '<AdaptationSet codecs="wvtt" contentType="text" lang="en" mimeType="application/mp4"><Role schemeIdUri="urn:mpeg:dash:role:2011" value="subtitle"/><SegmentTemplate initialization="mock-$RepresentationID$.dash" media="mock-$RepresentationID$-$Time$.dash" presentationTimeOffset="' + pto + '" timescale="600"><SegmentTimeline>' + timeline + '</SegmentTimeline></SegmentTemplate><Representation bandwidth="1000" id="textstream_eng=1000"/></AdaptationSet>';
+  const video = (pto) => '<AdaptationSet contentType="video" mimeType="video/mp4"><SegmentTemplate timescale="600" presentationTimeOffset="' + pto + '" media="mock-$RepresentationID$-$Time$.dash"><SegmentTimeline><S t="' + pto + '" d="3600" r="3"/></SegmentTimeline></SegmentTemplate><Representation id="video=1000" bandwidth="1000"/></AdaptationSet>';
+  const ad = (id, start, dur) => '<Period id="' + id + '" start="PT' + start + 'S" duration="PT' + dur + 'S"><BaseURL>https://ads.example.invalid/ad/</BaseURL><AdaptationSet mimeType="video/mp4"><SegmentTemplate timescale="25000" media="asset_$RepresentationID$_$Number%09d$.mp4" duration="50000"/><Representation id="7"/></AdaptationSet></Period>';
+  return '<?xml version="1.0" encoding="utf-8"?>\n<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT48S">'
+    + '<BaseURL>https://vod-origin-cdn.cms-api.tvnz.co.nz/content/pubcontent/vol/mock/mock-output_cenc_dash_dref.ism/</BaseURL>'
+    + ad('1_PT0S_0', 0, 4)
+    + '<Period id="1_PT4S" start="PT4S" duration="PT18S">' + video(0) + text(0, '<S d="3600" r="2" t="0"/>') + '</Period>'
+    + ad('1_PT18S_0', 22, 4)
+    + '<Period id="1_PT26S" start="PT26S" duration="PT22S">' + video(10800) + text(10800, '<S d="3600" r="3" t="10800"/>') + '</Period>'
+    + '</MPD>';
+}
+const jsonRes = (res, obj, extra) => { res.writeHead(200, Object.assign({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' }, extra || {})); res.end(JSON.stringify(obj)); };
+
 function mockHandler(root) {
   return (req, res) => {
     const url = new URL(req.url, 'https://x');
     const p = url.pathname;
+    const host = String(req.headers.host || '').replace(/:\d+$/, '');
     if (p === '/favicon.ico') { res.writeHead(204); res.end(); return; }
+    // ── 범용 사이트 모의 (TVNZ+ · NZ On Screen(Brightcove) · Vimeo(<track>) · TED(통째 자막 파일)) ──
+    if (host === 'www.tvnz.co.nz' && /^\/player\/[\w-]+\/[^/]+$/.test(p)) return sendFile(req, res, path.join(root, 'tvnz.html'));
+    if (host === 'data-store-cdn.cms-api.tvnz.co.nz' && p.startsWith('/content/urn/resource/catalog/tvepisode/')) {
+      return jsonRes(res, { data: { urn: 'urn:resource:catalog:tvepisode', cty: 'tvepisode', nu: path.basename(p), snum: 2026, epnum: 110, lon: [{ lang: 'en', n: 'Shortland Street' }], lostl: [{ lang: 'en', n: 'Shortland Street' }], losn: [{ lang: 'en', n: 'Tuesday 27 Oct 2026' }], txt_lg: ['English'] }, header: { code: 0 } });
+    }
+    if (host === 'vod-origin-cdn.cms-api.tvnz.co.nz') {
+      if (p.endsWith('/index.mpd')) { res.writeHead(200, { 'Content-Type': 'application/dash+xml', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' }); res.end(tvnzMpd()); return; }
+      const m = /mock-textstream_eng=1000(?:-(\d+))?\.dash$/.exec(p);
+      if (m) {
+        const body = m[1] === undefined ? wvttInit() : wvttSegment(+m[1] / TVNZ_TS, +m[1] / TVNZ_TS + 6);
+        res.writeHead(200, { 'Content-Type': 'application/mp4', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+        res.end(body);
+        return;
+      }
+    }
+    if (host === 'www.nzonscreen.com' && p.startsWith('/title/')) return sendFile(req, res, path.join(root, 'nzonscreen.html'));
+    if (host === 'edge.api.brightcove.com' && /^\/playback\/v1\/accounts\/\d+\/videos\/\d+$/.test(p)) {
+      return jsonRes(res, { id: '456', name: 'Mock Westside - Episode One', duration: 48000, sources: [{ src: 'https://www.nzonscreen.com/media/test.webm', type: 'video/webm' }], text_tracks: [{ id: 't1', src: 'http://www.nzonscreen.com/tracks/en.vtt', sources: [{ src: 'http://www.nzonscreen.com/tracks/en.vtt' }, { src: 'https://www.nzonscreen.com/tracks/en.vtt' }], srclang: 'en', label: 'EN', kind: 'captions' }, { id: 't2', src: 'https://www.nzonscreen.com/thumbs.vtt', srclang: null, label: 'thumbnails', kind: 'metadata' }] });
+    }
+    if (host === 'vimeo.com' && /^\/\d{5,}$/.test(p)) return sendFile(req, res, path.join(root, 'vimeo.html'));
+    if (host === 'www.ted.com' && p.startsWith('/talks/')) return sendFile(req, res, path.join(root, 'ted.html'));
+    if (/^\/subtitles\/(en|ko|fr)\/full\.vtt$/.test(p)) { const lang = p.split('/')[2]; return sendFile(req, res, path.join(root, 'tracks', (lang === 'fr' ? 'en' : lang) + '.vtt')); }
     // 디즈니+ 모의: /play/<id> 플레이어 페이지와 HLS 자막 목록 (자막 본문은 /tracks/*.vtt 를 그대로 쓴다)
     if (/^\/play\/[^/]+$/.test(p)) return sendFile(req, res, path.join(root, 'disney.html'));
     if (p.startsWith('/mock/disney/')) {

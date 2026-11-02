@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mock Speaker: Do schools kill creativity? | TED Talk</title>
+<style>
+  body { margin: 0; background: #fff; color: #111; font-family: sans-serif; }
+  .player { position: relative; width: 960px; height: 540px; margin: 20px 40px; background: #000; }
+  .player video { width: 100%; height: 100%; display: block; }
+  .bar { position: absolute; left: 0; right: 0; bottom: 0; height: 40px; display: flex; justify-content: flex-end; gap: 6px; background: rgba(0,0,0,.4); }
+  .bar button { height: 40px; min-width: 40px; background: none; color: #fff; border: 0; }
+</style>
+</head>
+<body>
+<!-- 모의 TED: 플레이어가 언어마다 통째로 된 자막 파일(/subtitles/<언어>/full.vtt)을 받아 간다 (실제 TED 와 같은 방식).
+     전체 화면 버튼은 이름(aria-label)으로만 알아볼 수 있다 -->
+<div class="player"><video muted playsinline preload="auto"></video><div class="bar"><button aria-label="Play">P</button><button aria-label="Captions">CC</button><button aria-label="Fullscreen">FS</button></div></div>
+<script>
+  (async () => {
+    for (const lang of ['fr', 'en', 'ko']) await fetch('https://www.ted.com/subtitles/' + lang + '/full.vtt').then((r) => r.text());
+    document.querySelector('video').src = '/media/test.webm';
+  })();
+</script>
+</body>
+</html>

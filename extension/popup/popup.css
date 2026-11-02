@@ -33,3 +33,9 @@ button.small { flex: none; padding: 3px 9px; font-size: 12px; border-radius: 6px
 .infobox-body h5 { margin: 10px 0 4px; font-size: 11px; color: #a78bfa; text-transform: uppercase; }
 .infobox-body ul { margin: 0; padding-left: 16px; color: #999; font-size: 11.5px; }
 .buttons .small { flex: 0 0 auto; width: 40px; }
+button.primary-small { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+#customHint { padding: 6px 14px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.site-row { display: flex; flex-direction: column; padding: 6px 0; border-bottom: 1px solid #262626; }
+.site-row a { color: #c4b5fd; font-weight: 700; text-decoration: none; cursor: pointer; }
+.site-row a:hover { text-decoration: underline; }
+.site-row span { color: #9ca3af; font-size: 11.5px; }

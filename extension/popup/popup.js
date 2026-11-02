@@ -87,23 +87,78 @@ async function init() {
     if (r !== 'granted') { chrome.runtime.openOptionsPage(); window.close(); }
   });
   refreshDir();
-  $('openNetflix').addEventListener('click', () => chrome.tabs.create({ url: 'https://www.netflix.com/browse' }));
+  $('openNetflix').addEventListener('click', showSites);
+  $('sitesClose').addEventListener('click', () => $('sitesBox').classList.add('hidden'));
 
+  let tab = null;
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const res = tab ? await chrome.tabs.sendMessage(tab.id, { type: 'status' }).catch(() => null) : null;
     if (res && res.platform) {
       currentPlatform = res.platform;
       render();
       const names = { netflix: '넷플릭스', prime: '프라임 비디오', disney: '디즈니+', youtube: '유튜브' };
-      $('status').textContent = (names[res.platform] || res.platform) + (res.videoId ? ' · ' + (res.title || res.videoId) + ' · 자막 ' + res.cues + '줄' : ' · 재생 화면이 아닙니다');
+      $('status').textContent = (names[res.platform] || res.label || res.platform) + (res.videoId ? ' · ' + (res.title || res.videoId) + ' · 자막 ' + res.cues + '줄' : ' · 재생 화면이 아닙니다');
       if (res.videoId && res.platform !== 'youtube') { $('audioHint').textContent = '✓ 이 탭의 오디오 녹음 허용됨'; $('audioHint').classList.remove('hidden'); }
+      if (res.custom) { $('customText').textContent = '직접 켠 사이트입니다.'; $('customHint').classList.remove('hidden'); }
       chrome.tabs.sendMessage(tab.id, { type: 'popupOpened' }).catch(() => {});
     } else {
-      $('status').textContent = '이 탭에서는 실행 중이 아닙니다 (넷플릭스 재생 화면에서 열어 보세요)';
+      offerSite(tab);
     }
   } catch (e) {
     $('status').textContent = '상태를 확인할 수 없습니다';
   }
+  $('removeSite').addEventListener('click', async () => {
+    let host = '';
+    try { host = new URL(tab.url).hostname; } catch (e) { return; }
+    const r = await chrome.runtime.sendMessage({ type: 'sites.remove', host }).catch(() => null);
+    $('customText').textContent = r && r.ok ? '목록에서 뺐습니다. 탭을 새로고침하면 SubTutor 가 사라집니다.' : '빼지 못했습니다';
+    $('removeSite').classList.add('hidden');
+  });
+}
+// 지원 목록에 없는 사이트: 그 사이트의 접근 권한을 받아 SubTutor 를 켠다 (영상의 자막을 플레이어가 받는 파일·<track>·텍스트 트랙에서 찾는다)
+function offerSite(tab) {
+  let u = null;
+  try { u = tab && tab.url ? new URL(tab.url) : null; } catch (e) { u = null; }
+  const Sites = globalThis.SubTutorSites;
+  const host = u ? u.hostname.toLowerCase() : '';
+  const known = host && (/(^|\.)(netflix|primevideo|disneyplus|youtube)\.com$/.test(host) || /(^|\.)amazon\./.test(host) || (Sites && Sites.forHost(host)));
+  if (!u || !/^https?:$/.test(u.protocol)) { $('status').textContent = '이 탭에서는 실행 중이 아닙니다 (영상 재생 화면에서 열어 보세요)'; return; }
+  if (known) { $('status').textContent = '이 탭에서는 아직 실행 중이 아닙니다 — 탭을 새로고침해 보세요'; return; }
+  $('status').textContent = host + ' · 지원 목록에 없는 사이트';
+  $('siteBox').classList.remove('hidden');
+  $('siteHint').textContent = '이 사이트의 영상 자막을 찾아 패널·단축키·저장·더빙을 씁니다. 크롬이 이 사이트 접근 권한을 묻습니다.';
+  $('addSite').addEventListener('click', async () => {
+    // 권한 요청은 누른 그 순간에 해야 한다 (사용자 동작)
+    let granted = false;
+    try { granted = await chrome.permissions.request({ origins: [u.origin + '/*'] }); } catch (e) { granted = false; }
+    if (!granted) { $('siteHint').textContent = '권한을 허용하지 않아 켜지 못했습니다.'; return; }
+    const r = await chrome.runtime.sendMessage({ type: 'sites.add', origin: u.origin, tabId: tab.id }).catch((e) => ({ ok: false, error: String(e && e.message || e) }));
+    if (!r || !r.ok) { $('siteHint').textContent = '켜지 못했습니다: ' + ((r && r.error) || ''); return; }
+    $('siteHint').textContent = '켰습니다. 탭을 새로고침하면 처음부터 자막을 찾습니다. ';
+    const reload = document.createElement('button'); reload.className = 'small'; reload.textContent = '새로고침';
+    reload.addEventListener('click', () => { chrome.tabs.reload(tab.id); window.close(); });
+    $('siteHint').append(reload);
+    $('addSite').disabled = true;
+  });
+}
+// 지원 사이트 목록 (누르면 그 사이트를 연다)
+function showSites() {
+  const Sites = globalThis.SubTutorSites;
+  const body = $('sitesBody'); body.textContent = '';
+  const add = (name, url, about) => {
+    const row = document.createElement('div'); row.className = 'site-row';
+    const a = document.createElement('a'); a.href = url; a.textContent = name; a.addEventListener('click', (e) => { e.preventDefault(); chrome.tabs.create({ url }); });
+    const s = document.createElement('span'); s.textContent = about;
+    row.append(a, s); body.append(row);
+  };
+  add('넷플릭스', 'https://www.netflix.com/browse', '드라마·영화');
+  add('유튜브', 'https://www.youtube.com/', '영상·뉴질랜드 교실 영상');
+  add('프라임 비디오', 'https://www.primevideo.com/', '드라마·영화');
+  add('디즈니+', 'https://www.disneyplus.com/', '애니메이션·드라마 (실험적)');
+  if (Sites) for (const s of Sites.SITES) add(s.label, s.home, s.about);
+  const p = document.createElement('p'); p.className = 'hint'; p.textContent = '목록에 없는 사이트는 그 사이트에서 이 팝업을 열고 "이 사이트에서 SubTutor 켜기"를 누르세요.';
+  body.append(p);
+  $('sitesBox').classList.remove('hidden');
 }
 init();

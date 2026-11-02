@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Season 2026, Episode 110: Shortland Street</title>
+<style>
+  body { margin: 0; background: #000; color: #fff; font-family: sans-serif; overflow: hidden; }
+  app-root, .app, main, .seo-video-access-gate, app-player, app-video-player { display: block; }
+  app-player-container { display: inline; }
+  .player { position: absolute; left: 0; top: 0; width: 100%; height: 100vh; }
+  video { width: 100%; height: 100%; background: #111; display: block; }
+  .shaka-text-container { position: absolute; left: 0; right: 0; bottom: 110px; text-align: center; font-size: 24px; pointer-events: none; }
+  .player-bottom { position: absolute; left: 0; right: 0; bottom: 30px; padding: 0 40px; }
+  .player-bottom-options { display: flex; justify-content: space-between; align-items: center; height: 37px; }
+  .player-bottom-options-center, .player-bottom-options-right { display: flex; align-items: flex-end; gap: 20px; }
+  button, [role="button"] { height: 34px; min-width: 34px; background: #333; color: #fff; border: 0; }
+</style>
+</head>
+<body>
+<!-- 모의 TVNZ+: 실제 페이지(2026-11-02)와 같은 구조 — Angular 앱, Shaka 자막(div.shaka-text-container), 오른쪽 묶음의 전체 화면 버튼.
+     영상 시각 0–4초·22–26초는 광고(SSAI), 그 밖은 본편. 컨트롤은 마우스가 2초 멈추면 DOM 에서 빠진다 -->
+<app-root><div class="app"><main id="main-content"><app-player-container><div class="seo-video-access-gate"><app-player><div class="player">
+  <video id="video-player" class="main" muted playsinline preload="auto"></video>
+  <span class="player-sr-announce"></span>
+  <app-video-player></app-video-player>
+  <div class="shaka-text-container"><div><span class="shaka-text-wrapper"><span><span>native shaka caption</span></span></span></div></div>
+</div></app-player></div></app-player-container></main></div></app-root>
+<script>
+(async () => {
+  const v = document.getElementById('video-player');
+  const slug = location.pathname.split('/').pop();
+  window.__seeks = [];
+  v.addEventListener('seeking', () => window.__seeks.push(Math.round(v.currentTime * 1000)));
+  // 실제 TVNZ+ 처럼: 카탈로그(제목) → 재생 권한 → MPD → 재생
+  await fetch('https://data-store-cdn.cms-api.tvnz.co.nz/content/urn/resource/catalog/tvepisode/' + slug).then((r) => r.json());
+  const mpd = await fetch('https://vod-origin-cdn.cms-api.tvnz.co.nz/v1/dash/mocktoken/vod/content/pubcontent/vol/mock/mock-output_cenc_dash_dref.ism/index.mpd').then((r) => r.text());
+  window.__mpdLength = mpd.length;
+  v.src = '/media/test.webm';
+  const host = document.querySelector('app-video-player');
+  const build = () => {
+    host.innerHTML = '<div class="player-bottom"><div class="player-bottom-options">'
+      + '<app-player-volume><div class="player-volume"><button class="player-volume-trigger" aria-label="Volume control">vol</button></div></app-player-volume>'
+      + '<div class="player-bottom-options-center"><app-player-restart><button class="player-restart" aria-label="Restart">R</button></app-player-restart><app-player-audio-subtitle><div class="player-audio-subtitle"><div class="player-audio-subtitle-selector" aria-label="Subtitles options" role="button">CC</div></div></app-player-audio-subtitle></div>'
+      + '<div class="player-bottom-options-right"><app-player-fullscreen><div class="player-fullscreen"><div class="tooltip-container"><button class="player-fullscreen-trigger" aria-label="Watch fullscreen">FS</button><span class="tooltip-text">Fullscreen</span></div></div></app-player-fullscreen></div>'
+      + '</div></div>';
+  };
+  window.__controls = { builds: 0, hides: 0 };
+  let hideTimer = null;
+  const show = () => {
+    if (!host.firstElementChild) { build(); window.__controls.builds++; }
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => { if (window.__keepControls) return; host.innerHTML = ''; window.__controls.hides++; }, 2000);
+  };
+  document.addEventListener('mousemove', show);
+  window.__showControls = show;
+  show();
+})();
+</script>
+</body>
+</html>

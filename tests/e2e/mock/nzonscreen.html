@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mock Westside - First Episode | NZ On Screen</title>
+<meta property="og:title" content="Mock Westside - First Episode">
+<style>
+  body { margin: 0; background: #fafafa; color: #111; font-family: sans-serif; }
+  .page { padding: 20px 40px; }
+  .video-js { position: relative; width: 960px; height: 540px; background: #000; }
+  .video-js video { width: 100%; height: 100%; display: block; }
+  .vjs-text-track-display { position: absolute; left: 0; right: 0; bottom: 60px; text-align: center; color: #fff; font-size: 22px; pointer-events: none; }
+  .vjs-control-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 30px; display: flex; background: rgba(43,51,63,.7); }
+  .vjs-control-bar button { height: 30px; min-width: 40px; background: none; color: #fff; border: 0; }
+</style>
+</head>
+<body>
+<!-- 모의 NZ On Screen: Brightcove(video.js) 플레이어. 재생 정보(JSON)를 XHR 로 받고, text_tracks 의 WebVTT 주소에 자막 전체가 있다 (실제 페이지와 같은 방식) -->
+<div class="page"><h1>Westside</h1>
+<div class="video-js vjs-paused" id="vjs_video_3">
+  <video class="vjs-tech" id="vjs_video_3_html5_api" muted playsinline preload="auto"></video>
+  <div class="vjs-text-track-display"><div><div>native video.js caption</div></div></div>
+  <div class="vjs-control-bar"><button class="vjs-play-control vjs-control" title="Play">P</button><div class="vjs-custom-control-spacer" style="flex:1"></div><button class="vjs-subs-caps-button vjs-control" title="Captions">CC</button><button class="vjs-fullscreen-control vjs-control" title="Fullscreen">FS</button></div>
+</div>
+<p>Westside is the prequel to Outrageous Fortune.</p>
+</div>
+<script>
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', 'https://edge.api.brightcove.com/playback/v1/accounts/6416036801001/videos/6393652365112');
+  xhr.onload = () => { const j = JSON.parse(xhr.responseText); window.__bc = j.name; document.querySelector('video').src = '/media/test.webm'; };
+  xhr.send();
+</script>
+</body>
+</html>

@@ -320,12 +320,171 @@ async function runDisney() {
   }
 }
 
+// ── 범용 사이트(모의): TVNZ+(광고가 이어 붙은 DASH · wvtt 자막) · NZ On Screen(Brightcove) · Vimeo(<track>) · TED(통째 자막 파일).
+//    따로 띄운 크롬에서 진짜 주소를 모의 서버로 돌린다. 웹사이트(localhost:8766)에서 TVNZ+ 대사 원격 재생까지 본다
+async function runSites() {
+  const userDataDir = path.join(TMP, 'profile-sites-' + Date.now());
+  const hosts = ['www.tvnz.co.nz', 'data-store-cdn.cms-api.tvnz.co.nz', 'vod-origin-cdn.cms-api.tvnz.co.nz', 'www.nzonscreen.com', 'edge.api.brightcove.com', 'vimeo.com', 'www.ted.com', 'translate.googleapis.com', 'clients5.google.com'];
+  const browser = await puppeteer.launch({
+    headless: HEADLESS,
+    userDataDir,
+    args: ['--disable-extensions-except=' + EXT, '--load-extension=' + EXT, '--host-resolver-rules=' + hosts.map((h) => 'MAP ' + h + ' 127.0.0.1:8443').join(', '),
+      '--ignore-certificate-errors', '--autoplay-policy=no-user-gesture-required', '--mute-audio', '--no-first-run', '--window-size=1400,900'],
+    acceptInsecureCerts: true,
+    defaultViewport: { width: 1400, height: 900 },
+    protocolTimeout: Number(process.env.E2E_PROTOCOL_TIMEOUT) || 60000,
+  });
+  const diag = (p) => p.evaluate(() => { const b = [...document.querySelectorAll('.st-settings button')].find((x) => x.textContent === '진단 정보'); if (b) b.click(); const d = document.querySelector('.st-settings .st-diag'); return d ? d.textContent : ''; });
+  const vt = (p) => p.evaluate(() => document.querySelector('video').currentTime);
+  try {
+    console.log('▶ 범용 사이트 (모의 TVNZ+ · NZ On Screen · Vimeo · TED · 아무 사이트)');
+    const swTarget = await browser.waitForTarget((t) => t.type() === 'service_worker' && t.url().includes('background.js'), { timeout: 15000 });
+    const sw = await swTarget.worker();
+    await waitFor(() => sw.evaluate(() => typeof globalThis.__subtutorHandle === 'function' && !!(globalThis.chrome && chrome.storage)), 15000, 'service worker (sites)');
+    await sw.evaluate(() => chrome.storage.local.clear());
+    await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { koMode: 'always' } }, {}));
+    const tp = await browser.newPage();
+    tp.on('pageerror', (e) => console.log('  [TVNZ 페이지 오류] ' + e.message));
+    await tp.goto('https://www.tvnz.co.nz/player/tvepisode/shortland-street-s2026-e110-shortland-street', { waitUntil: 'domcontentloaded' });
+    await step('TVNZ+(모의): 광고가 이어 붙은 DASH 의 wvtt 자막 10줄 · 제목·회차는 카탈로그에서 · 광고 경계를 넘는 줄도 한 줄', async () => {
+      await tp.waitForSelector('#st-panel', { timeout: 20000 });
+      await waitFor(() => tp.$$eval('.st-row', (r) => r.length === 10), 20000, 'tvnz rows').catch(async (e) => { throw new Error(e.message + ' diag=' + (await diag(tp)).split('\n').slice(0, 12).join(' | ')); });
+      const status = await tp.$eval('.st-status', (e) => e.textContent);
+      assert(/영어 10줄/.test(status), 'status ' + status);
+      const rows = await tp.$$eval('.st-row .st-en', (r) => r.map((e) => e.textContent));
+      assert(rows[1] === "- My dog Raffie bites all the time when he's playing," && rows[5] === 'Sweet as, see you at morning tea.', 'rows ' + JSON.stringify(rows));
+      await waitFor(() => tp.$eval('#st-panel', (e) => e.dataset.title === 'Shortland Street · S2026 E110 · Tuesday 27 Oct 2026'), 8000, 'tvnz title').catch(async (e) => { throw new Error(e.message + ' title=' + await tp.$eval('#st-panel', (x) => x.dataset.title)); });
+      const d = await diag(tp);
+      assert(/dash=periods 4 content 4\.0-22\.0→0\.0 26\.0-48\.0→18\.0 \(ads\)/.test(d), 'diag dash line: ' + d.split('\n').find((l) => l.startsWith('site=')));
+    });
+    await step('TVNZ+(모의): 오른쪽 묶음의 전체 화면 버튼 바로 왼쪽에 배속·ST 버튼, 컨트롤이 DOM 에서 빠졌다 다시 생겨도 다시 붙는다 · TVNZ 자막(Shaka)은 숨긴다 · 영상은 패널 왼쪽까지', async () => {
+      await tp.mouse.move(300, 300);
+      await waitFor(() => tp.$$eval('.player-bottom-options-right > *', (xs) => xs.map((x) => (x.classList.contains('st-rate') ? 'rate' : (x.classList.contains('st-ctl-wrap') || x.classList.contains('st-ctl') ? 'ST' : x.tagName.toLowerCase()))).join(',') === 'rate,ST,app-player-fullscreen'), 5000, 'ST before fullscreen');
+      assert((await tp.$eval('.shaka-text-container', (e) => getComputedStyle(e).visibility)) === 'hidden', 'shaka captions hidden');
+      await waitFor(() => tp.evaluate(() => !document.querySelector('.player-bottom-options-right')), 6000, 'controls auto-hide (removed from DOM)');
+      await tp.mouse.move(420, 360);
+      await waitFor(() => tp.$$eval('.player-bottom-options-right > *', (xs) => xs.length === 3 && xs[2].tagName === 'APP-PLAYER-FULLSCREEN' && xs[1].classList.contains('st-ctl-wrap')), 5000, 'ST re-inserted after the controls come back');
+      const right = await tp.evaluate(() => Math.round(document.querySelector('video').getBoundingClientRect().right));
+      assert(right <= 1400 - 400 + 2, 'video beside the panel: right=' + right);
+    });
+    await step('TVNZ+(모의): 광고 중에는 영상 위 자막을 감추고, 줄 이동은 광고를 건너뛴 본편 시각으로 (줄 누르기 · D 로 광고 경계 넘기)', async () => {
+      await tp.evaluate(() => { const v = document.querySelector('video'); v.currentTime = 23; v.play(); });
+      await sleep(900);
+      assert(await tp.$eval('#st-overlay', (e) => e.classList.contains('st-hidden')), 'overlay hidden during the mid-roll ad');
+      await tp.evaluate(() => { document.querySelector('video').currentTime = 28.6; });
+      await waitFor(() => tp.$eval('.st-ov-text', (e) => e.textContent === 'I can catch a frisbee in my mouth.'), 3000, 'overlay after the ad = content 20.6 s');
+      await tp.evaluate(() => { document.querySelector('video').pause(); window.__seeks = []; }); // 여기부터는 우리가 옮긴 탐색만
+      await tp.click('.st-row[data-i="7"] .st-en');  // 본편 24.0초 → 영상 26 + 6.0 − 앞 여유 0.15 = 31.85초
+      await waitFor(async () => { const t = await vt(tp); return t > 31.7 && t < 33.5; }, 3000, 'row 7 → video 31.85 s');
+      await tp.click('.st-row[data-i="4"] .st-en');
+      await waitFor(async () => { const t = await vt(tp); return t > 17.6 && t < 19.5; }, 3000, 'row 4 → video 17.85 s');
+      await tp.keyboard.press('KeyD');                 // 5번 줄(본편 17.0초) → 영상 20.85초
+      await waitFor(async () => { const t = await vt(tp); return t > 20.7 && t < 22; }, 3000, 'D → row 5 at video 20.85 s');
+      await tp.keyboard.press('KeyD');                 // 6번 줄(본편 20.5초) → 광고(22–26초)를 건너뛰어 영상 28.35초
+      await waitFor(async () => { const t = await vt(tp); return t > 28.2 && t < 29.6; }, 3000, 'D across the ad → video 28.35 s');
+      const seeks = await tp.evaluate(() => window.__seeks.slice());
+      // (탐색을 잇달아 하면 브라우저가 seeking 이벤트를 합치기도 한다 → 위치는 위의 단계마다 확인했고, 여기서는 광고 구간으로 옮긴 적이 없는지만)
+      assert(!seeks.some((ms) => ms >= 22000 && ms < 26000), 'never seeks into the ad: ' + seeks.join(','));
+      await tp.evaluate(() => document.querySelector('video').pause());
+    });
+    await step('TVNZ+(모의): 저장한 대사를 웹에서 ▶ 하면 TVNZ 탭이 그 대사만(광고를 건너뛴 본편 시각) 재생하고 멈춘다 · 목록에 "TVNZ+"', async () => {
+      await tp.click('.st-row[data-i="7"] .st-star');
+      await waitFor(() => sw.evaluate(async () => ((await chrome.storage.local.get('items')).items || []).length === 1), 5000, 'tvnz item saved');
+      const item = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items[0]);
+      assert(item.platform === 'tvnz' && item.videoId === 'shortland-street-s2026-e110-shortland-street' && item.startMs === 24000 && item.endMs === 26600 && /^https:\/\/www\.tvnz\.co\.nz\/player\/tvepisode\//.test(item.url), 'item ' + JSON.stringify(item));
+      const web = await browser.newPage();
+      await web.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+      await waitFor(() => web.$$eval('.item', (r) => r.length === 1), 8000, 'web item');
+      const group = await web.$eval('.group-title', (e) => e.textContent);
+      assert(/Shortland Street \(TVNZ\+\)/.test(group), 'group title ' + group);
+      await web.evaluate(() => { window.__clipEvents = []; window.SubTutorBridge.on('clip.state', (p) => window.__clipEvents.push(p.state)); });
+      await web.click('.item .play');
+      await waitFor(() => web.evaluate(() => window.__clipEvents.includes('ended')), 20000, 'clip ended').catch(async (e) => { throw new Error(e.message + ' events=' + JSON.stringify(await web.evaluate(() => window.__clipEvents))); });
+      const t = await vt(tp);
+      assert(t > 34.4 && t < 35.6, 'TVNZ stopped at the line end (content 26.6 + tail → video 34.8 s): ' + t.toFixed(2));
+      await web.close();
+    });
+    await tp.close();
+
+    const np = await browser.newPage();
+    np.on('pageerror', (e) => console.log('  [NZ On Screen 페이지 오류] ' + e.message));
+    await np.goto('https://www.nzonscreen.com/title/mock-westside-episode-one-2015', { waitUntil: 'domcontentloaded' });
+    await step('NZ On Screen(모의 Brightcove): 재생 정보(JSON)의 자막 파일 · video.js 컨트롤 바의 전체 화면 버튼 왼쪽에 ST · video.js 자막은 숨기고 페이지는 패널 왼쪽까지', async () => {
+      await np.waitForSelector('#st-panel', { timeout: 20000 });
+      await waitFor(() => np.$$eval('.st-row', (r) => r.length === 10), 20000, 'nzos rows');
+      assert(/영어 10줄 \(CC\)/.test(await np.$eval('.st-status', (e) => e.textContent)), 'nzos status');
+      await waitFor(() => np.$eval('#st-panel', (e) => e.dataset.title === 'Mock Westside - Episode One'), 8000, 'brightcove title');
+      const bar = await np.$$eval('.vjs-control-bar > *', (xs) => xs.map((x) => (x.classList.contains('st-rate') ? 'rate' : (x.classList.contains('st-ctl') ? 'ST' : x.className.split(' ')[0]))));
+      assert(bar.slice(-3).join(',') === 'rate,ST,vjs-fullscreen-control', 'vjs bar ' + bar.join(','));
+      assert((await np.$eval('.vjs-text-track-display', (e) => getComputedStyle(e).visibility)) === 'hidden', 'video.js captions hidden');
+      assert((await np.evaluate(() => getComputedStyle(document.body).marginRight)) === '400px', 'page pushed left of the panel');
+    });
+    await np.close();
+
+    const vp = await browser.newPage();
+    await vp.goto('https://vimeo.com/123456789', { waitUntil: 'domcontentloaded' });
+    await step('Vimeo(모의): <track> 의 영어·한국어 자막 · 컨트롤 바를 못 찾으면 영상 왼쪽 위의 떠 있는 ST 버튼으로 켜고 끈다', async () => {
+      await vp.waitForSelector('#st-panel', { timeout: 20000 });
+      await waitFor(() => vp.$$eval('.st-row', (r) => r.length === 10), 20000, 'vimeo rows');
+      assert(/한국어 10줄 연결/.test(await vp.$eval('.st-status', (e) => e.textContent)), 'vimeo ko merged');
+      const fl = await waitFor(() => vp.$eval('#st-float', (e) => { const r = e.getBoundingClientRect(); return r.width > 0 ? [Math.round(r.left), Math.round(r.top)] : null; }).catch(() => null), 6000, 'float toggle');
+      const vr = await vp.evaluate(() => { const r = document.querySelector('video').getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; });
+      assert(Math.abs(fl[0] - vr[0] - 10) <= 2 && Math.abs(fl[1] - vr[1] - 10) <= 2, 'float at the video top-left: ' + fl + ' video ' + vr);
+      await vp.click('#st-float');
+      await waitFor(() => sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings.enabled || {}).vimeo === false), 3000, 'vimeo disabled');
+      assert(await vp.$eval('#st-float', (e) => e.classList.contains('off')), 'float shows off');
+      await vp.click('#st-float');
+      await waitFor(() => sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings.enabled || {}).vimeo === true), 3000, 'vimeo enabled again');
+    });
+    await vp.close();
+
+    const dp = await browser.newPage();
+    await dp.goto('https://www.ted.com/talks/mock_speaker_do_schools_kill_creativity', { waitUntil: 'domcontentloaded' });
+    await step('TED(모의): 플레이어가 받는 언어별 자막 파일 중 영어·한국어만 골라 쓴다 · 이름이 Fullscreen 인 버튼 왼쪽에 ST', async () => {
+      await dp.waitForSelector('#st-panel', { timeout: 20000 });
+      await waitFor(() => dp.$$eval('.st-row', (r) => r.length === 10), 20000, 'ted rows');
+      assert(/한국어 10줄 연결/.test(await dp.$eval('.st-status', (e) => e.textContent)), 'ted ko merged');
+      const bar = await dp.$$eval('.bar > *', (xs) => xs.map((x) => (x.classList.contains('st-rate') ? 'rate' : (x.classList.contains('st-ctl') ? 'ST' : x.getAttribute('aria-label')))));
+      assert(bar.join(',') === 'Play,Captions,rate,ST,Fullscreen', 'ted bar ' + bar.join(','));
+      const d = await diag(dp);
+      assert(/pageTracks=\["en:text\/file","ko:text\/file"\]/.test(d), 'only en/ko files kept: ' + d.split('\n').find((l) => l.startsWith('site=')));
+    });
+    await dp.close();
+
+    await step('아무 사이트에서 켜기: 권한이 없으면 거절 · 권한이 있으면 페이지·콘텐츠 스크립트를 등록 · 빼기로 지운다', async () => {
+      const denied = await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'sites.add', origin: 'https://www.example-library.test' }, {}));
+      assert(denied && denied.ok === false && /권한/.test(denied.error), 'no permission → refused: ' + JSON.stringify(denied));
+      const r = await sw.evaluate(async () => {
+        const orig = chrome.permissions.contains;
+        chrome.permissions.contains = async () => true; // 팝업에서 허용했다고 친다
+        try {
+          const add = await globalThis.__subtutorHandle({ type: 'sites.add', origin: 'https://www.example-library.test' }, {});
+          const reg = (await chrome.scripting.getRegisteredContentScripts()).map((s) => s.id + ':' + s.matches.slice().sort().reverse().join('|') + ':' + (s.world || 'ISOLATED'));
+          const list = (await chrome.storage.local.get('customSites')).customSites;
+          await globalThis.__subtutorHandle({ type: 'sites.remove', host: 'www.example-library.test' }, {});
+          const after = (await chrome.scripting.getRegisteredContentScripts()).length;
+          return { add, reg, list, after };
+        } finally { chrome.permissions.contains = orig; }
+      });
+      assert(r.add.ok && r.add.host === 'www.example-library.test', 'added ' + JSON.stringify(r.add));
+      assert(r.reg.includes('st-page-www.example-library.test:https://www.example-library.test/*|http://www.example-library.test/*:MAIN') && r.reg.some((x) => x.startsWith('st-content-www.example-library.test:')), 'registered ' + JSON.stringify(r.reg));
+      assert(r.list.length === 1 && r.after === 0, 'list ' + JSON.stringify(r.list) + ' after remove ' + r.after);
+      const builtIn = await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'sites.add', origin: 'https://www.tvnz.co.nz' }, {}));
+      assert(builtIn.ok && builtIn.builtIn, 'built-in site needs no registration');
+    });
+  } finally {
+    await browser.close().catch(() => {});
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  }
+}
+
 (async () => {
   ensureFixtures();
   const servers = await start({ mockRoot: path.join(__dirname, 'mock'), docsRoot: path.join(ROOT, 'docs'), key: fs.readFileSync(path.join(TMP, 'key.pem')), cert: fs.readFileSync(path.join(TMP, 'cert.pem')) });
   // E2E_ONLY=disney : 모의 디즈니+ 부분만 (디즈니+ 시계를 고칠 때 빠르게 되풀이하려고)
-  if (process.env.E2E_ONLY === 'disney') {
-    try { await runDisney(); } catch (e) { console.log('✖ 치명적 오류: ' + (e && e.stack || e)); results.push({ name: 'disney', ok: false }); }
+  if (process.env.E2E_ONLY === 'disney' || process.env.E2E_ONLY === 'sites') {
+    const run = process.env.E2E_ONLY === 'sites' ? runSites : runDisney;
+    try { await run(); } catch (e) { console.log('✖ 치명적 오류: ' + (e && e.stack || e)); results.push({ name: process.env.E2E_ONLY, ok: false }); }
     const bad = results.filter((r) => !r.ok);
     console.log('\n결과: ' + (results.length - bad.length) + '/' + results.length + ' 통과' + (bad.length ? ' — 실패: ' + bad.map((b) => b.name).join(', ') : ''));
     servers.close();
@@ -1891,6 +2050,7 @@ async function runDisney() {
     const errors = logs.filter((l) => /error/i.test(l) && !/favicon|ERR_|net::/i.test(l));
     if (errors.length) console.log('  콘솔 오류:\n   ' + errors.slice(0, 10).join('\n   '));
     await runDisney();
+    await runSites();
   } catch (e) {
     failed = true;
     console.log('✖ 치명적 오류: ' + (e && e.stack || e));
