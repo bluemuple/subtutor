@@ -1799,6 +1799,22 @@
   }
   async function supaUploadInner(onStep, opts) {
     const H = { apikey: supa.key.trim(), Authorization: 'Bearer ' + supa.token };
+    // 0) 아이폰에서 바꾼 태그를 먼저 받아 온다 — 서버 updated_at 은 웹이 올릴 때는 그대로이고 아이폰이 태그를 바꿀 때만 새로 찍힌다.
+    //    마지막 올리기 이후에 바뀌었고, 웹에서 그 대사 태그를 바꾼 때(tagsAt)보다 나중이면 아이폰 쪽이 최신
+    try {
+      const since = new Date(Math.max(0, (supa.lastAt || 0) - 1000)).toISOString();
+      const pr = await supaFetch('/rest/v1/items?select=id,tags,updated_at&updated_at=gt.' + encodeURIComponent(since), { headers: H });
+      for (const row of await pr.json()) {
+        const it = state.items.find((x) => x.id === row.id);
+        if (!it || !Array.isArray(row.tags)) continue;
+        const at = Date.parse(row.updated_at) || 0;
+        if (at > (it.tagsAt || 0) && JSON.stringify(it.tags || []) !== JSON.stringify(row.tags)) {
+          await B.request('items.update', { id: it.id, patch: { tags: row.tags, tagsAt: at } });
+          it.tags = row.tags; it.tagsAt = at;
+          if (mergeTagNames(row.tags)) saveTagNames();
+        }
+      }
+    } catch (e) { /* 받아 오기에 실패해도 올리기는 계속 */ }
     // 1) 보관(또는 폴더) MP3 — 올라간 것만 has_audio 로 표시한다. 자동(incremental)일 때는 아직 안 올라간 소리만
     let audioOk = 0, audioFail = 0;
     for (let k = 0; k < state.items.length; k++) {

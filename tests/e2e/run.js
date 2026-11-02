@@ -2512,13 +2512,19 @@ async function runSites() {
       assert(st.objects.every((o) => /^audio\/[^/]+\/[A-Za-z0-9._-]+\.mp3$/.test(o[0])), 'storage names follow the iPhone-safe rule');
       assert(st.items.every((i) => typeof i.start_ms === 'number' && typeof i.saved_at === 'number' && typeof i.text === 'string'), 'rows carry the columns the iPhone app reads');
       // 로그인 유지 + 자동 동기화: 다시 접속하면 refresh 토큰으로 조용히 로그인해 올린다 (쓰로틀을 0 으로 당겨서 확인)
-      const before = Date.now();
+      // 아이폰에서 태그를 바꾼 것처럼: 서버 행의 tags 와 updated_at 만 고친다 (앱의 PATCH 와 같은 모양)
+      const phoneAt = new Date(Date.now() + 1000).toISOString();
+      const pr = await fetch('http://127.0.0.1:8769/rest/v1/items?id=eq.' + encodeURIComponent('netflix:12345:2000'), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tags: ['교실 영어'], updated_at: phoneAt }) });
+      assert(pr.status === 204, 'mock PATCH ' + pr.status);
+      const postsBefore = (await supaState()).itemPosts;
+      // 로그인 유지 + 자동 동기화: 다시 접속하면 저장된 로그인으로 조용히 → 아이폰 태그를 먼저 받아 오고 → 다시 올린다
       await w3.evaluate(() => localStorage.setItem('st.supaLastAt', '0'));
       await w3.reload({ waitUntil: 'load' });
-      await waitFor(async () => {
-        const now = await supaState();
-        return now.items.length > 0 && now.items.every((i) => new Date(i.updated_at).getTime() >= before - 2000);
-      }, 30000, 'auto sync after reload upserts the items again');
+      await waitFor(async () => (await supaState()).itemPosts > postsBefore, 30000, 'auto sync after reload uploads again');
+      const pulled = await sw.evaluate(async () => (((await chrome.storage.local.get('items')).items) || []).find((x) => x.id === 'netflix:12345:2000'));
+      assert(pulled && JSON.stringify(pulled.tags) === JSON.stringify(['교실 영어']), 'phone tag pulled into the extension: ' + JSON.stringify(pulled && pulled.tags));
+      const row = (await supaState()).items.find((x) => x.id === 'netflix:12345:2000');
+      assert(JSON.stringify(row.tags) === JSON.stringify(['교실 영어']), 're-upload keeps the phone tag: ' + JSON.stringify(row.tags));
       // 뒤 단계에 영향을 주지 않게 로그인을 정리한다
       await w3.evaluate(() => { localStorage.removeItem('st.supaRefresh'); localStorage.setItem('st.supaAuto', '1'); });
       } finally {

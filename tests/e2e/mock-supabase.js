@@ -3,14 +3,14 @@
 // GoTrue(password/refresh/signup) + PostgREST(items/words upsert·select) + Storage(audio 업로드/다운로드) + CORS
 const http = require('http');
 const fs = require('fs');
-const state = { items: new Map(), words: new Map(), objects: new Map(), tokens: 0 };
+const state = { items: new Map(), words: new Map(), objects: new Map(), tokens: 0, itemPosts: 0 };
 const USER = { id: '00000000-0000-4000-8000-000000000001', email: 'me@test.local' };
 const seedMp3 = process.argv[2]; // 시드 MP3 파일 경로 (없으면 시드 없음)
 if (seedMp3 && fs.existsSync(seedMp3)) {
   const mp3 = fs.readFileSync(seedMp3);
   const items = [
-    { id: 'netflix:777:2000', title: 'Mock Moana', episode: 'S1 E1', platform: 'netflix', text: 'Have you got a pen?', translation: '펜 있어요?', start_ms: 2000, end_ms: 4000, saved_at: Date.now() - 60000, box: 'learning', comment: '', tags: [], missed: false, miss_reason: '', has_audio: true, audio_ms: 1500 },
-    { id: 'netflix:777:6000', title: 'Mock Moana', episode: 'S1 E1', platform: 'netflix', text: "Sweet as, see you at morning tea.", translation: '좋아, 모닝티 때 봐.', start_ms: 6000, end_ms: 8500, saved_at: Date.now() - 50000, box: 'learning', comment: '', tags: [], missed: true, miss_reason: 'accent', has_audio: true, audio_ms: 1500 },
+    { id: 'netflix:777:2000', title: 'Mock Moana', episode: 'S1 E1', platform: 'netflix', text: 'Have you got a pen?', translation: '펜 있어요?', start_ms: 2000, end_ms: 4000, saved_at: Date.now() - 60000, box: 'learning', comment: "Have you got = Do you have (영국·NZ식). 교실에서 자주 들림", tags: ['교실 영어'], missed: false, miss_reason: '', has_audio: true, audio_ms: 1500 },
+    { id: 'netflix:777:6000', title: 'Mock Moana', episode: 'S1 E1', platform: 'netflix', text: "Sweet as, see you at morning tea.", translation: '좋아, 모닝티 때 봐.', start_ms: 6000, end_ms: 8500, saved_at: Date.now() - 50000, box: 'learning', comment: 'Sweet as = 좋아·문제없어 (키위 표현). morning tea = 오전 간식 시간', tags: ['키위 표현', '못 알아들음'], missed: true, miss_reason: 'accent', has_audio: true, audio_ms: 1500 },
     { id: 'tvnz:shortland:9000', title: 'Shortland Street', episode: 'S2026 E110', platform: 'tvnz', text: 'We need to prepare for evacuation.', translation: '대피를 준비해야 해요.', start_ms: 9000, end_ms: 11500, saved_at: Date.now() - 40000, box: 'learning', comment: '', tags: [], missed: false, miss_reason: '', has_audio: true, audio_ms: 1500 },
     { id: 'youtube:abc:1000', title: 'Teacher Talk', episode: '', platform: 'youtube', text: 'No audio line (text only).', translation: '소리 없는 줄.', start_ms: 1000, end_ms: 3000, saved_at: Date.now() - 30000, box: 'learning', comment: '', tags: [], missed: false, miss_reason: '', has_audio: false, audio_ms: 0 },
   ];
@@ -38,13 +38,24 @@ http.createServer(async (req, res) => {
     if (p === '/auth/v1/signup' && req.method === 'POST') { await readBody(req); state.tokens++; return json(res, 200, { access_token: 'at-' + state.tokens, refresh_token: 'rt-' + state.tokens, user: USER }); }
     if (p === '/rest/v1/items' && req.method === 'GET') {
       let list = [...state.items.values()];
+      const gt = url.searchParams.get('updated_at');
+      if (gt && gt.startsWith('gt.')) { const t = Date.parse(gt.slice(3)); list = list.filter((r) => Date.parse(r.updated_at) > t); }
       list.sort((a, b) => b.saved_at - a.saved_at);
       return json(res, 200, list);
     }
     if (p === '/rest/v1/items' && req.method === 'POST') {
+      state.itemPosts++;
       const rows = JSON.parse((await readBody(req)).toString());
       for (const r of [].concat(rows)) state.items.set(r.id, Object.assign({ user_id: USER.id, updated_at: new Date().toISOString() }, state.items.get(r.id) || {}, r));
       res.writeHead(201, CORS); res.end();
+      return;
+    }
+    if (p === '/rest/v1/items' && req.method === 'PATCH') { // 아이폰에서 태그 바꾸기: ?id=eq.<id>
+      const id = (url.searchParams.get('id') || '').replace(/^eq\./, '');
+      const body = JSON.parse((await readBody(req)).toString() || '{}');
+      const row = state.items.get(id);
+      if (row) state.items.set(id, Object.assign({}, row, body));
+      res.writeHead(row ? 204 : 404, CORS); res.end();
       return;
     }
     if (p === '/rest/v1/words' && req.method === 'GET') return json(res, 200, [...state.words.values()]);
@@ -65,7 +76,7 @@ http.createServer(async (req, res) => {
       }
       if (req.method === 'POST' || req.method === 'PUT') { state.objects.set(key, await readBody(req)); return json(res, 200, { Key: key }); }
     }
-    if (p === '/__state') return json(res, 200, { items: [...state.items.values()], words: [...state.words.values()], objects: [...state.objects.keys()].map((k) => [k, state.objects.get(k).length]) });
+    if (p === '/__state') return json(res, 200, { itemPosts: state.itemPosts, items: [...state.items.values()], words: [...state.words.values()], objects: [...state.objects.keys()].map((k) => [k, state.objects.get(k).length]) });
     json(res, 404, { error: 'mock 404 ' + req.method + ' ' + p });
   } catch (e) { json(res, 500, { error: String(e && e.message || e) }); }
 }).listen(+(process.argv[3] || 8768), '127.0.0.1', function () { console.log('mock supabase on http://127.0.0.1:' + this.address().port); });

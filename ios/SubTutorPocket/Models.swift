@@ -19,12 +19,14 @@ struct Item: Codable, Identifiable, Hashable {
     var missReason: String
     var hasAudio: Bool             // 서버에 MP3 가 있는가
     var audioMs: Int64
+    var tags: [String]             // 웹·아이폰 공통 태그 (아이폰에서 바꾸면 서버로 올리고, 웹이 다음 동기화 때 받아 간다)
 
     enum CodingKeys: String, CodingKey {
         case id, title, episode, platform, text, translation
         case startMs = "start_ms", endMs = "end_ms", savedAt = "saved_at"
         case box, comment, missed
         case missReason = "miss_reason", hasAudio = "has_audio", audioMs = "audio_ms"
+        case tags
     }
 
     init(from decoder: Decoder) throws {
@@ -44,6 +46,7 @@ struct Item: Codable, Identifiable, Hashable {
         missReason = (try? c.decode(String.self, forKey: .missReason)) ?? ""
         hasAudio = (try? c.decode(Bool.self, forKey: .hasAudio)) ?? false
         audioMs = (try? c.decode(Int64.self, forKey: .audioMs)) ?? 0
+        tags = (try? c.decode([String].self, forKey: .tags)) ?? []
     }
 
     // 서버 storage 파일 이름 (웹 업로드 쪽과 같은 규칙이어야 한다)
@@ -85,8 +88,14 @@ final class Store: ObservableObject {
     @Published var lineRepeats: Int { didSet { UserDefaults.standard.set(lineRepeats, forKey: "lineRepeats") } }   // 연속 듣기에서 한 대사를 몇 번씩
     @Published var gapMs: Int { didSet { UserDefaults.standard.set(gapMs, forKey: "gapMs") } }                     // 대사 사이 쉼
     @Published var loopAll: Bool { didSet { UserDefaults.standard.set(loopAll, forKey: "loopAll") } }              // 끝나면 처음부터
+    @Published var repeatMode: Bool { didSet { UserDefaults.standard.set(repeatMode, forKey: "repeatMode") } }     // 반복 토글: 대사를 누르면 끝없이 반복
+    @Published var ladderRates: [Double] { didSet { UserDefaults.standard.set(ladderRates, forKey: "ladderRates") } } // 속도 사다리 단계 (예: 0.5 → 0.7 → 0.9 → 1)
+    @Published var sortMode: String { didSet { UserDefaults.standard.set(sortMode, forKey: "sortMode") } }         // 목록 정렬
+    @Published var shadowRatio: Double { didSet { UserDefaults.standard.set(shadowRatio, forKey: "shadowRatio") } } // 연속 듣기: 따라 말할 시간 = 대사 길이 × 이 값 (0 = 끔)
+    @Published var speechCheck: Bool { didSet { UserDefaults.standard.set(speechCheck, forKey: "speechCheck") } }   // 녹음하면 음성 인식으로 발음 확인
 
-    static let rates: [Double] = [0.7, 0.8, 0.9, 1.0, 1.15, 1.25, 1.5]
+    static let rates: [Double] = [0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]
+    static let sortModes: [(String, String)] = [("workNew", "작품별 · 최근 저장 위"), ("workOld", "작품별 · 오래된 위"), ("allNew", "전체 · 최근 저장 위"), ("allOld", "전체 · 오래된 위"), ("title", "작품 이름순")]
 
     init() {
         let d = UserDefaults.standard
@@ -96,6 +105,12 @@ final class Store: ObservableObject {
         lineRepeats = d.object(forKey: "lineRepeats") as? Int ?? 1
         gapMs = d.object(forKey: "gapMs") as? Int ?? 400
         loopAll = d.object(forKey: "loopAll") as? Bool ?? true
+        repeatMode = d.object(forKey: "repeatMode") as? Bool ?? false
+        ladderRates = (d.array(forKey: "ladderRates") as? [Double]).flatMap { $0.isEmpty ? nil : $0 } ?? [0.5, 0.7, 0.9, 1.0]
+        sortMode = d.string(forKey: "sortMode") ?? "workNew"
+        shadowRatio = d.object(forKey: "shadowRatio") as? Double ?? 0
+        speechCheck = d.object(forKey: "speechCheck") as? Bool ?? true
+        if let data = d.data(forKey: "pendingTags"), let p = try? JSONDecoder().decode([String: [String]].self, from: data) { pendingTags = p }
         load()
     }
 
@@ -126,17 +141,21 @@ final class Store: ObservableObject {
 
     // 작품(제목·에피소드)별로 묶고, 작품은 최근 저장이 위, 안에서는 영상 시간순 (웹의 기본 정렬과 같다)
     var works: [Work] {
+        Store.group(items).sorted { Store.latest($0) > Store.latest($1) }
+    }
+    // 작품(제목·에피소드)별로 묶는다. 안에서는 영상 시간순
+    static func group(_ list: [Item]) -> [Work] {
         var map: [String: Work] = [:]
-        for it in items {
+        for it in list {
             let key = it.title + "\u{1}" + it.episode
             if map[key] == nil { map[key] = Work(id: key, title: it.title, episode: it.episode, platform: it.platform, items: []) }
             map[key]!.items.append(it)
         }
-        var list = Array(map.values)
-        for i in list.indices { list[i].items.sort { $0.startMs < $1.startMs } }
-        list.sort { ($0.items.map(\.savedAt).max() ?? 0) > ($1.items.map(\.savedAt).max() ?? 0) }
-        return list
+        var out = Array(map.values)
+        for i in out.indices { out[i].items.sort { $0.startMs < $1.startMs } }
+        return out
     }
+    static func latest(_ w: Work) -> Int64 { w.items.map(\.savedAt).max() ?? 0 }
 
     var audioCount: Int { items.filter { hasLocalAudio($0) }.count }
     var storageBytes: Int64 {
@@ -187,8 +206,10 @@ final class Store: ObservableObject {
         defer { syncing = false }
         saveSettings()
         do {
+            await flushPendingTags()   // 오프라인에서 바꾼 태그부터 올린다
             syncStatus = "대사 목록 받는 중…"
-            let fetched = try await Supa.shared.fetchItems(url: supaUrl, key: supaKey)
+            var fetched = try await Supa.shared.fetchItems(url: supaUrl, key: supaKey)
+            for i in fetched.indices { if let t = pendingTags[fetched[i].id] { fetched[i].tags = t } } // 아직 못 올린 태그는 폰 쪽이 최신
             items = fetched.sorted { $0.savedAt > $1.savedAt }
             persist()
             lastSyncAt = Date()
@@ -245,6 +266,40 @@ final class Store: ObservableObject {
         syncStatus = dlCancel ? "다운로드 멈춤 — 받음 \(dlDone)개" : "다운로드 끝 — 받음 \(dlDone)개" + (dlFailed > 0 ? ", 실패 \(dlFailed)개" : "")
     }
     func cancelDownloads() { dlCancel = true }
+
+    // ── 태그: 폰에서 바꾸면 바로 서버에 올린다 (오프라인이면 대기열에 두었다가 다음 동기화 때) ──
+    private var pendingTags: [String: [String]] = [:]
+    private func savePending() { UserDefaults.standard.set(try? JSONEncoder().encode(pendingTags), forKey: "pendingTags") }
+
+    // 모든 태그 (많이 쓴 순)
+    var allTags: [String] {
+        var count: [String: Int] = [:]
+        for it in items { for t in it.tags { count[t, default: 0] += 1 } }
+        return count.keys.sorted { (count[$0]!, $1) > (count[$1]!, $0) }
+    }
+    func tagCount(_ t: String) -> Int { items.filter { $0.tags.contains(t) }.count }
+
+    func setTags(_ item: Item, _ tags: [String]) {
+        let clean = tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        var seen = Set<String>(); let uniq = clean.filter { seen.insert($0).inserted }
+        guard let i = items.firstIndex(where: { $0.id == item.id }) else { return }
+        items[i].tags = uniq
+        persist()
+        pendingTags[item.id] = uniq
+        savePending()
+        Task { await flushPendingTags() }
+    }
+    func flushPendingTags() async {
+        guard signedIn, !pendingTags.isEmpty else { return }
+        for (id, tags) in pendingTags {
+            do {
+                try await Supa.shared.patchTags(url: supaUrl, key: supaKey, id: id, tags: tags)
+                playLog.info("tags pushed \(id, privacy: .public) \(tags.joined(separator: ","), privacy: .public)")
+                if pendingTags[id] == tags { pendingTags[id] = nil }
+            } catch { break }   // 오프라인 등 — 다음에 다시
+        }
+        savePending()
+    }
 
     func signOut() {
         Supa.shared.signOut()

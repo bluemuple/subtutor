@@ -10,6 +10,8 @@
 		1323D62688FAEEEF26AB8F03 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42D839C6360102AB3B1B0031 /* Recorder.swift */; };
 		2DD7BC9BDC4CB71CEC22FE02 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51F3AA3450C084B6F61852D7 /* App.swift */; };
 		354EA9B31C589DF24C432266 /* Supa.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD1507BD343791BF824B6E3A /* Supa.swift */; };
+		4FFD2729DBDF94A6DDC29A8E /* SpeechCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = 487D7ECDD8EF476C639E6821 /* SpeechCheck.swift */; };
+		505729B7CB191412B471CD5B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3D33C23CC85CBC4CA0871232 /* Assets.xcassets */; };
 		7B53F2A6F71C0DD1BC8E04B0 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E5F795CEF222287575E670B /* Models.swift */; };
 		B31F15CE508A52681255ED58 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = A150A796813AD78C0F45DB60 /* Views.swift */; };
 		DD21EAAD8417DE5A1A75427F /* Player.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E8E47D9C5A9CA1A878FA9F6 /* Player.swift */; };
@@ -17,8 +19,10 @@
 
 /* Begin PBXFileReference section */
 		03263BEFD80E578C64B4FDA8 /* SubTutorPocket.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SubTutorPocket.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3D33C23CC85CBC4CA0871232 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		3E8E47D9C5A9CA1A878FA9F6 /* Player.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Player.swift; sourceTree = "<group>"; };
 		42D839C6360102AB3B1B0031 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
+		487D7ECDD8EF476C639E6821 /* SpeechCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCheck.swift; sourceTree = "<group>"; };
 		51F3AA3450C084B6F61852D7 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		6E5F795CEF222287575E670B /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		A150A796813AD78C0F45DB60 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
@@ -31,10 +35,12 @@
 			isa = PBXGroup;
 			children = (
 				51F3AA3450C084B6F61852D7 /* App.swift */,
+				3D33C23CC85CBC4CA0871232 /* Assets.xcassets */,
 				ED216312B0C51736E6BB7852 /* Info.plist */,
 				6E5F795CEF222287575E670B /* Models.swift */,
 				3E8E47D9C5A9CA1A878FA9F6 /* Player.swift */,
 				42D839C6360102AB3B1B0031 /* Recorder.swift */,
+				487D7ECDD8EF476C639E6821 /* SpeechCheck.swift */,
 				BD1507BD343791BF824B6E3A /* Supa.swift */,
 				A150A796813AD78C0F45DB60 /* Views.swift */,
 			);
@@ -65,6 +71,7 @@
 			buildConfigurationList = 8DB849BC8BCF552104286B06 /* Build configuration list for PBXNativeTarget "SubTutorPocket" */;
 			buildPhases = (
 				1C3C8A3D3529BC2EEFF5F972 /* Sources */,
+				94EC6852CFEEB17A5D1A33CF /* Resources */,
 			);
 			buildRules = (
 			);
@@ -111,6 +118,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		94EC6852CFEEB17A5D1A33CF /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				505729B7CB191412B471CD5B /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		1C3C8A3D3529BC2EEFF5F972 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -120,6 +138,7 @@
 				7B53F2A6F71C0DD1BC8E04B0 /* Models.swift in Sources */,
 				DD21EAAD8417DE5A1A75427F /* Player.swift in Sources */,
 				1323D62688FAEEEF26AB8F03 /* Recorder.swift in Sources */,
+				4FFD2729DBDF94A6DDC29A8E /* SpeechCheck.swift in Sources */,
 				354EA9B31C589DF24C432266 /* Supa.swift in Sources */,
 				B31F15CE508A52681255ED58 /* Views.swift in Sources */,
 			);

@@ -7,15 +7,18 @@ import SwiftUI
 struct SubTutorPocketApp: App {
     @StateObject private var store: Store
     @StateObject private var player: Player
-    @StateObject private var recorder = Recorder()
+    @StateObject private var recorder: Recorder
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let s = Store()
         let p = Player()
         p.store = s
+        let r = Recorder()
+        r.store = s
         _store = StateObject(wrappedValue: s)
         _player = StateObject(wrappedValue: p)
+        _recorder = StateObject(wrappedValue: r)
         try? FileManager.default.createDirectory(at: Store.audioDir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: Store.recDir, withIntermediateDirectories: true)
     }

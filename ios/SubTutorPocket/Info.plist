@@ -38,6 +38,8 @@
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>대사를 따라 말한 내 목소리를 녹음해 원어민 소리와 비교하는 데 씁니다.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>녹음한 내 발음이 영어로 어떻게 들리는지 받아 적어 원래 대사와 비교하는 데 씁니다.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

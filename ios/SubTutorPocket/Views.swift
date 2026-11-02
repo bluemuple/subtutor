@@ -1,30 +1,85 @@
 // SubTutor Pocket – 화면: 작품별 대사 목록(탭 = 받아서 재생, Saved 아이콘, 🎙 녹음, 같이 듣기),
-// ⬇ 전체/작품별 오디오 다운로드, 하단 연속 듣기 막대, 설정(동기화)
+// 상단 바(앱 아이콘 · ⬇ 전체 다운로드 · 자막/뜻 가림 · 반복 토글(길게 = 재생 속도) · 설정), 검색 · 정렬 · 태그,
+// 대사별 속도 사다리 · 메모 펼치기 · 발음 확인, 하단 연속 듣기 막대, 설정(동기화)
 import SwiftUI
+
+func rateText(_ r: Double) -> String { abs(r - 1) < 0.001 ? "1" : String(format: "%g", r) }
+
+// 화면에 띄우는 시트는 하나로 (같은 화면에 .sheet 를 둘 달면 서로 막아 안 열리는 일이 있다)
+enum ActiveSheet: Identifiable {
+    case settings
+    case tags(Item)
+    var id: String {
+        switch self {
+        case .settings: return "settings"
+        case .tags(let item): return "tags:" + item.id
+        }
+    }
+}
 
 struct RootView: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var player: Player
-    @State private var showSettings = false
+    @State private var sheet: ActiveSheet?
+    @State private var query = ""
+    @State private var tagFilter: String?      // nil = 전체
 
     var body: some View {
         NavigationStack {
             Group {
                 if store.items.isEmpty { emptyView } else { listView }
             }
-            .navigationTitle("자막 튜터")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Image("Logo").resizable().frame(width: 30, height: 30)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .accessibilityLabel("자막 튜터")
+                }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     downloadAllButton
                     Button { store.veilText.toggle() } label: { Image(systemName: store.veilText ? "eye.slash" : "eye") }
                     Button { store.veilKo.toggle() } label: { Text("뜻").strikethrough(store.veilKo) }
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                    repeatButton
+                    Button { sheet = .settings } label: { Image(systemName: "gearshape") }
                 }
             }
+            .searchable(text: $query, prompt: "대사·뜻·메모·태그 검색")
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
             .safeAreaInset(edge: .top) { if store.dlActive { downloadBar } }
             .safeAreaInset(edge: .bottom) { if player.continuous { ContinuousBar() } }
-            .sheet(isPresented: $showSettings) { SettingsView() }
         }
+        .sheet(item: $sheet) { s in   // 검색이 붙은 안쪽 화면이 아니라 바깥에 단다 (안쪽에 달면 안 열린다)
+            switch s {
+            case .settings: SettingsView()
+            case .tags(let item): TagSheet(item: item)
+            }
+        }
+    }
+
+    // 반복 토글: 누르면 켬/끔 (켜 두면 대사를 누를 때 끝없이 반복), 길게 누르면 재생 속도 0.5~2배
+    private var repeatButton: some View {
+        Menu {
+            Section("재생 속도") {
+                ForEach(Store.rates, id: \.self) { r in
+                    Button { player.setRate(r) } label: {
+                        if abs(store.rate - r) < 0.001 { Label(rateText(r) + "×", systemImage: "checkmark") } else { Text(rateText(r) + "×") }
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: store.repeatMode ? "repeat.circle.fill" : "repeat")
+                .overlay(alignment: .bottomTrailing) {
+                    if abs(store.rate - 1) > 0.001 {
+                        Text(rateText(store.rate)).font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
+                            .padding(.horizontal, 2).background(Capsule().fill(Color.orange)).offset(x: 10, y: 3)
+                    }
+                }
+        } primaryAction: {
+            store.repeatMode.toggle()
+        }
+        .accessibilityLabel(store.repeatMode ? "반복 켜짐 (길게 눌러 재생 속도)" : "반복 꺼짐 (길게 눌러 재생 속도)")
     }
 
     // ⬇ 전체 다운로드: 아직 안 받은 모든 대사의 원래(스트리밍) 오디오를 한꺼번에 저장한다
@@ -57,28 +112,96 @@ struct RootView: View {
 
     private var emptyView: some View {
         VStack(spacing: 14) {
-            Image(systemName: "icloud.and.arrow.down").font(.system(size: 44)).foregroundStyle(.secondary)
+            Image("Logo").resizable().frame(width: 72, height: 72)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             Text("아직 받아 온 대사가 없습니다").font(.headline)
             Text("맥의 SubTutor 웹 › 설정 › 아이폰 동기화에서 회원가입한 뒤,\n여기 설정에서 같은 이메일·비밀번호로 로그인하면 자동으로 받아 옵니다.")
                 .multilineTextAlignment(.center).font(.subheadline).foregroundStyle(.secondary)
-            Button("설정 열기") { showSettings = true }.buttonStyle(.borderedProminent)
+            Button("설정 열기") { sheet = .settings }.buttonStyle(.borderedProminent)
         }
         .padding()
     }
 
     private var listView: some View {
-        List {
-            ForEach(store.works) { work in
+        let sections = displayedSections()
+        return List {
+            Section { filterBar }
+            if sections.isEmpty {
+                Text(query.isEmpty ? "이 태그가 붙은 대사가 없습니다" : "찾는 대사가 없습니다").foregroundStyle(.secondary)
+            }
+            ForEach(sections) { work in
                 Section {
-                    ForEach(work.items) { item in ItemRow(item: item) }
+                    ForEach(work.items) { item in
+                        ItemRow(item: item, showWork: work.id == "all")
+                            .swipeActions(edge: .trailing) {
+                                Button { sheet = .tags(item) } label: { Label("태그", systemImage: "tag") }.tint(.indigo)
+                            }
+                    }
                 } header: { WorkHeader(work: work) }
             }
         }
         .listStyle(.plain)
     }
+
+    // 목록 위: 정렬 · 태그로 거르기
+    private var filterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Menu {
+                    Picker("정렬", selection: $store.sortMode) {
+                        ForEach(Store.sortModes, id: \.0) { m in Text(m.1).tag(m.0) }
+                    }
+                } label: {
+                    Label(Store.sortModes.first { $0.0 == store.sortMode }?.1 ?? "정렬", systemImage: "arrow.up.arrow.down")
+                        .font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                }
+                chip("전체 \(store.items.count)", on: tagFilter == nil) { tagFilter = nil }
+                ForEach(store.allTags, id: \.self) { t in
+                    chip("#\(t) \(store.tagCount(t))", on: tagFilter == t) { tagFilter = (tagFilter == t ? nil : t) }
+                }
+                if store.allTags.isEmpty {
+                    Text("대사를 왼쪽으로 밀면 태그를 달 수 있어요").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .listRowSeparator(.hidden)
+    }
+    private func chip(_ title: String, on: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
+                .foregroundStyle(on ? Color.white : Color.primary)
+                .background(Capsule().fill(on ? Color.indigo : Color.secondary.opacity(0.15)))
+        }
+        .buttonStyle(.borderless)
+    }
+
+    // 검색어·태그로 거르고, 고른 정렬대로 (전체 정렬이면 작품을 나누지 않는다)
+    private func displayedSections() -> [Work] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let list = store.items.filter { it in
+            if let t = tagFilter, !it.tags.contains(t) { return false }
+            if q.isEmpty { return true }
+            return [it.text, it.translation, it.comment, it.title, it.episode, it.tags.joined(separator: " ")]
+                .contains { $0.lowercased().contains(q) }
+        }
+        switch store.sortMode {
+        case "allNew", "allOld":
+            let asc = store.sortMode == "allOld"
+            let sorted = list.sorted { asc ? $0.savedAt < $1.savedAt : $0.savedAt > $1.savedAt }
+            return sorted.isEmpty ? [] : [Work(id: "all", title: "전체 \(sorted.count)개", episode: "", platform: "", items: sorted)]
+        case "workOld":
+            return Store.group(list).sorted { Store.latest($0) < Store.latest($1) }
+        case "title":
+            return Store.group(list).sorted { ($0.title + " " + $0.episode).localizedStandardCompare($1.title + " " + $1.episode) == .orderedAscending }
+        default:
+            return Store.group(list).sorted { Store.latest($0) > Store.latest($1) }
+        }
+    }
 }
 
-// 작품 머리글: 제목 · ⬇ 작품별 다운로드 · 연속 듣기
+// 작품 머리글: 제목 · ⬇ 작품별 다운로드 · 연속 듣기 (전체 정렬이면 보이는 목록 전체)
 struct WorkHeader: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var player: Player
@@ -106,24 +229,35 @@ struct WorkHeader: View {
     }
 }
 
-// 대사 한 줄: 탭 = 재생(저장 안 돼 있으면 받아서 재생·저장) · Saved 아이콘 · 자막/뜻 가림 · 🎙 녹음 · 1·2·3 · 같이 듣기
+// 대사 한 줄: 탭 = 재생(저장 안 돼 있으면 받아서 재생·저장) · 계단 = 속도 사다리 · Saved · 태그 · 메모 · 🎙 녹음 · 발음 확인 · 같이 듣기
 struct ItemRow: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var player: Player
     @EnvironmentObject var recorder: Recorder
     let item: Item
+    var showWork = false
     @State private var revealText = false
     @State private var revealKo = false
+    @State private var showMemo = false
+    @State private var showCheck = false
 
     private var saved: Bool { store.hasLocalAudio(item) }
     private var busy: Bool { store.busyIds.contains(item.id) }
     private var isCurrent: Bool { player.nowId == item.id }
+    private var memo: String { item.comment.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                playIcon
+            HStack(alignment: .top, spacing: 8) {
+                VStack(spacing: 9) {
+                    playIcon
+                    ladderButton
+                }
+                .frame(width: 34)
                 VStack(alignment: .leading, spacing: 3) {
+                    if showWork {
+                        Text(item.title + (item.episode.isEmpty ? "" : " · " + item.episode)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
                     if store.veilText && !revealText {
                         Text("자막 가림 — 길게 눌러 보기").font(.subheadline).foregroundStyle(.secondary).italic()
                     } else {
@@ -137,11 +271,34 @@ struct ItemRow: View {
                             Text(item.translation).font(.subheadline).foregroundStyle(.orange)
                         }
                     }
-                    HStack(spacing: 8) {
+                    if !item.tags.isEmpty {
+                        Text(item.tags.map { "#" + $0 }.joined(separator: " ")).font(.caption2).foregroundStyle(.indigo).lineLimit(1)
+                    }
+                    HStack(spacing: 7) {
                         Text(item.timeText).font(.caption2).foregroundStyle(.tertiary)
                         savedBadge
                         if item.missed { Text("Q").font(.caption2.bold()).foregroundStyle(.red) }
+                        if !memo.isEmpty {
+                            Button { withAnimation { showMemo.toggle() } } label: {
+                                Image(systemName: "note.text").foregroundStyle(showMemo ? Color.yellow : Color.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel(showMemo ? "메모 닫기" : "메모 보기")
+                        }
                         recControls
+                    }
+                    if showMemo && !memo.isEmpty {
+                        Text(memo).font(.subheadline)
+                            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.yellow.opacity(0.14)))
+                    }
+                    if showCheck, let last = recorder.takes(item).last, let r = recorder.result(for: last) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("들린 문장: " + r.heard).font(.caption)
+                            if !r.missed.isEmpty { Text("놓친 단어: " + r.missed.joined(separator: ", ")).font(.caption).foregroundStyle(.red) }
+                        }
+                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.12)))
                     }
                 }
             }
@@ -153,7 +310,7 @@ struct ItemRow: View {
         .listRowBackground(isCurrent ? Color.accentColor.opacity(0.12) : nil)
     }
 
-    // 눌렀을 때: 저장돼 있으면 바로 재생, 아니면 받아 저장한 뒤 재생 (다음부터는 저장된 오디오)
+    // 눌렀을 때: 저장돼 있으면 바로 재생, 아니면 받아 저장한 뒤 재생 (다음부터는 저장된 오디오). 반복 토글이 켜져 있으면 끝없이
     private func tapPlay() {
         if saved { player.toggleItem(item); return }
         guard item.hasAudio, !busy else { return }
@@ -164,14 +321,35 @@ struct ItemRow: View {
 
     @ViewBuilder private var playIcon: some View {
         if busy {
-            ProgressView().controlSize(.small).frame(width: 22)
+            ProgressView().controlSize(.small).frame(width: 22, height: 22)
         } else if saved {
-            Image(systemName: isCurrent && player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+            Image(systemName: isCurrent && player.isPlaying && player.ladderId == nil ? "pause.circle.fill" : "play.circle.fill")
                 .font(.title3).foregroundStyle(Color.accentColor)
         } else if item.hasAudio {
             Image(systemName: "icloud.and.arrow.down").font(.title3).foregroundStyle(.secondary)  // 누르면 받아서 재생
         } else {
             Image(systemName: "speaker.slash.circle").font(.title3).foregroundStyle(Color.secondary.opacity(0.4))
+        }
+    }
+
+    // 속도 사다리: 이 대사를 설정한 배속 단계대로 한 번씩 (재생 중에는 지금 단계 배속이 보인다)
+    @ViewBuilder private var ladderButton: some View {
+        if item.hasAudio {
+            Button {
+                if saved { player.playLadder(item) }
+                else { Task { if await store.downloadAudio(item) { player.playLadder(item) } } }
+            } label: {
+                if player.ladderId == item.id, let r = player.ladderRate {
+                    Text(rateText(r) + "×").font(.system(size: 9, weight: .bold)).monospacedDigit()
+                        .lineLimit(1).fixedSize()
+                        .foregroundStyle(.white).padding(.horizontal, 3).padding(.vertical, 2)
+                        .background(Capsule().fill(Color.orange))
+                } else {
+                    Image(systemName: "stairs").font(.system(size: 15)).foregroundStyle(Color.orange)
+                }
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("속도 사다리 " + store.ladderRates.map { rateText($0) }.joined(separator: " → "))
         }
     }
 
@@ -210,6 +388,19 @@ struct ItemRow: View {
                 .buttonStyle(.borderless)
                 .contextMenu { Button(role: .destructive) { recorder.remove(item, url: url) } label: { Label("이 녹음 지우기", systemImage: "trash") } }
             }
+            if let last = takes.last {
+                if recorder.checking.contains(last) {
+                    ProgressView().controlSize(.mini)
+                } else if let r = recorder.result(for: last) {
+                    Button { withAnimation { showCheck.toggle() } } label: {
+                        Text("\(r.score)%").font(.caption2.bold()).foregroundStyle(.white)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(Capsule().fill(r.score >= 80 ? Color.green : (r.score >= 50 ? Color.orange : Color.red)))
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("발음 확인 \(r.score)퍼센트")
+                }
+            }
             if saved, let last = takes.last {
                 Button { player.playTogether(item, recording: last) } label: { Image(systemName: "speaker.wave.2.circle") }
                     .buttonStyle(.borderless)
@@ -219,14 +410,73 @@ struct ItemRow: View {
     }
 }
 
-// 하단 연속 듣기 막대: 지금 대사 · 재생/일시정지 · 이전/다음 · 배속 · 닫기
+// 태그 달기: 쓰던 태그를 고르거나 새로 만든다. 바꾸면 서버로 올라가 웹과 함께 쓴다
+struct TagSheet: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) private var dismiss
+    let item: Item
+    @State private var tags: [String] = []
+    @State private var newTag = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section { Text(item.text.replacingOccurrences(of: "\n", with: " ")).font(.subheadline) }
+                Section("태그") {
+                    ForEach(allNames, id: \.self) { t in
+                        Button { toggle(t) } label: {
+                            HStack {
+                                Text("#" + t).foregroundStyle(.primary)
+                                Spacer()
+                                if tags.contains(t) { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
+                            }
+                        }
+                    }
+                    HStack {
+                        TextField("새 태그", text: $newTag).onSubmit(addNew)
+                        Button("추가", action: addNew).disabled(newTag.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+                Section {
+                    Text("태그는 맥의 SubTutor 웹과 함께 씁니다 — 여기서 바꾸면 바로 서버에 올라가고(인터넷이 없으면 다음 동기화 때), 웹은 다음 동기화 때 받아 갑니다.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("태그")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("취소") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("완료") { store.setTags(item, tags); dismiss() } }
+            }
+            .onAppear { tags = store.items.first(where: { $0.id == item.id })?.tags ?? item.tags }
+        }
+    }
+    private var allNames: [String] {
+        var names = store.allTags
+        for t in tags where !names.contains(t) { names.append(t) }
+        return names
+    }
+    private func toggle(_ t: String) {
+        if let i = tags.firstIndex(of: t) { tags.remove(at: i) } else { tags.append(t) }
+    }
+    private func addNew() {
+        let t = newTag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        if !tags.contains(t) { tags.append(t) }
+        newTag = ""
+    }
+}
+
+// 하단 연속 듣기 막대: 지금 대사 · 재생/일시정지 · 이전/다음 · 배속 · 닫기 (따라 말할 시간이면 안내)
 struct ContinuousBar: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var player: Player
 
     var body: some View {
         VStack(spacing: 6) {
-            if let it = player.currentItem {
+            if player.waiting && store.shadowRatio > 0 {
+                Text("🗣 따라 말해 보세요").font(.footnote.bold()).foregroundStyle(.orange)
+            } else if let it = player.currentItem {
                 Text(it.text.replacingOccurrences(of: "\n", with: " "))
                     .font(.footnote).lineLimit(1)
             }
@@ -236,9 +486,9 @@ struct ContinuousBar: View {
                 Button { player.next() } label: { Image(systemName: "forward.end.fill") }
                 Menu {
                     ForEach(Store.rates, id: \.self) { r in
-                        Button((r == 1 ? "1" : String(format: "%g", r)) + "×" + (abs(store.rate - r) < 0.01 ? " ✓" : "")) { player.setRate(r) }
+                        Button(rateText(r) + "×" + (abs(store.rate - r) < 0.001 ? " ✓" : "")) { player.setRate(r) }
                     }
-                } label: { Text(String(format: "%g×", store.rate)).font(.callout.bold()) }
+                } label: { Text(rateText(store.rate) + "×").font(.callout.bold()) }
                 Text("\(player.queueIndex + 1)/\(player.queue.count)").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Button { player.stop() } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
@@ -296,14 +546,44 @@ struct SettingsView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                     LabeledContent("안 받은 오디오", value: "\(store.pendingAudio(store.items).count)개")
                 }
-                Section("연속 듣기 (이동 중)") {
+                Section {
+                    ForEach(Array(store.ladderRates.enumerated()), id: \.offset) { i, r in
+                        Stepper(value: Binding(
+                            get: { i < store.ladderRates.count ? store.ladderRates[i] : r },
+                            set: { v in if i < store.ladderRates.count { store.ladderRates[i] = (v * 100).rounded() / 100 } }
+                        ), in: 0.5...2.0, step: 0.05) {
+                            Text("\(i + 1)단계   \(rateText(r))×").monospacedDigit()
+                        }
+                    }
+                    .onDelete { idx in if store.ladderRates.count - idx.count >= 1 { store.ladderRates.remove(atOffsets: idx) } }
+                    if store.ladderRates.count < 6 {
+                        Button("+ 단계 추가") { store.ladderRates.append(min(2.0, (((store.ladderRates.last ?? 0.9) + 0.1) * 100).rounded() / 100)) }
+                    }
+                } header: {
+                    Text("속도 사다리 (대사 왼쪽 계단 아이콘)")
+                } footer: {
+                    Text("계단 아이콘을 누르면 " + store.ladderRates.map { rateText($0) + "×" }.joined(separator: " → ") + " 순서로 한 번씩 들려줍니다 (음높이는 그대로). 느린 배속으로 소리를 나눠 듣고 실제 속도로 올라가며 귀를 맞춥니다. 왼쪽으로 밀면 그 단계를 지웁니다.")
+                }
+                Section {
                     Stepper("한 대사를 \(store.lineRepeats)번씩", value: $store.lineRepeats, in: 1...3)
                     Picker("대사 사이 쉼", selection: $store.gapMs) {
                         Text("없음").tag(0); Text("0.4초").tag(400); Text("0.8초").tag(800); Text("1초").tag(1000)
                     }
+                    Picker("따라 말할 시간", selection: $store.shadowRatio) {
+                        Text("끔").tag(0.0); Text("대사 길이 ×1").tag(1.0); Text("×1.5").tag(1.5); Text("×2").tag(2.0)
+                    }
                     Toggle("끝나면 처음부터 반복", isOn: $store.loopAll)
-                    Text("화면을 꺼도 이어서 재생되고, 잠금 화면·이어폰 버튼으로 멈춤/다음을 할 수 있습니다. 저장된(Saved) 대사만 이어 듣습니다.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                } header: {
+                    Text("연속 듣기 (이동 중)")
+                } footer: {
+                    Text("화면을 꺼도 이어서 재생되고, 잠금 화면·이어폰 버튼으로 멈춤/다음을 할 수 있습니다. 저장된(Saved) 대사만 이어 듣습니다. \"따라 말할 시간\"을 켜면 대사마다 그 길이만큼 쉬어 주니, 걸으면서 들은 문장을 바로 소리 내어 따라 하세요(쉐도잉).")
+                }
+                Section {
+                    Toggle("녹음하면 발음 확인 (음성 인식)", isOn: $store.speechCheck)
+                } header: {
+                    Text("말하기 연습")
+                } footer: {
+                    Text("🎙 로 녹음을 마치면 iOS 음성 인식이 내 발음을 영어로 받아 적어 원래 대사와 비교합니다 — 녹음 옆 숫자(%)를 누르면 들린 문장과 놓친 단어가 보입니다. 가능하면 기기 안에서(인터넷 없이) 인식합니다.\n한→영 말하기: 위 눈 아이콘으로 영어 자막을 가리고 \"뜻\"을 켜 두면, 한국어 뜻만 보고 영어로 말해 본 뒤 길게 눌러 확인할 수 있습니다.")
                 }
                 Section("표시") {
                     Toggle("자막 가리기 (길게 눌러 보기)", isOn: $store.veilText)

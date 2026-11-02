@@ -23,6 +23,7 @@ targets:
         UILaunchScreen: {}
         UIBackgroundModes: [audio]          # 화면을 꺼도(이동 중) 재생이 이어진다
         NSMicrophoneUsageDescription: 대사를 따라 말한 내 목소리를 녹음해 원어민 소리와 비교하는 데 씁니다.
+        NSSpeechRecognitionUsageDescription: 녹음한 내 발음이 영어로 어떻게 들리는지 받아 적어 원래 대사와 비교하는 데 씁니다.
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSAppTransportSecurity:             # 시뮬레이터에서 로컬 모의 Supabase(http://127.0.0.1)로 검사할 때만 예외
           NSExceptionDomains:
@@ -34,5 +35,6 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: GS6J5UAF55   # bluemuple 개발자 팀 (유료 계정 — 설치한 앱은 프로필 만료일까지 작동)

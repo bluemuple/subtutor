@@ -139,6 +139,24 @@ final class Supa {
         }, url: url, key: key)
     }
 
+    // 폰에서 바꾼 태그를 서버에 쓴다. updated_at 을 지금으로 찍어 두면 웹이 다음 동기화 때 "폰 쪽이 최신"으로 알고 받아 간다
+    func patchTags(url: String, key: String, id: String, tags: [String]) async throws {
+        let u = try base(url)
+        var c = URLComponents(url: u.appendingPathComponent("rest/v1/items"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [URLQueryItem(name: "id", value: "eq.\(id)")]
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let body: [String: Any] = ["tags": tags, "updated_at": iso.string(from: Date())]
+        var t = try await token(url: url, key: key)
+        do {
+            _ = try await request(c.url!, key: key, method: "PATCH", token: t, json: body, extra: ["Prefer": "return=minimal"])
+        } catch SupaError.http(401, _) {
+            accessToken = nil
+            t = try await refresh(url: url, key: key)
+            _ = try await request(c.url!, key: key, method: "PATCH", token: t, json: body, extra: ["Prefer": "return=minimal"])
+        }
+    }
+
     func signOut() {
         accessToken = nil
         refreshToken = nil
