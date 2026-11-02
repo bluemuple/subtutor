@@ -12,6 +12,51 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
+  // ── 문장 인식 (문장 단위 저장) ──
+  // 한 문장이 자막 2~3개에 걸치면, 첫 자막만 저장했을 때 퀴즈·복습에서 뒷부분이 없다.
+  // 저장할 때 자막이 온전한 문장으로 끝났는지 보고, 아니면 문장이 끝나는 자막까지 묶는다.
+  const SENT_END = /[.!?…]+[”’"')»›\]]*$/; // 끝 구두점(닫는 따옴표·괄호 허용)
+  function sentenceComplete(text) {
+    const lines = String(text || '').split('\n').map((x) => x.trim()).filter(Boolean);
+    const last = lines[lines.length - 1] || '';
+    if (!last) return true;                      // 빈 자막은 묶지 않는다
+    if (SENT_END.test(last)) return true;
+    if (/[♪♫]\s*$/.test(last)) return true;   // ♪ 노래 줄
+    return false;                                 // 쉼표·구두점 없음 등 — 다음 자막으로 이어진다
+  }
+  // 한 자막 안에서 문장 나누기: 끝 구두점(닫는 따옴표·괄호 허용) + 공백 기준.
+  // 큰따옴표가 홀수로 남으면 인용이 끊긴 것이므로 다음 조각과 합친다 ("Really? Let's go." 는 한 덩어리).
+  function sentenceSplit(text) {
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!t) return [];
+    const raw = t.match(/[^.!?…]*[.!?…]+[\u201d\u2019"')\u00bb\u203a\]]*(?:\s+|$)|[^.!?…]+$/g) || [t];
+    const openQuote = (s) => {
+      const dq = (s.match(/"/g) || []).length % 2 === 1;
+      const curly = ((s.match(/\u201c/g) || []).length !== (s.match(/\u201d/g) || []).length);
+      return dq || curly;
+    };
+    const out = [];
+    for (const piece of raw) {
+      const p = piece.trim();
+      if (!p) continue;
+      if (out.length && openQuote(out[out.length - 1])) out[out.length - 1] += ' ' + p;
+      else out.push(p);
+    }
+    return out;
+  }
+
+  // i 번째 자막에서 시작한 문장이 끝나는 자막 번호. 최대 maxExtra 개까지 더 보고,
+  // 다음 자막과 3초 넘게 떨어져 있으면(장면 전환) 거기서 끊는다.
+  function sentenceEnd(cues, i, maxExtra) {
+    const max = Number.isFinite(maxExtra) ? maxExtra : 3;
+    let j = i;
+    while (j < cues.length - 1 && j - i < max && !sentenceComplete(cues[j].text)) {
+      if (cues[j + 1].start - cues[j].end > 3000) break;
+      j++;
+    }
+    return j;
+  }
+
   // ── 소리 나는 대로 ──
   // [정규식, 대체]. 앞에서부터 차례로 적용. 대소문자 무시, 단어 경계 유지.
   const RULES = [
@@ -139,5 +184,5 @@
     return out.sort((a, b) => a.start - b.start);
   }
 
-  return { soundsLike, clozeLine, findKiwi, mergeAnnotations, reductionMisses, REDUCTIONS, FUNCTION_WORDS, RULES };
+  return { soundsLike, clozeLine, findKiwi, mergeAnnotations, reductionMisses, sentenceComplete, sentenceEnd, sentenceSplit, REDUCTIONS, FUNCTION_WORDS, RULES };
 });

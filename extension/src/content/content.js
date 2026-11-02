@@ -35,6 +35,10 @@
     leadMs: 150,
     tailMs: 200,
     audioMode: 'off',           // off | store | download | both : 별표 저장 시 오디오 처리
+    saveSentence: true,         // 문장 단위 저장: 자막이 문장 중간에서 끝나면 문장이 끝나는 자막까지 묶어서 저장 (근거: lib/explain.js saveSentence)
+    savePick: true,             // 한 자막에 문장이 여러 개면, 저장할 때 영상을 멈추고 어떤 문장을 저장할지 고른다 (뒷문장만도 가능)
+    saveTailSec: 4,             // MP3 에 자막 끝 뒤 여유를 담는 초 (0~10) — 웹에서 구간을 늘려도 들을 소리가 파일에 있게
+    saveNextTexts: true,        // 다음 자막 3개의 글도 함께 저장 — 웹 구간 조정에서 문장을 한 줄씩 늘릴 수 있게
     enabled: {},                // 플랫폼별 켜기/끄기 { netflix: true, ... }
     // 듣기 훈련 (근거는 lib/explain.js)
     koMode: 'hold',             // always | hold(T 키를 누르는 동안) | afterRepeat(같은 줄 N회 반복 뒤)
@@ -61,7 +65,7 @@
     userScrollAt: 0, statusText: '', statusErr: false,
     ttPoll: null, tickCount: 0,
     rate: 1, rateReapplyUntil: 0, clearanceCur: 0, clearanceLowSince: 0,
-    koHold: false, clozeRevealIdx: -1, loopCount: 0, loopBaseRate: 1, loopLadderOn: false, profile: null, watched: new Set(), missed: new Set(), statsSavedAt: 0, seriesSaved: false,
+    koHold: false, clozeRevealIdx: -1, loopCount: 0, loopBaseRate: 1, loopLadderOn: false, pickOpen: null, profile: null, watched: new Set(), missed: new Set(), statsSavedAt: 0, seriesSaved: false,
     dubSegs: [], dubRange: [0, 0], dubBoxFor: -1, dubRec: null, dubLadder: null, dubPreview: null, dubPlay: null, dubMic: null, dubLoopRate: 1, dubPrevRate: 1, // 더빙
   };
   const Sp = globalThis.SubTutorSpeech, Voc = globalThis.SubTutorVocab, Ex = globalThis.SubTutorExplain, Kiwi = globalThis.SubTutorKiwi || [], Freq = globalThis.SubTutorFreq || '', NZV = globalThis.SubTutorNZVowels;
@@ -143,7 +147,8 @@
   }
   function saveSettings(patch) {
     settings = Object.assign({}, settings, patch);
-    chrome.storage.local.set({ settings }).catch(() => {});
+    // patch 만 보낸다 — 이 탭의 스냅샷으로 통째 저장하면 다른 탭·웹·테스트가 막 바꾼 설정을 옛값으로 되덮는다
+    bg({ type: 'settings.set', patch }).catch(() => chrome.storage.local.set({ settings }).catch(() => {}));
     applySettings();
   }
   function setEnabled(on) {
@@ -765,15 +770,26 @@
       renderOverlay(true);
     } catch (e) { /* ignore */ }
   }
-  function buildItem(c, i) {
+  function buildItem(c, i, pick) {
     const meta = state.meta || adapter.domTitle() || {};
+    // 문장 단위 저장: 이 자막이 문장 중간에서 끝나면(쉼표·구두점 없음) 문장이 끝나는 자막까지 묶는다.
+    // 저장할 문장을 골랐으면(pick) 마지막 문장을 골랐을 때만 다음 자막으로 이어 본다 — 중간 문장에서 끝났으면 거기까지가 선택이다
+    // pick: { text, tail } — 고른 문장들(tail: 자막의 마지막 문장까지 골랐는가). 없으면 자막 전부
+    const mayExtend = settings.saveSentence !== false && (!pick || pick.tail);
+    const headText = pick ? pick.text : c.text;
+    const last = mayExtend && !Sp.sentenceComplete(headText) ? Sp.sentenceEnd(state.cues, i, 3) : i;
+    const span = state.cues.slice(i, last + 1);
+    const part = (x) => ({ text: x.text, startMs: Math.round(cueVideoMs(x)), endMs: Math.round(cueVideoEndMs(x)) });
+    const ko = span.map((x) => koFor(x) || x.koTrack || x.koMt || '').filter(Boolean).join('\n');
     return {
       id: itemIdFor(c), platform: adapter.name, videoId: state.videoId, url: adapter.pageUrl(state.videoId),
       title: meta.title || (adapter.label + ' ' + state.videoId), episode: meta.episode || '',
-      startMs: Math.round(cueVideoMs(c)), endMs: Math.round(cueVideoEndMs(c)), subStartMs: c.start, offsetMs: effectiveOffset(),
-      text: c.text,
-      translation: koFor(c) || c.koTrack || c.koMt || '', translationSource: c.koTrack ? 'track' : (c.koMt ? 'mt' : ''),
-      prevText: state.cues[i - 1] ? state.cues[i - 1].text : '', nextText: state.cues[i + 1] ? state.cues[i + 1].text : '',
+      startMs: Math.round(cueVideoMs(c)), endMs: Math.round(cueVideoEndMs(state.cues[last])), subStartMs: c.start, offsetMs: effectiveOffset(),
+      text: [headText].concat(span.slice(1).map((x) => x.text)).join('\n'),
+      parts: span.map((x, k) => Object.assign(part(x), k === 0 ? { text: headText } : null)),                                                                        // 묶인 자막 경계 — 웹에서 한 줄씩 뺄 수 있게 (첫 칸은 고른 문장)
+      next: settings.saveNextTexts !== false ? state.cues.slice(last + 1, last + 4).map(part) : [], // 다음 자막 글 — 웹에서 한 줄씩 더할 수 있게
+      translation: ko, translationSource: span.some((x) => x.koTrack) ? 'track' : (span.some((x) => x.koMt) ? 'mt' : ''),
+      prevText: state.cues[i - 1] ? state.cues[i - 1].text : '', nextText: state.cues[last + 1] ? state.cues[last + 1].text : '',
       savedAt: Date.now(), box: 'learning', comment: '', reviews: 0, forgot: 0,
     };
   }
@@ -788,13 +804,15 @@
         await bg({ type: 'items.remove', id });
         chip('unsaved', '저장 취소');
       } else {
-        const item = buildItem(c, i);
+        const picked = await pickSentences(i); // 문장이 여러 개면 영상을 멈추고 고른다 (아니면 바로 null)
+        if (picked === false) return;          // 취소
+        const item = buildItem(c, i, picked);
         state.saved.set(id, item);
         refreshSavedMarks(); renderOverlay(true);
         await bg({ type: 'items.save', item });
         chip('saved', '저장했습니다' + (settings.audioMode !== 'off' ? ' · 오디오 녹음 준비' : ''));
         if (!item.translation) {
-          bg({ type: 'translate', texts: [c.text.replace(/\n/g, ' ')], from: 'en', to: 'ko' }).then((res) => {
+          bg({ type: 'translate', texts: [item.text.replace(/\n/g, ' ')], from: 'en', to: 'ko' }).then((res) => {
             const t = res && res.translations && res.translations[0];
             if (t) { c.koMt = t; updateRowKo(i); bg({ type: 'items.update', id, patch: { translation: t, translationSource: 'mt' } }).catch(() => {}); }
           }).catch(() => {});
@@ -805,6 +823,46 @@
       toast('저장 실패: ' + (e && e.message));
       loadSaved();
     }
+  }
+  // 저장할 문장 고르기: 한 자막에 문장이 2개 이상이면 영상을 멈추고 체크로 고른다 (기본 전부, 뒷문장만도 가능)
+  // 돌려주는 값: null = 전부(그대로) · false = 취소 · { text, tail } = 고른 문장들
+  function pickSentences(i) {
+    const c = state.cues[i];
+    if (settings.savePick === false || !c) return Promise.resolve(null);
+    const sents = Sp.sentenceSplit(c.text);
+    if (sents.length < 2) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      closePickBox();
+      const v = adapter.video();
+      const wasPlaying = !!(v && !v.paused);
+      adapter.pause();
+      const boxes = sents.map((t, k) => el('label', { class: 'st-pick-row' }, [el('input', { type: 'checkbox', checked: true, 'data-k': k }), el('span', null, t)]));
+      const finish = (val) => {
+        closePickBox();
+        state.pickOpen = null;
+        if (wasPlaying) requestPlay(); // 멈춘 상태(autoPause 등) 추적까지 함께 푼다
+        resolve(val);
+      };
+      const okBtn = el('button', { class: 'st-btn st-primary st-pick-ok', onclick: () => {
+        const on = boxes.map((b) => b.querySelector('input').checked);
+        if (!on.some(Boolean)) { toast('문장을 하나는 골라야 합니다'); return; }
+        if (on.every(Boolean)) { finish(null); return; }
+        finish({ text: sents.filter((_, k) => on[k]).join(' '), tail: on[sents.length - 1] });
+      } }, '저장 (Enter)');
+      const cancelBtn = el('button', { class: 'st-btn st-pick-cancel', onclick: () => finish(false) }, '취소 (Esc)');
+      const box = el('div', { class: 'st-pick' }, [
+        el('div', { class: 'st-pick-head' }, ['이 자막엔 문장이 ' + sents.length + '개 — 저장할 문장을 고르세요', infoBtn('savePick')]),
+        el('div', { class: 'st-pick-list' }, boxes),
+        el('div', { class: 'st-pick-btns' }, [okBtn, cancelBtn]),
+      ]);
+      state.pickOpen = { box, ok: () => okBtn.click(), cancel: () => cancelBtn.click() };
+      const row = ui.rows && ui.rows[i];
+      if (row && row.parentNode) row.after(box); else (ui.list || document.body).append(box);
+      box.scrollIntoView({ block: 'nearest' });
+    });
+  }
+  function closePickBox() {
+    document.querySelectorAll('.st-pick').forEach((b) => b.remove());
   }
   function refreshSavedMarks() {
     if (!ui.rows) return;
@@ -855,7 +913,9 @@
   async function captureCue(i, item) {
     const c = state.cues[i];
     if (!c) return;
-    const startV = cueVideoMs(c), endV = cueVideoEndMs(c);
+    // 묶어 저장한 문장은 끝 자막까지, 그 뒤에 "꼬리 여유"를 더 담는다 — 웹에서 구간을 늘려도 들을 소리가 파일에 있게 (기본 재생은 자막 구간까지)
+    const tail = Math.round(clamp(+settings.saveTailSec || 0, 0, 10) * 1000);
+    const startV = item.startMs, endV = item.endMs + tail;
     const mode = settings.audioMode;
     let result;
     chip('rec', '대사 오디오 녹음 중…', 0);
@@ -1034,7 +1094,17 @@
       el('button', { class: 'st-foot-btn', title: '이 에피소드의 어휘 통계 (3천 밖 단어·말 속도)', onclick: showVocab }, '어휘 통계'),
       el('button', { class: 'st-foot-btn st-foot-words', title: '이 영상의 단어 목록 (어려운 단어부터 · 뜻 · 단어장 저장)', onclick: () => toggleWordView() }, '단어 목록'),
       el('button', { class: 'st-foot-btn st-foot-dub', title: '지금 자막으로 더빙 (R)', onclick: () => toggleDubBox() }, '🎙 더빙'),
+      el('span', { class: 'st-copy-wrap' }, [
+        el('button', { class: 'st-foot-btn st-copy-btn', title: '이 영상의 자막 전체를 복사', onclick: (e) => { e.stopPropagation(); ui.copyMenu.classList.toggle('st-hidden'); } }, '⧉ 복사 ▾'),
+        (ui.copyMenu = el('div', { class: 'st-copy-menu st-hidden' }, [
+          el('button', { class: 'st-copy-item', 'data-copy': 'en', onclick: () => copyCues('en', false) }, '영어 자막 전체'),
+          el('button', { class: 'st-copy-item', 'data-copy': 'en-t', onclick: () => copyCues('en', true) }, '영어 + 시간'),
+          el('button', { class: 'st-copy-item', 'data-copy': 'ko', onclick: () => copyCues('ko', false) }, '한글 해석만'),
+          el('button', { class: 'st-copy-item', 'data-copy': 'ko-t', onclick: () => copyCues('ko', true) }, '한글 + 시간'),
+        ])),
+      ]),
     ]);
+    document.addEventListener('click', (e) => { if (ui.copyMenu && !ui.copyMenu.classList.contains('st-hidden') && !e.target.closest('.st-copy-wrap')) ui.copyMenu.classList.add('st-hidden'); });
     ui.dubbox = el('div', { class: 'st-dubbox st-hidden', 'data-mic': 'closed' });
     ui.settings = buildSettings();
     ui.wordView = el('div', { class: 'st-wordview st-hidden' });
@@ -1571,6 +1641,10 @@
       field('명료도 피드백 (실험적 · 인터넷 필요)', sw('dubFeedback'), 'dubFeedback'),
       el('h4', { text: '저장' }),
       field('별표 저장 시 오디오', f.audioMode, 'audioStore'),
+      field('문장 단위로 저장 (다음 자막으로 이어지면 함께)', sw('saveSentence'), 'saveSentence'),
+      field('저장할 문장 고르기 (한 자막에 여러 문장일 때)', sw('savePick'), 'savePick'),
+      field('MP3 꼬리 여유 (자막 끝 뒤 초, 0=끄기)', (f.saveTailSec = el('input', { type: 'number', min: 0, max: 10, step: 1, onchange: (e) => saveSettings({ saveTailSec: clamp(+e.target.value || 0, 0, 10) }) })), 'saveSentence'),
+      field('다음 자막 3개 글도 저장 (웹에서 문장 늘리기)', sw('saveNextTexts'), 'saveSentence'),
       el('div', { class: 'st-btn-row' }, [
         el('button', { class: 'st-btn st-primary', onclick: () => bg({ type: 'openSite' }).catch(() => {}) }, '웹에서 저장 목록 · 퀴즈 열기'),
         el('button', { class: 'st-btn', onclick: () => setEnabled(false) }, '이 사이트에서 SubTutor 끄기'),
@@ -1591,6 +1665,8 @@
     f.koMode.value = settings.koMode || 'hold';
     f.cloze.value = settings.cloze || 'off';
     f.secondPass.checked = !!settings.secondPass; f.soundsLike.checked = !!settings.soundsLike; f.kiwiNotes.checked = !!settings.kiwiNotes; f.nzNotes.checked = settings.nzNotes !== false; f.vocabProfile.checked = !!settings.vocabProfile; renderLadderCfgExt();
+    f.saveSentence.checked = settings.saveSentence !== false; f.saveNextTexts.checked = settings.saveNextTexts !== false; f.savePick.checked = settings.savePick !== false;
+    f.saveTailSec.value = String(clamp(+settings.saveTailSec || 0, 0, 10));
     f.fontScale.value = settings.fontScale;
     f.shadowPause.value = shadowPauseValue();
     f.dubPlayback.checked = settings.dubPlayback !== false;
@@ -1598,6 +1674,33 @@
     f.leadMs.value = settings.leadMs; f.tailMs.value = settings.tailMs;
     f.offset.value = state.offsetMs;
     f.offset.title = state.offsetMs ? (state.offsetSource === 'auto' ? '플랫폼 자막과 대조해 자동 감지한 값' : '직접 입력한 값') + ' · 자막이 소리보다 빠르면 음수' : '자막이 소리보다 빠르면 음수, 늦으면 양수. 플랫폼 자막이 켜져 있으면 자동 감지';
+  }
+  // 패널 아래 "⧉ 복사 ▾": 이 에피소드·영화의 자막 전체를 영어/한글(+시간)로 클립보드에 복사한다
+  function copyCues(kind, withTime) {
+    if (ui.copyMenu) ui.copyMenu.classList.add('st-hidden');
+    if (!state.cues.length) { toast('자막을 불러온 뒤에 복사할 수 있습니다'); return; }
+    let missingKo = 0;
+    const lines = state.cues.map((c) => {
+      let t;
+      if (kind === 'ko') { t = String(c.koTrack || c.koMt || '').replace(/\n/g, ' '); if (!t) missingKo++; }
+      else t = c.text.replace(/\n/g, ' ');
+      return (withTime ? '[' + S.formatTime(c.start) + '] ' : '') + t;
+    });
+    const head = state.meta && state.meta.title ? state.meta.title + (state.meta.episode ? ' · ' + state.meta.episode : '') : adapter.label + ' ' + (state.videoId || '');
+    copyText(head + '\n\n' + lines.join('\n'),
+      (kind === 'ko' ? '한글 해석 ' : '영어 자막 ') + state.cues.length + '줄을 복사했습니다' + (withTime ? ' (시간 포함)' : '') + (missingKo ? ' · 한글 없는 ' + missingKo + '줄은 빈 칸 — ⚙ "이 영상 전체 기계 번역"을 먼저 누르면 채워집니다' : ''));
+  }
+  function copyText(text, okMsg) {
+    const fallback = () => {
+      try {
+        const ta = el('textarea', { style: 'position:fixed;left:-9999px;top:0' });
+        ta.value = text; document.body.append(ta); ta.select();
+        const ok = document.execCommand('copy'); ta.remove();
+        toast(ok ? okMsg : '복사하지 못했습니다 — 화면을 한 번 누른 뒤 다시 해 보세요', 4000);
+      } catch (e) { toast('복사하지 못했습니다 — 화면을 한 번 누른 뒤 다시 해 보세요', 4000); }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => toast(okMsg, 4000), fallback);
+    else fallback();
   }
   function copyDiagnostics() {
     const f = ui.form;
@@ -3126,6 +3229,13 @@
     return !!keyAction(e);
   }
   window.addEventListener('keydown', (e) => {
+    if (state.pickOpen) { // 저장할 문장 고르는 중: Enter 저장 · Esc 취소, 다른 단축키는 상자가 닫힐 때까지 쉰다
+      if (e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'Escape') {
+        e.preventDefault(); e.stopImmediatePropagation();
+        if (!e.repeat) (e.code === 'Escape' ? state.pickOpen.cancel : state.pickOpen.ok)();
+      }
+      return;
+    }
     if (!shouldHandleKey(e)) return;
     e.preventDefault(); e.stopImmediatePropagation();
     if (e.repeat) return;

@@ -19,7 +19,7 @@
   document.getElementById('infoClose').addEventListener('click', () => $('infobox').classList.add('hidden'));
   let settings = {};
   async function loadSettings() { const { settings: s } = await chrome.storage.local.get('settings'); settings = s || {}; }
-  async function saveSettings(patch) { settings = Object.assign({}, settings, patch); await chrome.storage.local.set({ settings }); }
+  async function saveSettings(patch) { settings = Object.assign({}, settings, patch); await chrome.runtime.sendMessage({ type: 'settings.set', patch }).catch(async () => { await chrome.storage.local.set({ settings }); }); }
   function msg(text, kind) { $('msg').textContent = text || ''; $('msg').className = 'msg ' + (kind || ''); }
 
   const PERM = {

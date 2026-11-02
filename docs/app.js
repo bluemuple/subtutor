@@ -345,9 +345,18 @@
   function effRange(it) {
     const t = it.trim;
     if (t && Number.isFinite(t.startMs) && Number.isFinite(t.endMs) && t.endMs > t.startMs) return { startMs: t.startMs, endMs: t.endMs, trimmed: true };
-    return { startMs: it.startMs, endMs: it.endMs, trimmed: false };
+    return { startMs: it.startMs, endMs: it.endMs + endSlopMs(it), trimmed: false };
   }
   const clipLeadMs = (it) => { const a = it.audio && it.audio.leadMs, f = it.file && it.file.leadMs; return Number.isFinite(a) ? a : (Number.isFinite(f) ? f : 250); }; // 클립은 자막 시작보다 이만큼 앞에서 시작
+  // 녹음-영상 시계가 플랫폼에 따라 수백 ms 어긋나 저장된 소리가 자막 끝보다 일찍 끊기는 일이 있다.
+  // 손대지 않은(조정 전) 재생은 파일에 남아 있는 꼬리만큼(최대 0.6초) 끝을 자동으로 늘려 문장 끝이 잘리지 않게 한다.
+  const END_SLOP_MS = 600;
+  function endSlopMs(it) {
+    const audioMs = (it.audio && it.audio.ms) || (it.file && it.file.ms) || 0;
+    if (!audioMs) return 0;
+    const spare = audioMs - clipLeadMs(it) - (it.endMs - it.startMs);
+    return Math.max(0, Math.min(END_SLOP_MS, spare));
+  }
   const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));
   function fmtMs(ms) {
     ms = Math.max(0, Math.round(ms));
@@ -749,9 +758,45 @@
       el('button', { class: 'btn trim-reset', onclick: () => setRange(it.startMs, it.endMs) }, '원래대로'),
       el('button', { class: 'btn', onclick: () => toggleTrim(it) }, '닫기'),
     ]);
+    // 문장 늘리기/줄이기: 저장 때 같이 둔 자막 경계(parts)와 다음 자막 글(next)로 텍스트·구간을 한 줄씩 더하거나 뺀다
+    const sentCtl = (() => {
+      const parts = Array.isArray(it.parts) ? it.parts : null;
+      const next = Array.isArray(it.next) ? it.next : [];
+      if (!parts && !next.length) return null;
+      const info = el('span', { class: 'count sent-info' });
+      const apply = async () => {
+        const ps = it.parts;
+        it.text = ps.map((x) => x.text).join('\n');
+        it.endMs = ps[ps.length - 1].endMs;
+        it.trim = null; // 구간이 바뀌었으니 손 조정은 처음부터
+        await updateItem(it.id, { text: it.text, endMs: it.endMs, parts: it.parts, next: it.next, trim: null });
+        win = { s: Math.max(0, it.startMs - TRIM_WIN_MS), e: it.endMs + TRIM_WIN_MS };
+        layout(); refreshMeta(it); fill(); loadItems();
+      };
+      const plus = el('button', { class: 'btn mini sent-plus', title: '다음 자막의 글과 구간을 더한다', onclick: async () => {
+        if (!it.next || !it.next.length) return;
+        if (!Array.isArray(it.parts) || !it.parts.length) it.parts = [{ text: it.text, startMs: it.startMs, endMs: it.endMs }];
+        it.parts.push(it.next.shift());
+        await apply();
+      } }, '+ 문장 늘리기');
+      const minus = el('button', { class: 'btn mini sent-minus', title: '마지막 자막을 뺀다', onclick: async () => {
+        if (!Array.isArray(it.parts) || it.parts.length < 2) return;
+        it.next = [it.parts.pop()].concat(it.next || []);
+        await apply();
+      } }, '− 줄이기');
+      const fill = () => {
+        const n = Array.isArray(it.parts) ? it.parts.length : 1;
+        plus.disabled = !(it.next && it.next.length);
+        minus.disabled = !(Array.isArray(it.parts) && it.parts.length > 1);
+        const tailMissing = it.audio && it.audio.ms && (it.endMs - it.startMs) > it.audio.ms;
+        info.textContent = '자막 ' + n + '줄' + (it.next && it.next.length ? ' · 더할 수 있는 다음 자막 ' + it.next.length + '개' : '') + (tailMissing ? ' · ⚠ 저장된 소리가 여기까지 없습니다 (저장 때의 꼬리 여유까지만)' : '');
+      };
+      fill();
+      return el('div', { class: 'trim-sentence' }, [plus, minus, info]);
+    })();
     box.append(
       el('div', { class: 'trim-head' }, [el('b', null, '오디오 구간 조정'), infoBtn('trim'), label]),
-      track, ctl,
+      track, sentCtl, ctl,
     );
     const draw = () => {
       const w = width(), h = track.clientHeight;

@@ -62,3 +62,28 @@ test('sentenceEnd: 마지막 자막이 미완이어도 범위를 벗어나지 �
   assert.equal(Sp.sentenceEnd(cues, 8, 3), 8);
   assert.equal(Sp.sentenceEnd([{ start: 0, end: 1000, text: 'I was about to' }], 0, 3), 0);
 });
+
+// 한 자막 안 문장 나누기 (저장할 문장 고르기)
+test('sentenceSplit: 구두점 기준으로 나누고 화자 하이픈 줄도 문장', () => {
+  assert.deepEqual(
+    Sp.sentenceSplit('- This is a technique I use, OK?\n- OK. Yeah, yeah, yeah.'),
+    ['- This is a technique I use, OK?', '- OK.', 'Yeah, yeah, yeah.']
+  );
+  assert.deepEqual(Sp.sentenceSplit('Stop! That tickles. Really.'), ['Stop!', 'That tickles.', 'Really.']);
+});
+
+test('sentenceSplit: 문장 하나면 그대로 하나', () => {
+  assert.deepEqual(Sp.sentenceSplit('Hello there, welcome to the test.'), ['Hello there, welcome to the test.']);
+  assert.deepEqual(Sp.sentenceSplit("The only time I've ever been"), ["The only time I've ever been"]);
+});
+
+test('sentenceSplit: 큰따옴표 인용은 한 덩어리로 (홀수면 다음 조각과 합침)', () => {
+  assert.deepEqual(
+    Sp.sentenceSplit('He said, "Stop! Now." and smiled.'),
+    ['He said, "Stop! Now."', 'and smiled.']
+  );
+});
+
+test('sentenceSplit: 빈 자막은 빈 배열', () => {
+  assert.deepEqual(Sp.sentenceSplit(''), []);
+});

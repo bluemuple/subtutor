@@ -219,3 +219,17 @@ u.st-kiwi { text-decoration: underline dotted #fbbf24; text-underline-offset: 3p
 /* 설정: 반복 속도 사다리(X) 배속 편집 */
 .st-ladder-cfg { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 .st-ladder-cfg input.st-ladder-rate { width: 52px; padding: 2px 4px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; color: inherit; font-size: 12px; }
+
+/* 패널 하단: 자막 전체 복사 드롭다운 (더빙 오른쪽) */
+.st-copy-wrap { position: relative; display: inline-block; }
+.st-copy-menu { position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 40; background: #1c1c22; border: 1px solid #3a3a44; border-radius: 10px; padding: 4px; display: flex; flex-direction: column; min-width: 150px; box-shadow: 0 6px 20px rgba(0,0,0,0.45); }
+.st-copy-menu.st-hidden { display: none; }
+.st-copy-item { background: none; border: none; color: #ddd; text-align: left; padding: 7px 10px; border-radius: 7px; font-size: 12px; cursor: pointer; }
+.st-copy-item:hover { background: #2c2c36; color: #fff; }
+
+/* 저장할 문장 고르기 (한 자막에 여러 문장) */
+.st-pick { margin: 4px 10px 8px 34px; padding: 10px 12px; background: #1d1d25; border: 1px solid #4c3e86; border-radius: 10px; }
+.st-pick-head { font-size: 12px; color: #c4b5fd; margin-bottom: 7px; font-weight: 600; }
+.st-pick-row { display: flex; gap: 8px; align-items: flex-start; padding: 3px 0; font-size: 13px; color: #e6e6ee; cursor: pointer; }
+.st-pick-row input { margin-top: 3px; accent-color: #8b5cf6; }
+.st-pick-btns { display: flex; gap: 8px; margin-top: 8px; }

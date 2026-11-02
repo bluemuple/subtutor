@@ -1,4 +1,4 @@
-const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {}, audioDirName: '', koMode: 'hold', secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, nzNotes: true, vocabProfile: true };
+const DEFAULTS = { showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true, fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', saveSentence: true, savePick: true, saveTailSec: 4, saveNextTexts: true, enabled: {}, audioDirName: '', koMode: 'hold', secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, nzNotes: true, vocabProfile: true };
 // 따라하기 쉬는 시간: 자막 길이 × 배율(r…) 또는 고정 초(s…) — content.js 와 같은 규칙
 const SHADOW_RATIOS = [0.8, 1, 1.1, 1.2, 1.3, 1.5, 2];
 const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -32,7 +32,8 @@ let settings = Object.assign({}, DEFAULTS);
 
 function save(patch) {
   settings = Object.assign({}, settings, patch);
-  chrome.storage.local.set({ settings });
+  // patch 만 보낸다 — 팝업 스냅샷으로 통째 저장하면 다른 곳이 막 바꾼 설정을 되덮는다
+  chrome.runtime.sendMessage({ type: 'settings.set', patch }).catch(() => chrome.storage.local.set({ settings }));
   render();
 }
 async function refreshDir() {

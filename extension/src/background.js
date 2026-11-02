@@ -9,7 +9,7 @@ const Sites = globalThis.SubTutorSites;
 const SITE_URL = 'https://bluemuple.github.io/subtutor/';
 const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
-  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', enabled: {},
+  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', saveSentence: true, savePick: true, saveTailSec: 4, saveNextTexts: true, enabled: {},
   audioDirName: '', // 사용자가 고른 오디오 저장 폴더 이름 (핸들은 IndexedDB). 비어 있으면 다운로드 폴더
   koMode: 'hold', koRepeats: 3, secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, nzNotes: true, vocabProfile: true, missedTag: '못 알아들음',
   web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1], fastRates: [1, 1.25, 1.5, 1] },
@@ -117,6 +117,8 @@ async function saveWordCard(card) {
     return { write: true, words, result: { ok: true, count: words.length } };
   });
 }
+let settingsChain = Promise.resolve();
+function withSettings(fn) { const p = settingsChain.then(fn); settingsChain = p.catch(() => {}); return p; }
 async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
   return Object.assign({}, DEFAULT_SETTINGS, settings || {});
@@ -738,11 +740,11 @@ async function handleMessage(msg, sender) {
     case 'sites.add': return addCustomSite(msg.origin, msg.tabId);
     case 'sites.remove': return removeCustomSite(msg.host);
     case 'settings.get': return { settings: await getSettings() };
-    case 'settings.set': {
+    case 'settings.set': return withSettings(async () => {
       const s = Object.assign(await getSettings(), msg.patch || {});
       await chrome.storage.local.set({ settings: s });
       return { settings: s };
-    }
+    });
     case 'openSite': await openSite(); return { ok: true };
     case 'openOptions': await chrome.runtime.openOptionsPage(); return { ok: true };
     case 'audioDir.status': return audioDirStatus();
@@ -800,11 +802,11 @@ async function handleMessage(msg, sender) {
       });
     }
     case 'web.settings.get': return { settings: await getSettings() };
-    case 'web.settings.set': {
-      const s = Object.assign(await getSettings(), p.patch || {});
-      await chrome.storage.local.set({ settings: s });
-      return { settings: s };
-    }
+    case 'web.settings.set': return withSettings(async () => {
+      const s2 = Object.assign(await getSettings(), p.patch || {});
+      await chrome.storage.local.set({ settings: s2 });
+      return { settings: s2 };
+    });
     case 'web.clip.play': {
       const item = (await getItems()).find((i) => i.id === p.itemId);
       if (!item) throw new Error('항목을 찾을 수 없습니다');
@@ -852,8 +854,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 chrome.runtime.onInstalled.addListener(async () => {
-  const { settings } = await chrome.storage.local.get('settings');
-  if (!settings) await chrome.storage.local.set({ settings: DEFAULT_SETTINGS });
-  // 재생 화면 우클릭 메뉴: 아이콘을 누르지 않고도 저장 + 이 탭의 녹음 허용
+  // settings 는 저장하지 않는다 — 모든 경로가 getSettings()(기본값 merge)를 쓰므로 초기 저장이 필요 없고,
+  // "없으면 기본값 저장"은 설치 직후 들어온 settings.set 을 기본값으로 되덮는 경쟁(E2E 에서 재현)을 만든다
   await refreshContextMenu();
 });
