@@ -644,6 +644,7 @@ function updateItem(items, id, patch) {
   if (!it) return { write: false, items, result: { ok: false, error: '항목을 찾을 수 없습니다' } };
   // 태그를 바꾼 시각 — 아이폰에서 바꾼 태그(서버 updated_at)와 어느 쪽이 최신인지 가린다
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'tags') && !Object.prototype.hasOwnProperty.call(patch, 'tagsAt')) patch = Object.assign({}, patch, { tagsAt: Date.now() });
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'box') && !Object.prototype.hasOwnProperty.call(patch, 'boxAt')) patch = Object.assign({}, patch, { boxAt: Date.now() });
   Object.assign(it, patch || {});
   return { write: true, items, result: { ok: true, item: it } };
 }

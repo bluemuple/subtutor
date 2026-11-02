@@ -2,6 +2,14 @@
 // 상단 바(앱 아이콘 · ⬇ 전체 다운로드 · 자막/뜻 가림 · 반복 토글(길게 = 재생 속도) · 설정), 검색 · 정렬 · 태그,
 // 대사별 속도 사다리 · 메모 펼치기 · 발음 확인, 하단 연속 듣기 막대, 설정(동기화)
 import SwiftUI
+import UIKit
+
+// 손끝 진동: 재생·사다리·메모·녹음·같이 듣기·반복·알아요
+enum Haptic {
+    static func tap() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+    static func press() { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+    static func success() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+}
 
 func rateText(_ r: Double) -> String { abs(r - 1) < 0.001 ? "1" : String(format: "%g", r) }
 
@@ -51,6 +59,7 @@ extension View {
 struct WorkPicker: View {
     @EnvironmentObject var store: Store
     @Binding var selection: WorkFilter?
+    let items: [Item]          // 지금 보이는 대사들 (학습 중 또는 ✓ 알아요)
     let done: () -> Void
     @State private var expanded: Set<String> = []
 
@@ -61,7 +70,7 @@ struct WorkPicker: View {
     }
     private var groups: [TitleGroup] {
         var byTitle: [String: [Work]] = [:]
-        for w in Store.group(store.items) { byTitle[w.title, default: []].append(w) }
+        for w in Store.group(items) { byTitle[w.title, default: []].append(w) }
         return byTitle.map { t, ws in TitleGroup(id: t, works: ws.sorted { $0.episode.localizedStandardCompare($1.episode) == .orderedAscending }) }
             .sorted { ($0.works.map(Store.latest).max() ?? 0) > ($1.works.map(Store.latest).max() ?? 0) }
     }
@@ -71,7 +80,7 @@ struct WorkPicker: View {
         let rows = 1 + gs.count + gs.filter { expanded.contains($0.id) }.reduce(0) { $0 + 1 + $1.works.count }
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                row("전체 작품", count: store.items.count, on: selection == nil, indent: false) { pick(nil) }
+                row("전체 작품", count: items.count, on: selection == nil, indent: false) { pick(nil) }
                 ForEach(gs) { g in
                     Divider()
                     if g.works.count == 1, let w = g.works.first {
@@ -146,6 +155,7 @@ struct RootView: View {
     @State private var query = ""
     @State private var tagFilter: String?      // nil = 전체
     @State private var workFilter: WorkFilter? // nil = 전체 작품
+    @State private var showKnown = false       // ✓ 알아요 칩: 알아요로 옮긴 대사만 (평소에는 숨김)
     @State private var showWorkPicker = false
 
     var body: some View {
@@ -201,8 +211,10 @@ struct RootView: View {
                     }
                 }
         } primaryAction: {
+            Haptic.tap()
             store.repeatMode.toggle()
         }
+        .simultaneousGesture(LongPressGesture(minimumDuration: 0.4).onEnded { _ in Haptic.press(); playLog.info("repeat long press") })   // 속도 메뉴가 열릴 때 진동
         .accessibilityLabel(store.repeatMode ? "반복 켜짐 (길게 눌러 재생 속도)" : "반복 꺼짐 (길게 눌러 재생 속도)")
     }
 
@@ -251,7 +263,7 @@ struct RootView: View {
         return List {
             Section { filterBar }
             if sections.isEmpty {
-                Text(query.isEmpty ? "고른 작품·태그에 맞는 대사가 없습니다" : "찾는 대사가 없습니다").foregroundStyle(.secondary)
+                Text(!query.isEmpty ? "찾는 대사가 없습니다" : (showKnown ? "알아요로 옮긴 대사가 없습니다 — 대사를 오른쪽으로 밀면 옮겨집니다" : "고른 작품·태그에 맞는 대사가 없습니다")).foregroundStyle(.secondary)
             }
             ForEach(sections) { work in
                 Section {
@@ -259,6 +271,13 @@ struct RootView: View {
                         ItemRow(item: item, showWork: work.id == "all")
                             .swipeActions(edge: .trailing) {
                                 Button { sheet = .tags(item) } label: { Label("태그", systemImage: "tag") }.tint(.indigo)
+                            }
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                if item.box == "known" {
+                                    Button { Haptic.tap(); withAnimation { store.setBox(item, "learning") } } label: { Label("다시 학습", systemImage: "arrow.uturn.backward") }.tint(.orange)
+                                } else {
+                                    Button { Haptic.success(); withAnimation { store.setBox(item, "known") } } label: { Label("알아요", systemImage: "checkmark.circle") }.tint(.green)
+                                }
                             }
                     }
                 } header: { WorkHeader(work: work) }
@@ -288,16 +307,17 @@ struct RootView: View {
                 }
                 .buttonStyle(.borderless)
                 .popover(isPresented: $showWorkPicker, arrowEdge: .top) {
-                    WorkPicker(selection: $workFilter) { showWorkPicker = false }
+                    WorkPicker(selection: $workFilter, items: pool) { showWorkPicker = false }
                         .environmentObject(store)
                         .popoverOnPhone()
                 }
-                chip("전체 \(store.items.count)", on: tagFilter == nil) { tagFilter = nil }
-                ForEach(store.allTags, id: \.self) { t in
-                    chip("#\(t) \(store.tagCount(t))", on: tagFilter == t) { tagFilter = (tagFilter == t ? nil : t) }
+                chip("전체 \(learning.count)", on: !showKnown && tagFilter == nil) { showKnown = false; tagFilter = nil }
+                chip("✓ 알아요 \(store.knownCount)", on: showKnown, tint: .green) { showKnown.toggle(); tagFilter = nil; workFilter = nil }
+                ForEach(learningTags, id: \.self) { t in
+                    chip("#\(t) \(learning.filter { $0.tags.contains(t) }.count)", on: !showKnown && tagFilter == t) { showKnown = false; tagFilter = (tagFilter == t ? nil : t) }
                 }
                 if store.allTags.isEmpty {
-                    Text("대사를 왼쪽으로 밀면 태그를 달 수 있어요").font(.caption2).foregroundStyle(.secondary)
+                    Text("왼쪽으로 밀면 태그 · 오른쪽으로 밀면 알아요").font(.caption2).foregroundStyle(.secondary)
                 }
             }
             .padding(.vertical, 2)
@@ -313,11 +333,19 @@ struct RootView: View {
             return parts[0] + (parts.count > 1 && !parts[1].isEmpty ? " · " + parts[1] : "")
         }
     }
-    private func chip(_ title: String, on: Bool, _ action: @escaping () -> Void) -> some View {
+    // 학습 중(알아요가 아닌) 대사, 지금 보이는 묶음, 학습 중 대사의 태그(많이 쓴 순)
+    private var learning: [Item] { store.items.filter { $0.box != "known" } }
+    private var pool: [Item] { showKnown ? store.items.filter { $0.box == "known" } : learning }
+    private var learningTags: [String] {
+        var count: [String: Int] = [:]
+        for it in learning { for t in it.tags { count[t, default: 0] += 1 } }
+        return count.keys.sorted { (count[$0]!, $1) > (count[$1]!, $0) }
+    }
+    private func chip(_ title: String, on: Bool, tint: Color = .indigo, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title).font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
                 .foregroundStyle(on ? Color.white : Color.primary)
-                .background(Capsule().fill(on ? Color.indigo : Color.secondary.opacity(0.15)))
+                .background(Capsule().fill(on ? tint : Color.secondary.opacity(0.15)))
         }
         .buttonStyle(.borderless)
     }
@@ -325,8 +353,8 @@ struct RootView: View {
     // 검색어·태그로 거르고, 고른 정렬대로 (전체 정렬이면 작품을 나누지 않는다)
     private func displayedSections() -> [Work] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let list = store.items.filter { it in
-            if let t = tagFilter, !it.tags.contains(t) { return false }
+        let list = pool.filter { it in
+            if !showKnown, let t = tagFilter, !it.tags.contains(t) { return false }
             if let w = workFilter, !w.matches(it) { return false }
             if q.isEmpty { return true }
             return [it.text, it.translation, it.comment, it.title, it.episode, it.tags.joined(separator: " ")]
@@ -384,8 +412,10 @@ struct ItemRow: View {
     var showWork = false
     @State private var revealText = false
     @State private var revealKo = false
-    @State private var showMemo = false
+    @State private var showMemo = false      // 메모 칸 높이 (애니메이션 없이 바로)
+    @State private var memoShown = false     // 메모 글자 (서서히)
     @State private var showCheck = false
+    @State private var checkShown = false
 
     private var saved: Bool { store.hasLocalAudio(item) }
     private var busy: Bool { store.busyIds.contains(item.id) }
@@ -425,7 +455,7 @@ struct ItemRow: View {
                         savedBadge
                         if item.missed { Text("Q").font(.caption2.bold()).foregroundStyle(.red) }
                         if !memo.isEmpty {
-                            Button { withAnimation(.easeInOut(duration: 0.25)) { showMemo.toggle() } } label: {
+                            Button { toggleBox(open: $showMemo, shown: $memoShown) } label: {
                                 Image(systemName: "note.text").foregroundStyle(showMemo ? Color.yellow : Color.secondary)
                             }
                             .buttonStyle(.borderless)
@@ -438,6 +468,7 @@ struct ItemRow: View {
                             Text(memo).font(.subheadline)
                                 .padding(8).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(RoundedRectangle(cornerRadius: 8).fill(Color.yellow.opacity(0.14)))
+                                .opacity(memoShown ? 1 : 0)
                         }
                     }
                     if let last = recorder.takes(item).last, let r = recorder.result(for: last) {
@@ -448,6 +479,7 @@ struct ItemRow: View {
                             }
                             .padding(8).frame(maxWidth: .infinity, alignment: .leading)
                             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.12)))
+                            .opacity(checkShown ? 1 : 0)
                         }
                     }
                 }
@@ -462,8 +494,24 @@ struct ItemRow: View {
         .listRowBackground(isCurrent ? Color.accentColor.opacity(0.12) : nil)
     }
 
+    // 펼치기·접기: 칸 높이는 애니메이션 없이 바로 바꾼다 — 목록 행은 높이가 애니메이션되는 동안 내용을 가운데 기준으로 다시 맞춰
+    // 글자가 내려갔다 올라오기 때문. 대신 내용만 서서히 나타나고(펼칠 때) 서서히 사라진 뒤 접힌다(접을 때)
+    private func toggleBox(open: Binding<Bool>, shown: Binding<Bool>) {
+        Haptic.tap()
+        var still = Transaction()
+        still.disablesAnimations = true
+        if open.wrappedValue {
+            withAnimation(.easeIn(duration: 0.12)) { shown.wrappedValue = false }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) { withTransaction(still) { open.wrappedValue = false } }
+        } else {
+            withTransaction(still) { open.wrappedValue = true }
+            DispatchQueue.main.async { withAnimation(.easeOut(duration: 0.2)) { shown.wrappedValue = true } }
+        }
+    }
+
     // 눌렀을 때: 저장돼 있으면 바로 재생, 아니면 받아 저장한 뒤 재생 (다음부터는 저장된 오디오). 반복 토글이 켜져 있으면 끝없이
     private func tapPlay() {
+        Haptic.tap()
         if saved { player.toggleItem(item); return }
         guard item.hasAudio, !busy else { return }
         Task {
@@ -488,6 +536,7 @@ struct ItemRow: View {
     @ViewBuilder private var ladderButton: some View {
         if item.hasAudio {
             Button {
+                Haptic.tap()
                 if saved { player.playLadder(item) }
                 else { Task { if await store.downloadAudio(item) { player.playLadder(item) } } }
             } label: {
@@ -521,6 +570,7 @@ struct ItemRow: View {
     private var recControls: some View {
         HStack(spacing: 7) {
             Button {
+                Haptic.press()
                 Task { await recorder.toggle(item) }
             } label: {
                 Image(systemName: recorder.recordingFor == item.id ? "stop.circle.fill" : "mic.fill")
@@ -544,7 +594,7 @@ struct ItemRow: View {
                 if recorder.checking.contains(last) {
                     ProgressView().controlSize(.mini)
                 } else if let r = recorder.result(for: last) {
-                    Button { withAnimation(.easeInOut(duration: 0.25)) { showCheck.toggle() } } label: {
+                    Button { toggleBox(open: $showCheck, shown: $checkShown) } label: {
                         Text("\(r.score)%").font(.caption2.bold()).foregroundStyle(.white)
                             .padding(.horizontal, 5).padding(.vertical, 2)
                             .background(Capsule().fill(r.score >= 80 ? Color.green : (r.score >= 50 ? Color.orange : Color.red)))
@@ -554,7 +604,7 @@ struct ItemRow: View {
                 }
             }
             if saved, let last = takes.last {
-                Button { player.playTogether(item, recording: last) } label: { Image(systemName: "speaker.wave.2.circle") }
+                Button { Haptic.tap(); player.playTogether(item, recording: last) } label: { Image(systemName: "speaker.wave.2.circle") }
                     .buttonStyle(.borderless)
             }
         }

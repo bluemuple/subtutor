@@ -110,7 +110,8 @@ final class Store: ObservableObject {
         sortMode = d.string(forKey: "sortMode") ?? "workNew"
         shadowRatio = d.object(forKey: "shadowRatio") as? Double ?? 0
         speechCheck = d.object(forKey: "speechCheck") as? Bool ?? true
-        if let data = d.data(forKey: "pendingTags"), let p = try? JSONDecoder().decode([String: [String]].self, from: data) { pendingTags = p }
+        if let data = d.data(forKey: "pendingEdits"), let p = try? JSONDecoder().decode([String: PendingEdit].self, from: data) { pendingEdits = p }
+        else if let data = d.data(forKey: "pendingTags"), let p = try? JSONDecoder().decode([String: [String]].self, from: data) { pendingEdits = p.mapValues { PendingEdit(tags: $0) } }   // 예전 대기열
         load()
     }
 
@@ -206,10 +207,14 @@ final class Store: ObservableObject {
         defer { syncing = false }
         saveSettings()
         do {
-            await flushPendingTags()   // 오프라인에서 바꾼 태그부터 올린다
+            await flushPendingEdits()   // 오프라인에서 바꾼 태그·알아요부터 올린다
             syncStatus = "대사 목록 받는 중…"
             var fetched = try await Supa.shared.fetchItems(url: supaUrl, key: supaKey)
-            for i in fetched.indices { if let t = pendingTags[fetched[i].id] { fetched[i].tags = t } } // 아직 못 올린 태그는 폰 쪽이 최신
+            for i in fetched.indices {   // 아직 못 올린 것은 폰 쪽이 최신
+                guard let e = pendingEdits[fetched[i].id] else { continue }
+                if let t = e.tags { fetched[i].tags = t }
+                if let b = e.box { fetched[i].box = b }
+            }
             items = fetched.sorted { $0.savedAt > $1.savedAt }
             persist()
             lastSyncAt = Date()
@@ -267,9 +272,14 @@ final class Store: ObservableObject {
     }
     func cancelDownloads() { dlCancel = true }
 
-    // ── 태그: 폰에서 바꾸면 바로 서버에 올린다 (오프라인이면 대기열에 두었다가 다음 동기화 때) ──
-    private var pendingTags: [String: [String]] = [:]
-    private func savePending() { UserDefaults.standard.set(try? JSONEncoder().encode(pendingTags), forKey: "pendingTags") }
+    // ── 태그·알아요: 폰에서 바꾸면 바로 서버에 올린다 (오프라인이면 대기열에 두었다가 다음 동기화 때) ──
+    struct PendingEdit: Codable, Equatable {
+        var tags: [String]?
+        var box: String?
+    }
+    private var pendingEdits: [String: PendingEdit] = [:]
+    private func savePending() { UserDefaults.standard.set(try? JSONEncoder().encode(pendingEdits), forKey: "pendingEdits") }
+    var knownCount: Int { items.filter { $0.box == "known" }.count }
 
     // 모든 태그 (많이 쓴 순)
     var allTags: [String] {
@@ -285,17 +295,30 @@ final class Store: ObservableObject {
         guard let i = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[i].tags = uniq
         persist()
-        pendingTags[item.id] = uniq
+        pendingEdits[item.id, default: PendingEdit()].tags = uniq
         savePending()
-        Task { await flushPendingTags() }
+        Task { await flushPendingEdits() }
     }
-    func flushPendingTags() async {
-        guard signedIn, !pendingTags.isEmpty else { return }
-        for (id, tags) in pendingTags {
+    // 알아요: box = "known" 이면 "전체"·태그 목록에서 빠지고 맨 위 ✓ 알아요 칩에서만 보인다 (웹의 "알고 있는 표현" 상자와 같다)
+    func setBox(_ item: Item, _ box: String) {
+        guard let i = items.firstIndex(where: { $0.id == item.id }) else { return }
+        items[i].box = box
+        persist()
+        pendingEdits[item.id, default: PendingEdit()].box = box
+        savePending()
+        Task { await flushPendingEdits() }
+    }
+    func flushPendingEdits() async {
+        guard signedIn, !pendingEdits.isEmpty else { return }
+        for (id, e) in pendingEdits {
+            var fields: [String: Any] = [:]
+            if let t = e.tags { fields["tags"] = t }
+            if let b = e.box { fields["box"] = b }
+            guard !fields.isEmpty else { pendingEdits[id] = nil; continue }
             do {
-                try await Supa.shared.patchTags(url: supaUrl, key: supaKey, id: id, tags: tags)
-                playLog.info("tags pushed \(id, privacy: .public) \(tags.joined(separator: ","), privacy: .public)")
-                if pendingTags[id] == tags { pendingTags[id] = nil }
+                try await Supa.shared.patchItem(url: supaUrl, key: supaKey, id: id, fields: fields)
+                playLog.info("edit pushed \(id, privacy: .public) \(fields.keys.sorted().joined(separator: ","), privacy: .public)")
+                if pendingEdits[id] == e { pendingEdits[id] = nil }
             } catch { break }   // 오프라인 등 — 다음에 다시
         }
         savePending()

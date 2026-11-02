@@ -1732,6 +1732,9 @@
   };
   // 이미 올라간 오디오 id (자동 동기화 때 새 소리만 올리려고 기억해 둔다)
   const supaUploaded = new Set(JSON.parse(localStorage.getItem('st.supaUp') || '[]'));
+  // 마지막으로 올린 태그·box (3-way 비교의 기준) — {id: {t: [...], b: 'learning'|'known'}}
+  const loadSupaBase = () => { try { return JSON.parse(localStorage.getItem('st.supaBase') || '{}') || {}; } catch (e) { return {}; } };
+  const saveSupaBase = (b) => { try { localStorage.setItem('st.supaBase', JSON.stringify(b)); } catch (e) { /* 용량 */ } };
   const saveSupaUploaded = () => { try { localStorage.setItem('st.supaUp', JSON.stringify(Array.from(supaUploaded))); } catch (e) { /* 용량 초과면 다음에 다시 올린다 */ } };
   const supaSafeName = (x) => String(x).replace(/[^A-Za-z0-9._-]/g, '_'); // 아이폰 앱 Item.safeName 과 같은 규칙이어야 한다
   function supaBase() { return supa.url.trim().replace(/\/+$/, ''); }
@@ -1799,19 +1802,35 @@
   }
   async function supaUploadInner(onStep, opts) {
     const H = { apikey: supa.key.trim(), Authorization: 'Bearer ' + supa.token };
-    // 0) 아이폰에서 바꾼 태그를 먼저 받아 온다 — 서버 updated_at 은 웹이 올릴 때는 그대로이고 아이폰이 태그를 바꿀 때만 새로 찍힌다.
-    //    마지막 올리기 이후에 바뀌었고, 웹에서 그 대사 태그를 바꾼 때(tagsAt)보다 나중이면 아이폰 쪽이 최신
+    // 0) 아이폰에서 바꾼 태그·알아요(box)를 먼저 받아 온다. 필드마다 3-way 로 비교한다:
+    //    base = 마지막으로 올린 값, remote = 서버(아이폰이 바꿨을 수 있다), local = 확장 프로그램(웹에서 바꿨을 수 있다).
+    //    remote 만 바뀌었으면 remote 를 받고, 둘 다 바뀌었으면 나중에 바꾼 쪽(서버 updated_at ↔ 확장 tagsAt/boxAt).
+    //    base 가 없는 대사(처음)는 시각만 비교한다. 서버 updated_at 은 웹이 올릴 때는 그대로이고 아이폰이 바꿀 때만 새로 찍힌다
+    const supaBase = loadSupaBase();
     try {
       const since = new Date(Math.max(0, (supa.lastAt || 0) - 1000)).toISOString();
-      const pr = await supaFetch('/rest/v1/items?select=id,tags,updated_at&updated_at=gt.' + encodeURIComponent(since), { headers: H });
+      const pr = await supaFetch('/rest/v1/items?select=id,tags,box,updated_at&updated_at=gt.' + encodeURIComponent(since), { headers: H });
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
       for (const row of await pr.json()) {
         const it = state.items.find((x) => x.id === row.id);
-        if (!it || !Array.isArray(row.tags)) continue;
+        if (!it) continue;
         const at = Date.parse(row.updated_at) || 0;
-        if (at > (it.tagsAt || 0) && JSON.stringify(it.tags || []) !== JSON.stringify(row.tags)) {
-          await B.request('items.update', { id: it.id, patch: { tags: row.tags, tagsAt: at } });
-          it.tags = row.tags; it.tagsAt = at;
-          if (mergeTagNames(row.tags)) saveTagNames();
+        const base = supaBase[it.id];
+        const take = (remote, local, baseVal, localAt) => {
+          if (same(remote, local)) return false;
+          if (!base) return at > (localAt || 0);
+          const remoteChanged = !same(remote, baseVal), localChanged = !same(local, baseVal);
+          return remoteChanged && (!localChanged || at > (localAt || 0));
+        };
+        const patch = {};
+        const rTags = Array.isArray(row.tags) ? row.tags : [];
+        if (take(rTags, it.tags || [], base && base.t, it.tagsAt)) { patch.tags = rTags; patch.tagsAt = at; }
+        const rBox = row.box || 'learning';
+        if (take(rBox, it.box || 'learning', base && base.b, it.boxAt)) { patch.box = rBox; patch.boxAt = at; }
+        if (Object.keys(patch).length) {
+          await B.request('items.update', { id: it.id, patch });
+          Object.assign(it, patch);
+          if (patch.tags && mergeTagNames(patch.tags)) saveTagNames();
         }
       }
     } catch (e) { /* 받아 오기에 실패해도 올리기는 계속 */ }
@@ -1844,6 +1863,9 @@
       has_audio: supaUploaded.has(it.id), audio_ms: supaUploaded.has(it.id) ? Math.max(0, Math.round((r.endMs || 0) - (r.startMs || 0))) : 0,
     }; });
     if (rows.length) await supaFetch('/rest/v1/items', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' }, H), body: JSON.stringify(rows) });
+    const nextBase = {};
+    for (const r of rows) nextBase[r.id] = { t: r.tags, b: r.box };
+    saveSupaBase(nextBase);   // 다음 받아 오기의 기준 = 방금 올린 값
     // 3) 단어장 upsert
     let wordCount = 0;
     if (state.words.length) {
