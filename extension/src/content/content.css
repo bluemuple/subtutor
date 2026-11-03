@@ -233,3 +233,6 @@ u.st-kiwi { text-decoration: underline dotted #fbbf24; text-underline-offset: 3p
 .st-pick-row { display: flex; gap: 8px; align-items: flex-start; padding: 3px 0; font-size: 13px; color: #e6e6ee; cursor: pointer; }
 .st-pick-row input { margin-top: 3px; accent-color: #8b5cf6; }
 .st-pick-btns { display: flex; gap: 8px; margin-top: 8px; }
+
+/* 영상 오디오 통째 MP3 녹음 중이면 빨갛게 + 흐르는 시간 */
+#st-panel .st-rec-btn.st-on { color: #f87171; border-color: #f87171; font-variant-numeric: tabular-nums; }

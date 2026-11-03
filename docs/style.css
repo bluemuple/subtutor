@@ -439,7 +439,9 @@ input.rate:focus { outline: none; color: var(--accent2); }
 .speak-import { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin-bottom: 12px; display: grid; gap: 8px; }
 .speak-import textarea { width: 100%; min-height: 84px; background: var(--sunken); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; font-size: 14px; resize: vertical; }
 .speak-import .row { display: flex; gap: 8px; align-items: center; }
-.speak-group { margin: 14px 0 6px; color: var(--muted); font-size: 13px; font-weight: 700; }
+.speak-group { margin: 14px 0 6px; color: var(--muted); font-size: 13px; font-weight: 700; cursor: pointer; user-select: none; }
+.speak-group:hover { color: var(--text); }
+.speak-group.closed { opacity: 0.75; }
 .speak-p { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
 .speak-p .p-head { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
 .speak-p .p-text { font-size: 15px; font-weight: 600; color: var(--strong); flex: 1; }
@@ -451,7 +453,9 @@ input.rate:focus { outline: none; color: var(--accent2); }
 .speak-bigbtns { display: flex; gap: 10px; }
 .speak-bigbtns .btn { flex: 1; padding: 14px 8px; font-size: 16px; border-radius: 12px; }
 .speak-hint { background: var(--sunken); border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px; font-size: 13px; color: var(--muted); white-space: pre-wrap; }
-.speak-take { border-top: 1px solid var(--row-line); padding: 7px 0 2px; font-size: 13px; }
+.speak-take { border-top: 1px solid var(--row-line); font-size: 13px; position: relative; overflow: hidden; touch-action: pan-y; }
+.speak-take .t-inner { position: relative; padding: 7px 0 2px; background: var(--card); z-index: 1; }
+.speak-take .t-del { position: absolute; top: 5px; right: 0; bottom: 3px; width: 72px; border: none; border-radius: 9px; background: #dc2626; color: #fff; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; z-index: 0; }
 .speak-take .t-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .speak-take .t-when { color: var(--muted); }
 .speak-take .t-badge { background: var(--card2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 12px; }

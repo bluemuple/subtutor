@@ -28,6 +28,7 @@ struct SpeakView: View {
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             List {
                 Section {
                     Text(speak.stats()).font(.footnote).foregroundStyle(.secondary).listRowSeparator(.hidden)
@@ -40,8 +41,31 @@ struct SpeakView: View {
                 ForEach(SpeakStore.groups, id: \.0) { key, title in
                     let list = groupPrompts(key)
                     if !list.isEmpty {
-                        Section(title + " · \(list.count)") {
-                            ForEach(list) { p in promptRow(p) }
+                        let closed = speak.collapsed.contains(key)
+                        Section {
+                            if !closed {
+                                ForEach(list) { p in promptRows(p) }
+                            }
+                        } header: {
+                            // 범주 제목을 누르면 접고 펼친다 (상태는 폰에 저장)
+                            Button {
+                                Haptic.tap()
+                                var still = Transaction(); still.disablesAnimations = true
+                                withTransaction(still) { speak.toggleCollapsed(key) }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "chevron.down")
+                                        .font(.caption2.weight(.bold))
+                                        .rotationEffect(.degrees(closed ? -90 : 0))
+                                    Text(title + " · \(list.count)")
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(nil)
                         }
                     }
                 }
@@ -52,7 +76,7 @@ struct SpeakView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("닫기") { dismiss() } }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button { Haptic.tap(); pickRandom() } label: { Image(systemName: "die.face.5") }
+                    Button { Haptic.tap(); pickRandom(proxy) } label: { Image(systemName: "die.face.5") }
                         .accessibilityLabel("아무 프롬프트나 열기")
                     Button { Haptic.tap(); withAnimation { importOpen.toggle() } } label: { Image(systemName: "plus") }
                         .accessibilityLabel("프롬프트 추가")
@@ -72,13 +96,14 @@ struct SpeakView: View {
             .task {
                 if store.signedIn { await speak.sync(url: store.supaUrl, key: store.supaKey) }
             }
+            }
         }
     }
 
     private func groupPrompts(_ key: String) -> [SPrompt] {
         speak.visiblePrompts().filter { key == "mine" ? $0.cat == "mine" : $0.kind + ":" + $0.cat == key }
     }
-    private func pickRandom() {
+    private func pickRandom(_ proxy: ScrollViewProxy) {
         let pool = speak.visiblePrompts()
         guard !pool.isEmpty else { return }
         let recent = SpeakStore.now() - 3 * 86_400_000
@@ -86,7 +111,12 @@ struct SpeakView: View {
         guard let pick = (fresh.isEmpty ? pool : fresh).randomElement() else { return }
         importOpen = false
         editMode = false
-        openId = pick.id
+        speak.expand(SpeakStore.groupKey(pick))      // 접힌 범주면 자동으로 펼친다
+        var still = Transaction(); still.disablesAnimations = true
+        withTransaction(still) { openId = pick.id }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            withAnimation { proxy.scrollTo(pick.id, anchor: .top) }
+        }
     }
 
     private var importBox: some View {
@@ -123,7 +153,8 @@ struct SpeakView: View {
         .listRowSeparator(.hidden)
     }
 
-    @ViewBuilder private func promptRow(_ p: SPrompt) -> some View {
+    // 한 프롬프트가 만드는 List 줄들: 머리줄(누르면 펼침) + 펼쳤으면 몸통 + 기록 줄들(왼쪽으로 밀면 빨간 삭제)
+    @ViewBuilder private func promptRows(_ p: SPrompt) -> some View {
         if editMode {
             VStack(alignment: .leading, spacing: 6) {
                 TextField("프롬프트 (영어 문장)", text: Binding(
@@ -132,30 +163,46 @@ struct SpeakView: View {
                 TextField("힌트 — 쓰면 좋은 표현·단어", text: Binding(
                     get: { p.hint }, set: { speak.updatePrompt(p.id, hint: $0) }), axis: .vertical)
                     .font(.caption)
-                Button(role: .destructive) { Haptic.press(); withAnimation { speak.deletePrompt(p.id) } } label: {
-                    Label("이 프롬프트 지우기", systemImage: "trash")
-                }
-                .font(.caption)
+                Text("← 왼쪽으로 밀면 지울 수 있어요").font(.caption2).foregroundStyle(.tertiary)
             }
             .padding(.vertical, 2)
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                Button(role: .destructive) { Haptic.press(); speak.deletePrompt(p.id) } label: { Label("삭제", systemImage: "trash") }
+            }
         } else {
             let takes = speak.takesOf(p.id)
             let open = openId == p.id
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(p.text).font(.subheadline.weight(.semibold))
-                    Spacer()
-                    if let last = takes.first {
-                        Text("\(takes.count)회 · " + when(last.at)).font(.caption2).foregroundStyle(.tertiary)
-                    }
+            HStack(alignment: .firstTextBaseline) {
+                Text(p.text).font(.subheadline.weight(.semibold))
+                Spacer()
+                if let last = takes.first {
+                    Text("\(takes.count)회 · " + when(last.at)).font(.caption2).foregroundStyle(.tertiary)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    Haptic.tap()
-                    var still = Transaction(); still.disablesAnimations = true
-                    withTransaction(still) { openId = open ? nil : p.id }
+            }
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                Haptic.tap()
+                var still = Transaction(); still.disablesAnimations = true
+                withTransaction(still) { openId = open ? nil : p.id }
+            }
+            .id(p.id)
+            if open {
+                openBody(p)
+                ForEach(takes) { t in
+                    takeRow(t)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) { Haptic.press(); speak.deleteTake(t.id) } label: { Label("삭제", systemImage: "trash") }
+                        }
                 }
-                if open {
+            }
+        }
+    }
+
+    // 펼친 몸통: 큼직한 녹음 버튼 둘 + 힌트
+    @ViewBuilder private func openBody(_ p: SPrompt) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if true {
                     HStack(spacing: 8) {
                         Button { Haptic.press(); recTarget = RecTarget(prompt: p, mode: "free") } label: {
                             Label("자유 말하기", systemImage: "mic.fill").frame(maxWidth: .infinity).padding(.vertical, 9)
@@ -187,11 +234,9 @@ struct SpeakView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(RoundedRectangle(cornerRadius: 8).fill(Color.yellow.opacity(0.1)))
                     }
-                    ForEach(takes) { t in takeRow(t) }
-                }
             }
-            .padding(.vertical, 2)
         }
+        .padding(.vertical, 2)
     }
 
     private func when(_ ms: Double) -> String {
@@ -245,9 +290,6 @@ struct SpeakView: View {
                 }
                 .accessibilityLabel("별점 \(t.rating)점")
                 Spacer()
-                Button(role: .destructive) { Haptic.press(); withAnimation { speak.deleteTake(t.id) } } label: {
-                    Image(systemName: "trash").foregroundStyle(.secondary)
-                }
             }
             .buttonStyle(.borderless)
             if memoOpen.contains(t.id) {
@@ -258,12 +300,26 @@ struct SpeakView: View {
                     .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.1)))
             }
             if heardOpen.contains(t.id) {
-                Text(t.heard.isEmpty ? "이 녹음은 받아 적지 못했습니다 (음성 인식이 꺼져 있었거나 실패)" : "들린 문장: " + t.heard)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.1)))
+                VStack(alignment: .leading, spacing: 6) {
+                    if speak.transcribing.contains(t.id) {
+                        Label("받아 적는 중…", systemImage: "waveform").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text(t.heard.isEmpty ? "이 녹음은 받아 적지 못했습니다" : "들린 문장: " + t.heard)
+                            .font(.caption).foregroundStyle(.secondary)
+                        if speak.hasAudio(t.id) {
+                            Button { Haptic.tap(); speak.retranscribe(t.id) } label: {
+                                Label(t.heard.isEmpty ? "다시 받아 적기" : "다시 받아 적기 (지금 것을 덮어씀)", systemImage: "arrow.clockwise")
+                            }
+                            .font(.caption2)
+                            .buttonStyle(.borderless)
+                        } else if t.heard.isEmpty {
+                            Text("녹음한 기기에서 다시 받아 적을 수 있습니다").font(.caption2).foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.1)))
             }
         }
         .padding(.leading, 2)
@@ -416,10 +472,12 @@ struct SpeakRecordView: View {
         }
         let id = takeId
         let take = speak.addTake(id: id, pid: prompt.id, mode: mode, targetS: mode == "step" ? target : 0, durMs: ms)
-        if store.speechCheck {   // 받아 적기 (가능하면 기기 안에서) → 말 속도
-            Task.detached {
-                let heard = await SpeechCheck.recognize(url, timeout: max(30, ms / 1000 * 2))
-                if let heard, !heard.isEmpty { await SpeakStore.shared.setHeard(id, heard) }
+        Task.detached {   // 받아 적기 (권한을 묻고, 기기 인식이 빈손이면 서버 인식으로 한 번 더) → 말 속도
+            await MainActor.run { SpeakStore.shared.transcribing.insert(id) }
+            let heard = await SpeechCheck.transcribe(url, timeout: max(30, ms / 1000 * 2))
+            await MainActor.run {
+                SpeakStore.shared.transcribing.remove(id)
+                if let heard, !heard.isEmpty { SpeakStore.shared.setHeard(id, heard) }
             }
         }
         if mode == "free" {

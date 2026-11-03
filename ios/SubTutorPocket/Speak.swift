@@ -40,6 +40,8 @@ final class SpeakStore: ObservableObject {
     @Published var stages: [Int] = [75, 60, 45]    // 줄여 말하기 단계 (초) — 설정에서 바꾼다
     @Published var syncMsg = ""
     @Published var playingTake: String?
+    @Published var collapsed: Set<String> = []     // 접어 둔 범주
+    @Published var transcribing: Set<String> = []  // 받아 적는 중인 기록
     private var lastSync: Double = 0
     private var seeded = false
     private var player: AVAudioPlayer?
@@ -53,7 +55,7 @@ final class SpeakStore: ObservableObject {
         ("long:class", "길게 말하기 · 수업에서"), ("long:meeting", "길게 말하기 · 회의에서"), ("long:etc", "길게 말하기 · 그 외"),
     ]
 
-    private struct FileBox: Codable { var prompts: [SPrompt]; var takes: [STake]; var stages: [Int]; var lastSync: Double; var seeded: Bool }
+    private struct FileBox: Codable { var prompts: [SPrompt]; var takes: [STake]; var stages: [Int]; var lastSync: Double; var seeded: Bool; var collapsed: [String]? }
     static var file: URL { Store.docs.appendingPathComponent("speak.json") }
     static var audioDir: URL { Store.docs.appendingPathComponent("speak", isDirectory: true) }
     static func audioURL(_ takeId: String) -> URL { audioDir.appendingPathComponent(takeId + ".m4a") }
@@ -65,6 +67,7 @@ final class SpeakStore: ObservableObject {
             if !box.stages.isEmpty { stages = box.stages }
             lastSync = box.lastSync
             seeded = box.seeded
+            collapsed = Set(box.collapsed ?? [])
         }
         seedBuiltins()
     }
@@ -84,13 +87,19 @@ final class SpeakStore: ObservableObject {
     }
 
     func persist() {
-        let box = FileBox(prompts: prompts, takes: takes, stages: stages, lastSync: lastSync, seeded: seeded)
+        let box = FileBox(prompts: prompts, takes: takes, stages: stages, lastSync: lastSync, seeded: seeded, collapsed: Array(collapsed).sorted())
         if let d = try? JSONEncoder().encode(box) { try? d.write(to: SpeakStore.file, options: .atomic) }
     }
 
     // ── 프롬프트 ──
     static let now = { Date().timeIntervalSince1970 * 1000 }
     func takesOf(_ pid: String) -> [STake] { takes.filter { $0.pid == pid && !$0.deleted }.sorted { $0.at > $1.at } }
+    static func groupKey(_ p: SPrompt) -> String { p.cat == "mine" ? "mine" : p.kind + ":" + p.cat }
+    func toggleCollapsed(_ key: String) {
+        if collapsed.contains(key) { collapsed.remove(key) } else { collapsed.insert(key) }
+        persist()
+    }
+    func expand(_ key: String) { if collapsed.remove(key) != nil { persist() } }
     func visiblePrompts() -> [SPrompt] { prompts.filter { !$0.deleted } }
 
     // 여러 줄 붙여넣기 → 1줄 1프롬프트 (번호·글머리표 떼고, 빈 줄·중복 버림) — 웹 fluency.js 와 같은 규칙
@@ -164,6 +173,18 @@ final class SpeakStore: ObservableObject {
         pushSoon()
     }
     func hasAudio(_ id: String) -> Bool { FileManager.default.fileExists(atPath: SpeakStore.audioURL(id).path) }
+
+    // 받아 적기가 빠진(또는 틀린) 기록을 다시 돌린다 — 오디오가 이 폰에 있을 때만
+    func retranscribe(_ id: String) {
+        guard !transcribing.contains(id), hasAudio(id) else { return }
+        transcribing.insert(id)
+        let dur = takes.first(where: { $0.id == id })?.durMs ?? 0
+        Task {
+            let heard = await SpeechCheck.transcribe(SpeakStore.audioURL(id), timeout: max(30, dur / 1000 * 2))
+            transcribing.remove(id)
+            if let heard, !heard.isEmpty { Haptic.success(); setHeard(id, heard) }
+        }
+    }
 
     func stats() -> String {
         let cal = Calendar.current

@@ -506,6 +506,48 @@ async function captureStart(msg, tabId) {
   }
   return offscreenCall({ cmd: 'start', streamId, limitMs: msg.limitMs, test: msg.test });
 }
+// ───────── 영상 오디오 통째 MP3 (offscreen 이 눌러 담고, 여기서 파일로) ─────────
+let recState = null;            // { tabId, title, startedAt }
+const recParts = new Map();     // recId → base64 조각 (6MB = 3의 배수 바이트라 그대로 이어 붙인다)
+async function recStart(msg, tabId) {
+  let streamId = null;
+  if (msg.test !== 'sweep') {
+    if (!Number.isInteger(tabId)) throw new Error('플레이어 탭을 알 수 없습니다');
+    try {
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      if (/not been invoked|activeTab|invoked|permission/i.test(m)) return { ok: false, unavailable: 'grant', error: m, shortcut: await saveShortcut() };
+      throw e;
+    }
+    if (!streamId) return { ok: false, unavailable: 'grant', error: 'no stream id', shortcut: await saveShortcut() };
+  }
+  const r = await offscreenCall({ cmd: 'recStart', streamId, test: msg.test });
+  if (r && r.ok) recState = { tabId, title: msg.title || '', startedAt: r.startedAt || Date.now() };
+  return r;
+}
+async function recSave(meta) {
+  const parts = recParts.get(meta.recId) || [];
+  recParts.delete(meta.recId);
+  if (!parts.length) return { ok: false, error: '받은 오디오 조각이 없습니다' };
+  const safe = (x) => String(x || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || '영상 오디오';
+  const d = new Date();
+  const two = (n) => String(n).padStart(2, '0');
+  const stamp = d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + ' ' + two(d.getHours()) + '.' + two(d.getMinutes());
+  const fileName = 'SubTutor/영상 오디오/' + safe(recState && recState.title) + ' ' + stamp + '.mp3';
+  const b64 = parts.join('');
+  recState = null;
+  const out = { ok: true, fileName, durMs: meta.durMs || 0, skippedMs: meta.skippedMs || 0, bytes: meta.bytes || 0, reason: meta.reason || '' };
+  const folder = await saveToFolder(fileName, b64);
+  if (folder.ok) { out.location = 'folder'; out.fileName = folder.path; return out; }
+  try {
+    out.downloadId = await chrome.downloads.download({ url: 'data:audio/mpeg;base64,' + b64, filename: fileName, conflictAction: 'uniquify', saveAs: false });
+    out.location = 'downloads';
+    return out;
+  } catch (e) {
+    return { ok: false, error: '파일 저장 실패: ' + ((e && e.message) || e) };
+  }
+}
 // ───────── 호출(단축키·우클릭 메뉴) ─────────
 // 탭 오디오 캡처는 사용자가 이 탭에서 확장 프로그램을 '호출'해야 허용된다(activeTab, 크롬 규칙). 팝업(아이콘) 말고도 크롬 명령 단축키와 우클릭 메뉴가 같은 효과를 낸다
 async function saveShortcut() {
@@ -662,6 +704,43 @@ async function handleMessage(msg, sender) {
     }
     case 'audio.save': return saveAudio(msg);
     case 'capture.start': return captureStart(msg, tabId);
+    // 영상 오디오 통째 MP3
+    case 'rec.start': return recStart(msg, tabId);
+    case 'rec.beat': {
+      const r = await offscreenCall({ cmd: 'recBeat', paused: !!msg.paused }, 2);
+      if (r && r.recording) {   // 서비스 워커가 그새 재시동됐어도 심장박동으로 상태를 되살린다
+        if (!recState) recState = { tabId, title: '', startedAt: 0 };
+        if (msg.title) recState.title = msg.title;
+        if (tabId != null) recState.tabId = tabId;
+      }
+      return r;
+    }
+    case 'rec.stop': {
+      const meta = await offscreenCall({ cmd: 'recStop' }, 2);
+      if (!meta || !meta.ok) return meta || { ok: false, error: '영상 오디오를 녹음하고 있지 않습니다' };
+      return recSave(meta);
+    }
+    case 'rec.status': {
+      let has = false;
+      try { has = chrome.offscreen && typeof chrome.offscreen.hasDocument === 'function' ? await chrome.offscreen.hasDocument() : false; } catch (e) { has = false; }
+      if (!has) { recState = null; return { on: false }; }
+      const r = await offscreenCall({ cmd: 'recPing' }, 2).catch(() => null);
+      if (!r || !r.recording) { recState = null; return { on: false }; }
+      if (!recState) recState = { tabId, title: '', startedAt: 0 };
+      return { on: true, tabId: recState.tabId, title: recState.title, startedAt: recState.startedAt };
+    }
+    case 'rec.part': {   // offscreen 이 보내는 MP3 조각
+      const arr = recParts.get(msg.recId) || [];
+      arr[msg.seq] = msg.data;
+      recParts.set(msg.recId, arr);
+      return { ok: true };
+    }
+    case 'rec.auto': {   // 심장박동 끊김·용량 초과로 offscreen 이 스스로 끝냈다 — 저장하고 플레이어 탭에 알린다
+      const st = recState;
+      const out = await recSave(msg.meta || {});
+      if (st && Number.isInteger(st.tabId)) { try { await chrome.tabs.sendMessage(st.tabId, { type: 'rec.saved', result: out }); } catch (e) { /* 탭이 사라짐 */ } }
+      return { ok: true };
+    }
     case 'stats.get': case 'web.stats.get': return { stats: await getStats() };
     case 'stats.episode': return withStats((st) => {
       st.episodes[msg.key] = Object.assign({}, st.episodes[msg.key] || {}, msg.data || {});

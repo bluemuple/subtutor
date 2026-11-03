@@ -186,6 +186,13 @@
       case 'setEnabled': setEnabled(!!msg.enabled); sendResponse({ ok: true }); break;
       case 'popupOpened': onPopupOpened(); sendResponse({ ok: true, pending: false }); break;
       case 'invoke': sendResponse(onInvoke(msg)); break;
+      case 'rec.saved': {
+        recEndUi();
+        const r = msg.result || {};
+        toast(r.ok ? '⏹ 영상 오디오 MP3 저장: ' + (r.location === 'folder' ? r.fileName : '다운로드 폴더/' + r.fileName) + ' (' + fmtMinSec(r.durMs) + ')' : '영상 오디오 저장 실패: ' + (r.error || ''), 9000);
+        sendResponse({ ok: true });
+        break;
+      }
       case 'dubAt': dubAt(msg.ms).then(sendResponse, (e) => sendResponse({ ok: false, error: String((e && e.message) || e) })); return true;
       default: return;
     }
@@ -936,6 +943,70 @@
     }
     if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
   }
+  // ── 지금 보는 영상의 오디오를 통째로 MP3 로 (보는 동안 실시간 녹음 — 멈춘 시간은 건너뛴다) ──
+  const recFull = { on: false, startedAt: 0, timer: null, tick: 0, pending: false };
+  const fmtMinSec = (ms) => { const t = Math.max(0, Math.round(ms / 1000)); return (t >= 60 ? Math.floor(t / 60) + '분 ' : '') + (t % 60) + '초'; };
+  function recTitle() {
+    const m = state.meta || {};
+    return (m.title || document.title || '영상').trim() + (m.episode ? ' ' + m.episode : '');
+  }
+  function recSetUi() {
+    if (!ui.btnRec) return;
+    ui.btnRec.classList.toggle('st-on', recFull.on);
+    if (!recFull.on) { ui.btnRec.textContent = '⏺ MP3'; return; }
+    const t = Math.max(0, Math.floor((now() - recFull.startedAt) / 1000));
+    ui.btnRec.textContent = '⏹ ' + Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
+  }
+  function recBegin(startedAt) {
+    recFull.on = true;
+    recFull.startedAt = startedAt || now();
+    recFull.tick = 0;
+    clearInterval(recFull.timer);
+    recFull.timer = setInterval(() => {
+      recSetUi();
+      recFull.tick++;
+      if (recFull.tick % 3 !== 0) return;             // 심장박동은 3초에 한 번
+      const v = adapter.video();
+      bg({ type: 'rec.beat', paused: !!(v && v.paused), title: recTitle() })
+        .then((r) => { if (r && r.recording === false && recFull.on) recEndUi(); })   // 저쪽이 이미 끝냈으면(자동 저장 등) 버튼을 되돌린다
+        .catch(() => { /* ignore */ });
+      if (v && v.ended) recToggle();                   // 영상이 끝나면 알아서 저장
+    }, 1000);
+    recSetUi();
+  }
+  function recEndUi() {
+    recFull.on = false;
+    clearInterval(recFull.timer);
+    recSetUi();
+  }
+  async function recToggle() {
+    if (recFull.on) {
+      recEndUi();
+      chip('rec', '영상 오디오를 MP3 파일로 묶는 중…', 0);
+      try {
+        const r = await bg({ type: 'rec.stop' });
+        chipHide();
+        if (!r || !r.ok) { toast('영상 오디오 저장 실패: ' + ((r && r.error) || '알 수 없음'), 7000); return; }
+        const where = r.location === 'folder' ? r.fileName : '다운로드 폴더/' + r.fileName;
+        toast('⏹ 영상 오디오 MP3 저장: ' + where + ' (' + fmtMinSec(r.durMs) + (r.skippedMs > 2000 ? ', 멈춘 ' + fmtMinSec(r.skippedMs) + ' 건너뜀' : '') + ')', 9000);
+      } catch (e) { chipHide(); toast('영상 오디오 저장 실패: ' + (e && e.message), 7000); }
+      return;
+    }
+    let started = null;
+    try { started = await bg({ type: 'rec.start', title: recTitle() }); }
+    catch (e) { toast('영상 오디오 녹음 시작 실패: ' + (e && e.message), 7000); return; }
+    if (started && started.unavailable === 'grant') {
+      recFull.pending = true;
+      const hint = grantHint(started.shortcut);
+      chip('wait', '영상 오디오 녹음 허용 대기 — ' + hint, 0);
+      toast('🎙 ' + hint, 8000);
+      return;
+    }
+    if (!started || !started.ok) { toast('영상 오디오 녹음을 시작하지 못했습니다' + (started && started.error ? ': ' + started.error : ''), 7000); return; }
+    recBegin(now());
+    toast('⏺ 영상 오디오를 MP3 로 담는 중 — 보는 동안 실시간으로 담기고, 일시정지한 시간은 건너뜁니다. 같은 버튼으로 저장', 7000);
+  }
+
   // 탭 오디오 캡처: 서비스 워커가 스트림 ID 를 받아 offscreen 문서에서 녹음한다 (탭 안에서 녹음하면 되먹임이 생긴다)
   async function captureViaTab(startV, endV, item, i) {
     const started = await bg({ type: 'capture.start', limitMs: 60000, test: settings.captureTest || undefined });
@@ -964,6 +1035,7 @@
   }
   // 호출(단축키·메뉴·팝업)로 이 탭의 녹음이 허용되면 기다리던 녹음을 바로 이어서 한다 → true 면 처리함
   function resumePendingCapture() {
+    if (recFull.pending) { recFull.pending = false; chipHide(); recToggle(); return true; }
     const p = capture.pendingGrant;
     if (!p) return false;
     capture.pendingGrant = null;
@@ -1094,6 +1166,7 @@
       el('button', { class: 'st-foot-btn', title: '이 에피소드의 어휘 통계 (3천 밖 단어·말 속도)', onclick: showVocab }, '어휘 통계'),
       el('button', { class: 'st-foot-btn st-foot-words', title: '이 영상의 단어 목록 (어려운 단어부터 · 뜻 · 단어장 저장)', onclick: () => toggleWordView() }, '단어 목록'),
       el('button', { class: 'st-foot-btn st-foot-dub', title: '지금 자막으로 더빙 (R)', onclick: () => toggleDubBox() }, '🎙 더빙'),
+      (ui.btnRec = el('button', { class: 'st-foot-btn st-rec-btn', title: '지금 보는 영상의 오디오를 통째로 MP3 로 저장 — 보는 동안 실시간으로 담기고, 일시정지한 시간은 건너뜁니다. 다시 누르면 저장', onclick: () => recToggle() }, '⏺ MP3')),
       el('span', { class: 'st-copy-wrap' }, [
         el('button', { class: 'st-foot-btn st-copy-btn', title: '이 영상의 자막 전체를 복사', onclick: (e) => { e.stopPropagation(); ui.copyMenu.classList.toggle('st-hidden'); } }, '⧉ 복사 ▾'),
         (ui.copyMenu = el('div', { class: 'st-copy-menu st-hidden' }, [
@@ -1113,6 +1186,7 @@
 
     ui.toggle = el('button', { id: 'st-toggle', title: 'SubTutor 자막 패널 열기 (`)', onclick: () => setPanelOpen(true) }, '‹');
     document.body.append(ui.panel, ui.toggle);
+    bg({ type: 'rec.status' }).then((r) => { if (r && r.on) recBegin(r.startedAt || now()); }).catch(() => { /* ignore */ });
 
     ui.overlay = el('div', { id: 'st-overlay', class: 'st-hidden' });
     ui.ovText = el('span', { class: 'st-ov-text' });

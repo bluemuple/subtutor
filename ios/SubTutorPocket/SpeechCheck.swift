@@ -53,14 +53,21 @@ enum SpeechCheck {
         }
     }
 
-    static func recognize(_ url: URL, timeout: Double = 20) async -> String? {
+    // 입트기 받아 적기: 권한을 먼저 묻고, 기기 안 인식이 빈손이면 서버 인식(인터넷)으로 한 번 더 해 본다
+    static func transcribe(_ url: URL, timeout: Double = 30) async -> String? {
+        guard await authorize() else { return nil }
+        if let s = await recognize(url, timeout: timeout), !s.isEmpty { return s }
+        return await recognize(url, timeout: timeout, onDevice: false)
+    }
+
+    static func recognize(_ url: URL, timeout: Double = 20, onDevice: Bool = true) async -> String? {
         // 뉴질랜드 영어 인식기가 있으면 그것을, 없으면 미국 영어
         let nz = SFSpeechRecognizer(locale: Locale(identifier: "en-NZ"))
         let rec = (nz?.isAvailable == true ? nz : nil) ?? SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         guard let rec, rec.isAvailable else { return nil }
         let req = SFSpeechURLRecognitionRequest(url: url)
         req.shouldReportPartialResults = false
-        if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
+        if onDevice, rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
         return await withCheckedContinuation { (c: CheckedContinuation<String?, Never>) in
             let once = Once(c)
             let task = rec.recognitionTask(with: req) { result, error in

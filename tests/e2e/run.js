@@ -1407,6 +1407,55 @@ async function runSites() {
       }
     });
 
+    await step('영상 오디오 통째 MP3(합성 신호): 폴더에 한 파일로 저장되고, 멈춘(paused) 동안은 건너뛴다', async () => {
+      const started = await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'rec.start', test: 'sweep', title: 'E2E Sweep' }, { tab: { id: 777 } }));
+      assert(started && started.ok, '통째 녹음 시작: ' + JSON.stringify(started));
+      try {
+        await sleep(1600);
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'rec.beat', paused: true, title: 'E2E Sweep' }, { tab: { id: 777 } }));
+        await sleep(1300);   // 멈춘 동안의 소리는 버려진다
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'rec.beat', paused: false, title: 'E2E Sweep' }, { tab: { id: 777 } }));
+        await sleep(1600);
+        const saved = await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'rec.stop' }, {}));
+        assert(saved && saved.ok && saved.location === 'folder', '지정 폴더에 저장: ' + JSON.stringify(saved));
+        assert(/^e2e-docs\/SubTutor\/영상 오디오\/E2E Sweep .+\.mp3$/.test(saved.fileName), '파일 이름: ' + saved.fileName);
+        assert(saved.durMs > 2200 && saved.durMs < 4600, '담긴 길이 ≈ 3.2초 (멈춘 1.3초 제외): ' + saved.durMs);
+        assert(saved.skippedMs > 600, '멈춘 동안을 건너뛰었다: ' + saved.skippedMs);
+        const got = await opt.evaluate(async (pth) => {
+          const root = await navigator.storage.getDirectory();
+          let dir = await root.getDirectoryHandle('e2e-docs');
+          const parts = pth.split('/').slice(1);
+          for (const seg of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(seg);
+          const f = await (await dir.getFileHandle(parts[parts.length - 1])).getFile();
+          return { size: f.size, b64: await new Promise((res) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.readAsDataURL(f); }) };
+        }, saved.fileName);
+        const buf = Buffer.from(got.b64, 'base64');
+        assert(buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0, 'mp3 sync bytes: ' + buf.slice(0, 4).toString('hex'));
+        const file = path.join(TMP, 'e2e-rec-full.mp3');
+        fs.writeFileSync(file, buf);
+        const probe = require('child_process').execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_name,channels', '-of', 'default=nw=1', file]).toString();
+        assert(/codec_name=mp3/.test(probe) && /channels=1/.test(probe), 'ffprobe: ' + probe.replace(/\s+/g, ' '));
+        const durMs = parseFloat(/duration=([\d.]+)/.exec(probe)[1]) * 1000;
+        assert(Math.abs(durMs - saved.durMs) < 800, '파일 길이 ' + Math.round(durMs) + ' ≈ 기록 ' + saved.durMs);
+        // 올라가는 사인 스위프: 멈춘 구간을 이어 붙여도 소리가 비지 않고, 뒤가 앞보다 높다
+        const pcm = require('child_process').execFileSync('ffmpeg', ['-v', 'error', '-i', file, '-f', 's16le', '-ac', '1', '-ar', '32000', '-'], { maxBuffer: 1 << 26 });
+        const n = pcm.length / 2;
+        const win = (frac) => { const a = Math.floor(n * frac), len = 32000 * 0.2; let cross = 0, prev = 0, sq = 0; for (let i = a; i < a + len; i++) { const v = pcm.readInt16LE(i * 2); sq += v * v; if ((v >= 0) !== (prev >= 0) && i > a) cross++; prev = v; } return { hz: Math.round(cross / 2 / 0.2), rms: Math.round(Math.sqrt(sq / len)) }; };
+        const w = [0.15, 0.8].map(win);
+        assert(w.every((x) => x.rms > 1200), '빈 구간이 없다: ' + JSON.stringify(w));
+        assert(w[1].hz > w[0].hz + 80, '이어 붙인 자리 너머로도 스위프가 올라간다: ' + JSON.stringify(w));
+      } finally {
+        // 다음 단계(지정 폴더에 MP3 1개 검사)를 위해 통째 녹음 파일·내려받기를 치운다
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'rec.stop' }, {})).catch(() => {});
+        await opt.evaluate(async () => {
+          const root = await navigator.storage.getDirectory();
+          try { const dir = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); await dir.removeEntry('영상 오디오', { recursive: true }); } catch (e) { /* 없음 */ }
+        });
+        const dls = await sw.evaluate(() => new Promise((r) => chrome.downloads.search({}, r)));
+        for (const d of dls) { await sw.evaluate((id) => chrome.downloads.removeFile(id).catch(() => {}), d.id).catch(() => {}); await sw.evaluate((id) => new Promise((r) => chrome.downloads.erase({ id }, r)), d.id).catch(() => {}); }
+      }
+    });
+
     console.log('▶ 모의 유튜브 페이지');
     const yt = await browser.newPage();
     let ytClipB64 = null; // 유튜브 저장 단계의 MP3 (파일 = 웹 복사본) — 뒤 단계에서 비교에 쓴다
@@ -2595,6 +2644,58 @@ async function runSites() {
       assert(await w4.evaluate(() => !!document.querySelector('.speak-take .icon[title="재생"]')), '오디오가 있어 ▶ 가 보인다');
     });
 
+    await step('입트기(웹) 범주 접기·주사위·스와이프 삭제: 제목을 누르면 접히고, 🎲 가 뽑은 범주는 자동으로 펼쳐지고, 기록을 왼쪽으로 밀면 빨간 삭제', async () => {
+      // 범주 제목을 눌러 모두 접는다
+      await w4.evaluate(() => {
+        for (let i = 0; i < 25; i++) {
+          const g = [...document.querySelectorAll('.speak-group')].find((x) => !x.classList.contains('closed'));
+          if (!g) break;
+          g.click();
+        }
+      });
+      const folded = await w4.evaluate(() => ({ cards: document.querySelectorAll('.speak-p').length, open: document.querySelectorAll('.speak-group:not(.closed)').length, saved: (JSON.parse(localStorage.getItem('st.speak')).collapsed || []).length }));
+      assert(folded.cards === 0 && folded.open === 0, '모두 접힘 — 카드가 없다: ' + JSON.stringify(folded));
+      assert(folded.saved >= 9, '접힌 상태가 저장된다: ' + folded.saved);
+      // 🎲: 뽑힌 프롬프트의 범주만 자동으로 펼쳐지고 그 카드가 열린다
+      await w4.evaluate(() => { [...document.querySelectorAll('.speak-head .btn')].find((b) => b.textContent.includes('아무거나')).click(); });
+      const dice = await w4.evaluate(() => ({ open: document.querySelectorAll('.speak-group:not(.closed)').length, card: !!document.querySelector('.speak-p.open') }));
+      assert(dice.open === 1 && dice.card, '주사위가 범주 하나를 펼치고 카드를 연다: ' + JSON.stringify(dice));
+      // 뒤 단계를 위해 다시 모두 펼친다
+      await w4.evaluate(() => {
+        for (let i = 0; i < 25; i++) {
+          const g = [...document.querySelectorAll('.speak-group.closed')][0];
+          if (!g) break;
+          g.click();
+        }
+      });
+      // 버릴 녹음 하나 만들고 → 왼쪽으로 밀면 빨간 삭제 버튼 → 누르면 지움 표식
+      const mine = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).prompts.filter((x) => x.cat === 'mine' && !x.deleted));
+      await w4.evaluate((id) => { const c = document.querySelector('[data-sp="' + id + '"]'); if (!c.classList.contains('open')) c.querySelector('.p-head').click(); }, mine[0].id);
+      await w4.evaluate((id) => { [...document.querySelector('[data-sp="' + id + '"]').querySelectorAll('.speak-bigbtns .btn')].find((b) => b.textContent.includes('자유')).click(); }, mine[0].id);
+      await w4.waitForSelector('.speak-rec', { visible: true });
+      await new Promise((r) => setTimeout(r, 1100));
+      await w4.evaluate(() => document.querySelector('.speak-rec .rbtn.stop').click());
+      await waitFor(() => w4.evaluate(() => !document.querySelector('.speak-rec')), 8000, 'disposable recording saves');
+      await waitFor(() => w4.evaluate(() => document.querySelectorAll('.speak-take').length >= 2), 5000, 'two take rows');
+      assert(await w4.evaluate(() => !document.querySelector('.speak-take .icon[title="이 녹음 지우기"]')), '휴지통 아이콘이 없다');
+      await w4.evaluate(() => {
+        const row = document.querySelectorAll('.speak-take')[0];   // 맨 위가 방금 녹음
+        const r = row.getBoundingClientRect();
+        const y = r.top + 8;
+        const fire = (type, x) => row.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 7, clientX: x, clientY: y }));
+        fire('pointerdown', r.left + 220);
+        for (let x = r.left + 220; x >= r.left + 80; x -= 20) fire('pointermove', x);
+        fire('pointerup', r.left + 80);
+      });
+      const swiped = await w4.evaluate(() => { const row = document.querySelectorAll('.speak-take')[0]; return { mark: row.dataset.swiped, shift: row.querySelector('.t-inner').style.transform }; });
+      assert(swiped.mark === '1' && /translateX\(-/.test(swiped.shift), '밀면 줄이 밀리고 삭제 버튼이 드러난다: ' + JSON.stringify(swiped));
+      await new Promise((r) => setTimeout(r, 420));   // 민 직후의 클릭은 삼키므로 잠깐 뒤에 누른다
+      await w4.evaluate(() => { document.querySelectorAll('.speak-take')[0].querySelector('.t-del').click(); });
+      await waitFor(() => w4.evaluate(() => document.querySelectorAll('.speak-take').length === 1), 5000, 'row disappears');
+      const takes = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes);
+      assert(takes.length === 2 && takes.filter((t) => t.deleted).length === 1, '지움 표식이 남아 동기화로 전해진다: ' + JSON.stringify(takes.map((t) => !!t.deleted)));
+    });
+
     await step('입트기(웹) 줄여 말하기: 1초 단계를 넘기면 원형 타이머에 +N초가 올라가고(주황), 멈추면 "N초 초과" → 다음 단계는 일찍 멈춰 "N초 부족" · 기록 줄에 목표와 초과/부족', async () => {
       const mine = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).prompts.filter((x) => x.cat === 'mine' && !x.deleted));
       await w4.evaluate((id) => { const c = document.querySelector('[data-sp="' + id + '"]'); if (!c.classList.contains('open')) c.querySelector('.p-head').click(); }, mine[0].id);
@@ -2631,7 +2732,8 @@ async function runSites() {
         const st = await supaState();
         assert(st.speakPrompts.length === 2, '바뀐 프롬프트만 올라간다 (내장 48개는 안 올라감): ' + st.speakPrompts.length);
         assert(st.speakPrompts.some((x) => x.deleted === true), '지움 표식도 올라간다');
-        assert(st.speakTakes.length === 3 && st.speakTakes.every((x) => typeof x.dur_ms === 'number'), '기록 3개가 정보만 올라간다: ' + st.speakTakes.length);
+        assert(st.speakTakes.filter((x) => !x.deleted).length === 3 && st.speakTakes.every((x) => typeof x.dur_ms === 'number'), '산 기록 3개가 정보만 올라간다: ' + JSON.stringify(st.speakTakes.map((x) => !!x.deleted)));
+        assert(st.speakTakes.some((x) => x.deleted === true), '밀어서 지운 기록도 지움 표식으로 올라간다');
         const edited = st.speakPrompts.find((x) => !x.deleted);
         assert(edited.text === 'Custom one, edited?', '고친 글이 올라갔다: ' + edited.text);
         const rated = st.speakTakes.find((x) => x.rating === 4);

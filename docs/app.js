@@ -1010,6 +1010,7 @@
       takes: Array.isArray(o.takes) ? o.takes : [],
       stages: Array.isArray(o.stages) && o.stages.length ? o.stages.map(Number).filter((n) => n > 0) : SPEAK_STAGE_DEFAULT.slice(),
       lastSync: o.lastSync || 0, seeded: !!o.seeded,
+      collapsed: new Set(Array.isArray(o.collapsed) ? o.collapsed : []),
       syncMsg: '', open: null, edit: false, importOpen: false,
       hintOpen: new Set(), memoOpen: new Set(), heardOpen: new Set(), audioIds: new Set(), audioLoaded: false,
     };
@@ -1021,7 +1022,7 @@
     return sp;
   }
   const sp = loadSpeak();
-  const saveSpeak = () => { try { localStorage.setItem('st.speak', JSON.stringify({ prompts: sp.prompts, takes: sp.takes, stages: sp.stages, lastSync: sp.lastSync, seeded: sp.seeded })); } catch (e) { /* ignore */ } };
+  const saveSpeak = () => { try { localStorage.setItem('st.speak', JSON.stringify({ prompts: sp.prompts, takes: sp.takes, stages: sp.stages, lastSync: sp.lastSync, seeded: sp.seeded, collapsed: [...sp.collapsed] })); } catch (e) { /* ignore */ } };
   saveSpeak();
 
   // 오디오는 IndexedDB (이 브라우저에만 — 다른 기기에는 기록만 간다)
@@ -1121,17 +1122,38 @@
   function spAsrStart() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return null;
-    try {
-      const r = new SR();
+    // 크롬 음성 인식은 잠깐의 무음·네트워크 출렁임에도 스스로 멈춘다 — 녹음이 끝날 때까지, 멈추면 다시 켜서 이어 받는다
+    const box = { text: '', stopped: false, r: null, boots: 0 };
+    const boot = () => {
+      if (box.stopped || box.boots > 120) return;
+      box.boots++;
+      let r;
+      try { r = new SR(); } catch (e) { return; }
+      box.r = r;
       r.lang = 'en-NZ';
       r.continuous = true;
       r.interimResults = false;
-      const box = { text: '' };
       r.onresult = (e) => { for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) box.text += (box.text ? ' ' : '') + e.results[i][0].transcript.trim(); };
-      r.onerror = () => { /* 조용히 — 받아 적기만 빠진다 */ };
-      r.start();
-      return { stop() { try { r.stop(); } catch (e) { /* ignore */ } }, get text() { return box.text; } };
-    } catch (e) { return null; }
+      r.onerror = () => { /* onend 가 따라오면 다시 켠다 */ };
+      r.onend = () => { if (!box.stopped) setTimeout(boot, 250); };
+      try { r.start(); } catch (e) { /* 받아 적기만 빠진다 */ }
+    };
+    boot();
+    return {
+      stop() { box.stopped = true; try { if (box.r) box.r.stop(); } catch (e) { /* ignore */ } },
+      // 마치기: 아직 오는 중인 마지막 말을 잠깐(최대 1.5초) 기다렸다가 문장을 준다
+      done() {
+        box.stopped = true;
+        return new Promise((res) => {
+          const fin = () => { clearTimeout(t); res(box.text); };
+          const t = setTimeout(fin, 1500);
+          if (!box.r) { fin(); return; }
+          box.r.onend = fin;
+          try { box.r.stop(); } catch (e) { fin(); }
+        });
+      },
+      get text() { return box.text; },
+    };
   }
   function spRecClose() {
     if (spRec.el) { spRec.el.remove(); spRec.el = null; }
@@ -1191,10 +1213,10 @@
       timer = setInterval(() => { clockEl.textContent = F.fmtClock(sess.activeMs / 1000); }, 200);
       stopBtn.onclick = async () => {
         clearInterval(timer);
-        if (asr) asr.stop();
+        const heardP = asr ? asr.done() : Promise.resolve('');
         const { blob, durationMs } = await sess.stop();
         if (durationMs < 700) { toast('너무 짧아서 저장하지 않았습니다'); finishAll(); return; }
-        await spSaveTake(prompt, 'free', 0, blob, durationMs, asr ? asr.text : '');
+        await spSaveTake(prompt, 'free', 0, blob, durationMs, await heardP);
         toast('녹음을 저장했습니다 (' + F.fmtClock(durationMs / 1000) + ')');
         finishAll();
       };
@@ -1236,10 +1258,10 @@
     };
     stopBtn.onclick = async () => {
       clearInterval(timer);
-      const heard = asr ? (asr.stop(), asr.text) : '';
+      const heardP = asr ? asr.done() : Promise.resolve('');
       const { blob, durationMs } = await sess.stop();
       const durS = durationMs / 1000, tg = target();
-      await spSaveTake(prompt, 'step', tg, blob, durationMs, heard);
+      await spSaveTake(prompt, 'step', tg, blob, durationMs, await heardP);
       const r = F.overUnder(tg, durS);
       const last = stage >= stages.length - 1;
       resultEl.textContent = '';
@@ -1279,6 +1301,8 @@
         const recent = Date.now() - 3 * DAY;
         const fresh = pool.filter((p) => !spTakesOf(p.id).some((t) => t.at > recent));
         const pick = (fresh.length ? fresh : pool)[Math.floor(Math.random() * (fresh.length ? fresh.length : pool.length))];
+        const gk = pick.cat === 'mine' ? 'mine' : pick.kind + ':' + pick.cat;
+        if (sp.collapsed.has(gk)) { sp.collapsed.delete(gk); saveSpeak(); }   // 접힌 범주는 자동으로 펼친다
         sp.open = pick.id; sp.importOpen = false; render();
         setTimeout(() => { const n = document.querySelector('[data-sp="' + pick.id + '"]'); if (n) n.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, 60);
       } }, '🎲 아무거나'),
@@ -1311,8 +1335,12 @@
     SPEAK_GROUPS.forEach(([gkey, gtitle]) => {
       const list = visible.filter((p) => (gkey === 'mine' ? p.cat === 'mine' : p.kind + ':' + p.cat === gkey));
       if (!list.length) return;
-      wrap.append(el('div', { class: 'speak-group', text: gtitle + ' · ' + list.length }));
-      list.forEach((p) => wrap.append(speakPromptCard(p)));
+      const closed = sp.collapsed.has(gkey);
+      wrap.append(el('div', { class: 'speak-group' + (closed ? ' closed' : ''), 'data-g': gkey, title: closed ? '펼치기' : '접기', onclick: () => {
+        if (closed) sp.collapsed.delete(gkey); else sp.collapsed.add(gkey);
+        saveSpeak(); render();
+      } }, (closed ? '▸ ' : '▾ ') + gtitle + ' · ' + list.length));
+      if (!closed) list.forEach((p) => wrap.append(speakPromptCard(p)));
     });
     return wrap;
   }
@@ -1350,8 +1378,51 @@
     return card;
   }
 
+  // 기록 줄을 왼쪽으로 밀면(마우스로 끌어도) 오른쪽에 빨간 삭제 버튼이 나온다 — 아이폰과 같은 몸짓
+  function spAttachSwipe(row, inner, onDelete) {
+    const del = el('button', { class: 't-del', onclick: (e) => { e.stopPropagation(); onDelete(); } }, '삭제');
+    row.append(del);
+    const W = 76;
+    let sx = 0, sy = 0, base = 0, cur = 0, drag = false, horiz = false;
+    const apply = (anim) => {
+      inner.style.transition = anim ? 'transform .16s' : 'none';
+      inner.style.transform = cur ? 'translateX(' + cur + 'px)' : '';
+      row.dataset.swiped = cur <= -W / 2 ? '1' : '';
+    };
+    row.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.t-del') || e.target.closest('textarea')) return;
+      drag = true; horiz = false; sx = e.clientX; sy = e.clientY; base = cur;
+      try { row.setPointerCapture(e.pointerId); } catch (e2) { /* 합성 이벤트 */ }
+    });
+    row.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - sx, dy = e.clientY - sy;
+      if (!horiz) { if (Math.abs(dx) < 9 || Math.abs(dx) <= Math.abs(dy)) return; horiz = true; }
+      cur = Math.min(0, Math.max(-W - 14, base + dx));
+      apply(false);
+    });
+    let swallowUntil = 0;
+    const settle = () => {
+      if (!drag) return;
+      drag = false;
+      if (!horiz) return;
+      horiz = false;
+      swallowUntil = performance.now() + 350;   // 밀고 손을 뗀 그 자리의 클릭이 바로 지우기를 누르지 않게
+      cur = cur < -W / 2 ? -W : 0;
+      apply(true);
+    };
+    row.addEventListener('pointerup', settle);
+    row.addEventListener('pointercancel', settle);
+    // 민 직후의 클릭은 삼키고, 열려 있을 때 아무 데나 누르면 닫는다
+    row.addEventListener('click', (e) => {
+      if (performance.now() < swallowUntil) { e.stopPropagation(); e.preventDefault(); return; }
+      if (cur && !e.target.closest('.t-del')) { cur = 0; apply(true); e.stopPropagation(); e.preventDefault(); }
+    }, true);
+  }
+
   function speakTakeRow(t) {
     const row = el('div', { class: 'speak-take' });
+    const inner = el('div', { class: 't-inner' });
     const line = el('div', { class: 't-line' });
     line.append(el('span', { class: 't-when', text: fmtWhen(t.at) }));
     line.append(el('span', { class: 't-badge', text: (t.mode === 'step' ? '줄여 ' + F.fmtClock(t.targetS) : '자유') + ' · ' + F.fmtClock(t.durMs / 1000) }));
@@ -1373,15 +1444,16 @@
     const stars = el('span', { class: 'speak-stars', title: '스스로 평가 (별점)' });
     for (let i = 1; i <= 5; i++) stars.append(el('button', { class: (t.rating || 0) >= i ? 'on' : '', onclick: () => { t.rating = t.rating === i ? 0 : i; spMarkT(t); render(); } }, '★'));
     line.append(stars);
-    line.append(el('button', { class: 'icon', title: '이 녹음 지우기', onclick: () => { t.deleted = true; spMarkT(t); spAudioDel(t.id); render(); } }, '🗑'));
-    row.append(line);
+    inner.append(line);
     if (memoOn) {
       const ta = el('textarea', { class: 't-memo', placeholder: '메모 — 막힌 데, 다음에 쓸 표현…' });
       ta.value = t.memo || '';
       ta.onchange = () => { t.memo = ta.value; spMarkT(t); };
-      row.append(ta);
+      inner.append(ta);
     }
-    if (heardOn) row.append(el('p', { class: 't-heard', text: t.heard ? '들린 문장: ' + t.heard : '이 녹음은 받아 적지 못했습니다 (이 브라우저의 음성 인식이 꺼져 있었거나 지원되지 않음)' }));
+    if (heardOn) inner.append(el('p', { class: 't-heard', text: t.heard ? '들린 문장: ' + t.heard : '이 녹음은 받아 적지 못했습니다 (조용했거나 이 브라우저의 음성 인식이 지원되지 않음)' }));
+    row.append(inner);
+    spAttachSwipe(row, inner, () => { t.deleted = true; spMarkT(t); spAudioDel(t.id); render(); });
     return row;
   }
 
