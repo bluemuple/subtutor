@@ -50,12 +50,18 @@ http.createServer(async (req, res) => {
       res.writeHead(201, CORS); res.end();
       return;
     }
-    if (p === '/rest/v1/items' && req.method === 'PATCH') { // 아이폰에서 태그 바꾸기: ?id=eq.<id>
-      const id = (url.searchParams.get('id') || '').replace(/^eq\./, '');
+    if (p === '/rest/v1/items' && req.method === 'PATCH') { // ?id=eq.<id> (아이폰 태그) 또는 ?id=in.("a","b") (서버 소리 관리)
+      const filt = url.searchParams.get('id') || '';
       const body = JSON.parse((await readBody(req)).toString() || '{}');
-      const row = state.items.get(id);
-      if (row) state.items.set(id, Object.assign({}, row, body));
-      res.writeHead(row ? 204 : 404, CORS); res.end();
+      let ids = [];
+      if (filt.startsWith('eq.')) ids = [filt.slice(3)];
+      else if (filt.startsWith('in.(')) ids = filt.slice(4, -1).split(',').map((x) => x.trim().replace(/^"|"$/g, ''));
+      let n = 0;
+      for (const id of ids) {
+        const row = state.items.get(id);
+        if (row) { state.items.set(id, Object.assign({}, row, body)); n++; }
+      }
+      res.writeHead(n || filt.startsWith('in.(') ? 204 : 404, CORS); res.end();
       return;
     }
     // 입트기: 프롬프트·녹음 기록 (오디오 없음) — GET(updated_at=gt. 거름) · POST upsert · PATCH ?id=eq.
@@ -89,6 +95,32 @@ http.createServer(async (req, res) => {
       res.writeHead(201, CORS); res.end();
       return;
     }
+    if (p === '/storage/v1/object/list/audio' && req.method === 'POST') {
+      // Supabase 목록 API 흉내: prefix 바로 아래 한 단계만 — 폴더는 id:null, 파일은 크기와 함께
+      const q = JSON.parse((await readBody(req)).toString() || '{}');
+      const prefix = 'audio/' + (q.prefix || '');
+      const out = [];
+      const seen = new Set();
+      for (const [k, buf] of state.objects) {
+        if (!k.startsWith(prefix)) continue;
+        const rest = k.slice(prefix.length);
+        const cut = rest.indexOf('/');
+        if (cut >= 0) {
+          const dir = rest.slice(0, cut);
+          if (!seen.has(dir)) { seen.add(dir); out.push({ name: dir, id: null }); }
+        } else if (!seen.has(rest)) {
+          seen.add(rest);
+          out.push({ name: rest, id: 'obj-' + rest, created_at: new Date().toISOString(), metadata: { size: buf.length } });
+        }
+      }
+      return json(res, 200, out);
+    }
+    if (p === '/storage/v1/object/audio' && req.method === 'DELETE') {
+      const q = JSON.parse((await readBody(req)).toString() || '{}');
+      let n = 0;
+      for (const key of q.prefixes || []) if (state.objects.delete('audio/' + key)) n++;
+      return json(res, 200, { message: n + ' deleted' });
+    }
     if (p.startsWith('/storage/v1/object/audio/')) {
       const key = 'audio/' + decodeURIComponent(p.slice('/storage/v1/object/audio/'.length));
       if (req.method === 'GET') {
@@ -99,6 +131,7 @@ http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST' || req.method === 'PUT') { state.objects.set(key, await readBody(req)); return json(res, 200, { Key: key }); }
+      if (req.method === 'DELETE') { state.objects.delete(key); return json(res, 200, {}); }
     }
     if (p === '/__state') return json(res, 200, { itemPosts: state.itemPosts, items: [...state.items.values()], words: [...state.words.values()], speakPrompts: [...state.speakPrompts.values()], speakTakes: [...state.speakTakes.values()], objects: [...state.objects.keys()].map((k) => [k, state.objects.get(k).length]) });
     json(res, 404, { error: 'mock 404 ' + req.method + ' ' + p });

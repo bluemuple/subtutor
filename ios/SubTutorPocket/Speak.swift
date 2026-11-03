@@ -42,6 +42,7 @@ final class SpeakStore: ObservableObject {
     @Published var playingTake: String?
     @Published var collapsed: Set<String> = []     // 접어 둔 범주
     @Published var transcribing: Set<String> = []  // 받아 적는 중인 기록
+    @Published var dropShort = true                // 10초 안에 끝낸 녹음은 잘못 누른 것으로 보고 버린다
     private var lastSync: Double = 0
     private var seeded = false
     private var player: AVAudioPlayer?
@@ -55,7 +56,7 @@ final class SpeakStore: ObservableObject {
         ("long:class", "길게 말하기 · 수업에서"), ("long:meeting", "길게 말하기 · 회의에서"), ("long:etc", "길게 말하기 · 그 외"),
     ]
 
-    private struct FileBox: Codable { var prompts: [SPrompt]; var takes: [STake]; var stages: [Int]; var lastSync: Double; var seeded: Bool; var collapsed: [String]? }
+    private struct FileBox: Codable { var prompts: [SPrompt]; var takes: [STake]; var stages: [Int]; var lastSync: Double; var seeded: Bool; var collapsed: [String]?; var drop10: Bool? }
     static var file: URL { Store.docs.appendingPathComponent("speak.json") }
     static var audioDir: URL { Store.docs.appendingPathComponent("speak", isDirectory: true) }
     static func audioURL(_ takeId: String) -> URL { audioDir.appendingPathComponent(takeId + ".m4a") }
@@ -68,6 +69,7 @@ final class SpeakStore: ObservableObject {
             lastSync = box.lastSync
             seeded = box.seeded
             collapsed = Set(box.collapsed ?? [])
+            dropShort = box.drop10 ?? true
         }
         seedBuiltins()
     }
@@ -87,7 +89,7 @@ final class SpeakStore: ObservableObject {
     }
 
     func persist() {
-        let box = FileBox(prompts: prompts, takes: takes, stages: stages, lastSync: lastSync, seeded: seeded, collapsed: Array(collapsed).sorted())
+        let box = FileBox(prompts: prompts, takes: takes, stages: stages, lastSync: lastSync, seeded: seeded, collapsed: Array(collapsed).sorted(), drop10: dropShort)
         if let d = try? JSONEncoder().encode(box) { try? d.write(to: SpeakStore.file, options: .atomic) }
     }
 

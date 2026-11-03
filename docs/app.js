@@ -27,6 +27,7 @@
   const state = {
     items: [], extOk: false, view: 'list',
     filterTitle: '', search: '', sort: loadPref('subtutor.sort', 'group-time'), filterTag: '',
+    recs: [],                             // 익스텐션이 뽑은 영상 오디오(통째 MP3) 목록 — 맥 폴더에 있는 파일
     tagNames: [],                         // 저장된 태그 이름 (확장 프로그램 설정 tagNames ∪ 항목들의 태그)
     trimOpen: null,                       // 구간 조정 슬라이더가 열린 항목
     web: Object.assign({}, WEB_DEFAULTS),  // 웹 학습 기능 켜기/끄기 (확장 프로그램 설정 web 에 저장)
@@ -1011,6 +1012,7 @@
       stages: Array.isArray(o.stages) && o.stages.length ? o.stages.map(Number).filter((n) => n > 0) : SPEAK_STAGE_DEFAULT.slice(),
       lastSync: o.lastSync || 0, seeded: !!o.seeded,
       collapsed: new Set(Array.isArray(o.collapsed) ? o.collapsed : []),
+      drop10: o.drop10 !== false,   // 10초 안에 끝낸 녹음은 잘못 누른 것으로 보고 버린다 (스위치로 끔)
       syncMsg: '', open: null, edit: false, importOpen: false,
       hintOpen: new Set(), memoOpen: new Set(), heardOpen: new Set(), audioIds: new Set(), audioLoaded: false,
     };
@@ -1022,7 +1024,7 @@
     return sp;
   }
   const sp = loadSpeak();
-  const saveSpeak = () => { try { localStorage.setItem('st.speak', JSON.stringify({ prompts: sp.prompts, takes: sp.takes, stages: sp.stages, lastSync: sp.lastSync, seeded: sp.seeded, collapsed: [...sp.collapsed] })); } catch (e) { /* ignore */ } };
+  const saveSpeak = () => { try { localStorage.setItem('st.speak', JSON.stringify({ prompts: sp.prompts, takes: sp.takes, stages: sp.stages, lastSync: sp.lastSync, seeded: sp.seeded, collapsed: [...sp.collapsed], drop10: sp.drop10 })); } catch (e) { /* ignore */ } };
   saveSpeak();
 
   // 오디오는 IndexedDB (이 브라우저에만 — 다른 기기에는 기록만 간다)
@@ -1215,7 +1217,11 @@
         clearInterval(timer);
         const heardP = asr ? asr.done() : Promise.resolve('');
         const { blob, durationMs } = await sess.stop();
-        if (durationMs < 700) { toast('너무 짧아서 저장하지 않았습니다'); finishAll(); return; }
+        if (durationMs < 700 || (sp.drop10 && durationMs < 10000)) {
+          toast(durationMs < 700 ? '너무 짧아서 저장하지 않았습니다' : '10초가 안 되어 저장하지 않았습니다 (입트기 화면의 스위치로 끌 수 있어요)');
+          finishAll();
+          return;
+        }
         await spSaveTake(prompt, 'free', 0, blob, durationMs, await heardP);
         toast('녹음을 저장했습니다 (' + F.fmtClock(durationMs / 1000) + ')');
         finishAll();
@@ -1261,13 +1267,14 @@
       const heardP = asr ? asr.done() : Promise.resolve('');
       const { blob, durationMs } = await sess.stop();
       const durS = durationMs / 1000, tg = target();
-      await spSaveTake(prompt, 'step', tg, blob, durationMs, await heardP);
+      const dropped = sp.drop10 && durationMs < 10000;   // 잘못 누른 짧은 녹음은 버린다 (스위치를 끄면 짧아도 저장)
+      if (!dropped) await spSaveTake(prompt, 'step', tg, blob, durationMs, await heardP);
       const r = F.overUnder(tg, durS);
       const last = stage >= stages.length - 1;
       resultEl.textContent = '';
       resultEl.append(
-        el('b', null, (stage + 1) + '단계 끝 — ' + r.text),
-        el('div', { class: 'count' }, '목표 ' + F.fmtClock(tg) + ' · 말함 ' + F.fmtClock(durS)),
+        el('b', null, dropped ? (stage + 1) + '단계 — 10초가 안 되어 저장 안 함' : (stage + 1) + '단계 끝 — ' + r.text),
+        el('div', { class: 'count' }, dropped ? '잘못 누른 녹음으로 보고 버렸어요 (입트기 화면의 스위치로 끌 수 있음)' : '목표 ' + F.fmtClock(tg) + ' · 말함 ' + F.fmtClock(durS)),
         el('div', null, last
           ? [el('button', { class: 'btn primary big', onclick: finishAll }, '끝내기')]
           : [el('button', { class: 'btn primary big', onclick: async () => {
@@ -1312,6 +1319,10 @@
       infoBtn('speakFluency'),
     ]);
     wrap.append(head, el('p', { class: 'speak-sync', text: sp.syncMsg || '' }));
+    wrap.append(el('label', { class: 'switch-row speak-drop10' }, [
+      el('span', null, '10초 안에 끝낸 녹음은 저장하지 않기 (잘못 누른 녹음 거르기)'),
+      el('input', { type: 'checkbox', class: 'switch', checked: sp.drop10, onchange: (e) => { sp.drop10 = e.target.checked; saveSpeak(); } }),
+    ]));
 
     if (sp.importOpen) {
       const ta = el('textarea', { placeholder: '한 줄에 하나씩 — 여러 줄을 붙여 넣으면 줄마다 프롬프트가 됩니다.\n예)\nTell me about your weekend.\nHow do you handle a noisy class?' });
@@ -1509,6 +1520,72 @@
   }
 
   // ───────── 목록 ─────────
+  // ── 에피소드 오디오 플레이어: 익스텐션이 뽑은 통째 MP3 를 그 작품 묶음 맨 위에서 듣는다 ──
+  const recSkipS = () => clampNum(+(localStorage.getItem('st.recSkip') || 3) || 3, 1, 60);
+  const recRate = () => clampNum(+(localStorage.getItem('st.recRate') || 1) || 1, 0.5, 2);
+  const epi = { audio: null, id: null, paint: null };   // 한 번에 하나만 재생
+  function epiStop() {
+    if (epi.audio) { try { epi.audio.pause(); } catch (e) { /* ignore */ } }
+    const paint = epi.paint;
+    epi.audio = null; epi.id = null; epi.paint = null;
+    if (paint) paint();
+  }
+  function epiRowEl(rec) {
+    const row = el('div', { class: 'epi-audio' });
+    const playBtn = el('button', { class: 'btn mini ea-play', title: '이 에피소드의 통째 오디오 재생 (맥 폴더의 MP3)' }, '▶');
+    const seek = el('input', { type: 'range', class: 'ea-seek', min: 0, max: Math.max(1, Math.round(rec.durMs / 1000)), step: 1, value: 0 });
+    const timeEl = el('span', { class: 'count ea-time', text: '0:00 / ' + F.fmtClock(rec.durMs / 1000) });
+    const rateEl = el('span', { class: 'count ea-rate', title: '재생 속도', text: recRate().toFixed(1) + '×' });
+    let dragging = false;
+    const mine = () => (epi.id === rec.id ? epi.audio : null);
+    const paint = () => {
+      const a = mine();
+      playBtn.textContent = a && !a.paused ? '⏸' : '▶';
+      if (a && !dragging) { seek.value = Math.round(a.currentTime); timeEl.textContent = F.fmtClock(a.currentTime) + ' / ' + F.fmtClock(a.duration && isFinite(a.duration) ? a.duration : rec.durMs / 1000); }
+    };
+    const ensure = async () => {
+      if (mine()) return epi.audio;
+      epiStop();
+      playBtn.textContent = '…';
+      const blob = await recsFetchBlob(rec);
+      const a = new Audio(URL.createObjectURL(blob));
+      a.playbackRate = recRate();
+      try { a.preservesPitch = true; } catch (e) { /* ignore */ }
+      a.addEventListener('timeupdate', paint);
+      a.addEventListener('ended', paint);
+      a.addEventListener('pause', paint);
+      a.addEventListener('play', paint);
+      epi.audio = a; epi.id = rec.id; epi.paint = paint;
+      return a;
+    };
+    playBtn.onclick = async () => {
+      try {
+        const a = await ensure();
+        if (a.paused) a.play(); else a.pause();
+        paint();
+      } catch (e) { playBtn.textContent = '▶'; toast(String((e && e.message) || e), 7000); }
+    };
+    const skip = async (d) => { try { const a = await ensure(); a.currentTime = Math.max(0, a.currentTime + d); if (a.paused) a.play(); paint(); } catch (e) { toast(String((e && e.message) || e), 6000); } };
+    seek.oninput = () => { dragging = true; };
+    seek.onchange = async () => { try { const a = await ensure(); a.currentTime = +seek.value; } catch (e) { /* ignore */ } dragging = false; };
+    const rateBtn = (d, label, title) => el('button', { class: 'btn mini', title, onclick: () => {
+      const v = Math.round(clampNum(recRate() + d, 0.5, 2) * 10) / 10;
+      try { localStorage.setItem('st.recRate', String(v)); } catch (e) { /* ignore */ }
+      const a = mine();
+      if (a) a.playbackRate = v;
+      rateEl.textContent = v.toFixed(1) + '×';
+    } }, label);
+    row.append(
+      el('span', { class: 'ea-label', text: '🎧 에피소드 오디오 · ' + F.fmtClock(rec.durMs / 1000) }),
+      playBtn,
+      el('button', { class: 'btn mini', title: recSkipS() + '초 뒤로 (설정 › 아이폰 동기화에서 초 변경)', onclick: () => skip(-recSkipS()) }, '⏪'),
+      el('button', { class: 'btn mini', title: recSkipS() + '초 앞으로', onclick: () => skip(recSkipS()) }, '⏩'),
+      seek, timeEl,
+      rateBtn(-0.1, '−', '더 늦게 듣기'), rateEl, rateBtn(0.1, '＋', '더 빠르게 듣기'),
+    );
+    return row;
+  }
+
   function renderList(items, kind) {
     const wrap = el('div');
     const titles = Array.from(new Set(items.map((i) => i.title))).sort((a, b) => a.localeCompare(b, 'ko'));
@@ -1560,6 +1637,11 @@
         const gEl = el('div', { class: 'group' }, [
           el('h3', { class: 'group-title' }, [g.title + (plat ? ' (' + plat + ')' : ''), g.episode ? el('small', null, g.episode) : null, el('small', null, g.items.length + '개'), state.edit.on ? el('button', { class: 'btn mini group-pick', title: '이 묶음의 대사를 모두 선택/해제', onclick: () => togglePickMany(g.items.map((i) => i.id)) }, '묶음 선택') : null]),
         ]);
+        if (kind === 'learning' && !state.edit.on && state.recs.length) {   // 이 에피소드의 통째 오디오가 있으면 맨 위에 플레이어
+          const full = g.title + (g.episode ? ' ' + g.episode : '');
+          const rec = state.recs.filter((r) => !r.skip && r.title === full && r.file && r.file.location === 'folder').sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+          if (rec) gEl.append(epiRowEl(rec));
+        }
         g.items.forEach((it) => gEl.append(itemEl(it, kind)));
         body.append(gEl);
       }
@@ -2206,6 +2288,15 @@
   const saveSupaBase = (b) => { try { localStorage.setItem('st.supaBase', JSON.stringify(b)); } catch (e) { /* 용량 */ } };
   const saveSupaUploaded = () => { try { localStorage.setItem('st.supaUp', JSON.stringify(Array.from(supaUploaded))); } catch (e) { /* 용량 초과면 다음에 다시 올린다 */ } };
   const supaSafeName = (x) => String(x).replace(/[^A-Za-z0-9._-]/g, '_'); // 아이폰 앱 Item.safeName 과 같은 규칙이어야 한다
+  // 영상 오디오(통째 MP3) 서버 파일 이름: rec/<id>.<길이 base36>.<제목 base64url>.mp3 — 표 없이 Storage 목록만으로 제목·길이를 안다
+  const b64u = (x) => btoa(unescape(encodeURIComponent(x))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const unb64u = (x) => { try { return decodeURIComponent(escape(atob(String(x).replace(/-/g, '+').replace(/_/g, '/')))); } catch (e) { return ''; } };
+  const recStoreName = (r) => 'rec/' + r.id + '.' + Math.max(0, Math.round(r.durMs)).toString(36) + '.' + b64u(String(r.title || '').slice(0, 60)) + '.mp3';
+  const parseRecStore = (name) => {
+    const m = /^(r[0-9a-z]+)\.([0-9a-z]+)\.([A-Za-z0-9_-]*)\.mp3$/.exec(String(name || ''));
+    if (!m) return null;
+    return { id: m[1], durMs: parseInt(m[2], 36) || 0, title: unb64u(m[3]) || '영상 오디오', at: parseInt(m[1].slice(1), 36) || 0 };
+  };
   function supaBase() { return supa.url.trim().replace(/\/+$/, ''); }
   // Supabase 의 흔한 영어 오류를 한글로
   function supaKo(m) {
@@ -2346,8 +2437,61 @@
     supa.lastAt = Date.now();
     try { localStorage.setItem('st.supaLastAt', String(supa.lastAt)); } catch (e) { /* ignore */ }
     try { await speakSync(); } catch (e) { /* 입트기 동기화가 실패해도 올리기는 성공 */ }
+    let recsUp = null;
+    try { recsUp = await recsUpload(onStep); } catch (e) { /* 영상 오디오가 실패해도 올리기는 성공 */ }
+    if (recsUp && recsUp.ok) toast('영상 오디오 ' + recsUp.ok + '개를 아이폰으로 올렸습니다');
     return { items: rows.length, words: wordCount, audioOk, audioFail };
   }
+  // ── 영상 오디오(통째 MP3): 익스텐션 폴더에서 읽어 Supabase Storage(rec/)로 올린다 — 아이폰이 내려받아 듣는다 ──
+  async function loadRecs() {
+    try { state.recs = ((await B.request('recs.list')) || {}).recs || []; } catch (e) { state.recs = []; }
+    if (state.view === 'list') render();
+  }
+  const recBlobCache = new Map();   // rec.id → Blob (한 번 읽은 파일은 다시 안 읽는다)
+  async function recsFetchBlob(rec) {
+    if (recBlobCache.has(rec.id)) return recBlobCache.get(rec.id);
+    const parts = [];
+    for (let seq = 0; seq < 60; seq++) {
+      const r = await B.request('recs.data', { id: rec.id, seq }, 60000);
+      if (!r || r.reason || !r.data) {
+        throw new Error(r && r.reason === 'none' ? '저장 폴더가 지정돼 있지 않습니다 (팝업 › 저장 폴더)'
+          : r && r.reason === 'downloads' ? '크롬 다운로드 폴더에 있어 읽지 못합니다 — 저장 폴더를 지정하면 다음 녹음부터 됩니다'
+          : r && (r.reason === 'prompt' || r.reason === 'denied') ? '폴더 권한이 풀렸습니다 — 팝업의 "폴더 권한 허용"을 누르세요'
+          : r && r.reason === 'missing' ? '파일이 없습니다 (지워졌거나 옮겨짐)' : '파일을 읽지 못했습니다');
+      }
+      parts.push(b64ToBlob(r.data, 'audio/mpeg'));
+      if (r.done) break;
+    }
+    const blob = new Blob(parts, { type: 'audio/mpeg' });
+    recBlobCache.set(rec.id, blob);
+    return blob;
+  }
+  // 아직 안 올라간 녹음을 올린다 (전체/자동 올리기와 같은 자리에서) — 성공하면 익스텐션 목록에 sent 표시
+  async function recsUpload(onStep) {
+    if (!supa.userId || !state.extOk) return { ok: 0, fail: 0 };
+    let recs = [];
+    try { recs = ((await B.request('recs.list')) || {}).recs || []; } catch (e) { return { ok: 0, fail: 0 }; }
+    state.recs = recs;
+    const todo = recs.filter((r) => !r.sent && !r.skip && r.file && r.file.location === 'folder');
+    if (todo.length) await supaEnsureToken();
+    let ok = 0, fail = 0, lastErr = '';
+    for (let i = 0; i < todo.length; i++) {
+      const r = todo[i];
+      if (onStep) onStep('영상 오디오 올리는 중 ' + (i + 1) + '/' + todo.length + ' — ' + (r.title || ''));
+      try {
+        const blob = await recsFetchBlob(r);
+        const H = { apikey: supa.key.trim(), Authorization: 'Bearer ' + supa.token };
+        await supaFetch('/storage/v1/object/audio/' + encodeURIComponent(supa.userId) + '/' + recStoreName(r).split('/').map(encodeURIComponent).join('/'), {
+          method: 'POST', headers: Object.assign({ 'Content-Type': 'audio/mpeg', 'x-upsert': 'true' }, H), body: blob,
+        });
+        await B.request('recs.mark', { id: r.id, patch: { sent: Date.now(), key: recStoreName(r) } });
+        ok++;
+      } catch (e) { fail++; lastErr = String((e && e.message) || e); }
+    }
+    if (ok || fail) { try { state.recs = ((await B.request('recs.list')) || {}).recs || state.recs; } catch (e) { /* ignore */ } }
+    return { ok, fail, lastErr };
+  }
+
   // 자동 동기화: 접속하고 잠시 뒤 + 15분마다, 로그인이 유지돼 있으면 조용히 올린다
   // (목록·단어 upsert 는 요청 두어 개, 소리는 새것만 — Supabase 무료 한도에 부담이 없다)
   const SUPA_AUTO_MS = 15 * 60 * 1000;
@@ -2402,8 +2546,145 @@
       haveDefaults ? el('details', { class: 'supa-adv', open: supa.advOpen, ontoggle: (e) => { supa.advOpen = e.target.open; } }, [el('summary', null, '고급 — 다른 Supabase 서버 쓰기'), urlKeyRow]) : urlKeyRow,
       el('div', { class: 'row supa-row' }, [input('supa-email', '이메일', 'email', 'email'), pass, loginBtn, signupBtn, pushBtn, outBtn]),
       autoSw,
+      renderServerAudio(),
       line,
     ]);
+  }
+
+  // 서버 소리 관리: Supabase Storage 에 올라간 대사 MP3(작품별)와 영상 오디오(통째 MP3)를 보고 지운다 — 무료 1GB 관리용
+  function renderServerAudio() {
+    const box = el('details', { class: 'supa-storage' }, [el('summary', null, '서버 소리 관리 — 올라간 MP3 보기·지우기 · 영상 오디오 올리기')]);
+    const body = el('div', { class: 'supa-storage-body count' }, '…');
+    const skipRow = el('label', { class: 'switch-row' }, [
+      el('span', null, '에피소드 오디오 플레이어 — ⏪⏩ 건너뛰는 초'),
+      el('input', { type: 'number', min: 1, max: 60, step: 1, value: recSkipS(), style: 'width:70px', onchange: (e) => { try { localStorage.setItem('st.recSkip', String(clampNum(+e.target.value || 3, 1, 60))); } catch (err) { /* ignore */ } } }),
+    ]);
+    box.append(skipRow, body);
+    let busy = false;
+    const H = () => ({ apikey: supa.key.trim(), Authorization: 'Bearer ' + supa.token });
+    const fmtMB = (b) => (b / 1048576 >= 100 ? Math.round(b / 1048576) : (b / 1048576).toFixed(1)) + 'MB';
+    async function listDir(prefix) {
+      const r = await supaFetch('/storage/v1/object/list/audio', {
+        method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, H()),
+        body: JSON.stringify({ prefix, limit: 1000, sortBy: { column: 'name', order: 'desc' } }),
+      });
+      return (await r.json()) || [];
+    }
+    async function removeObjects(names) {
+      for (let i = 0; i < names.length; i += 80) {
+        await supaFetch('/storage/v1/object/audio', {
+          method: 'DELETE', headers: Object.assign({ 'Content-Type': 'application/json' }, H()),
+          body: JSON.stringify({ prefixes: names.slice(i, i + 80) }),
+        });
+      }
+    }
+    async function fill() {
+      if (!supa.refresh || !supa.key.trim()) { body.textContent = '로그인하면 서버에 올라간 소리가 보입니다'; return; }
+      body.textContent = '서버 목록 읽는 중…';
+      try {
+        await supaEnsureToken();
+        if (!supa.userId) throw new Error('로그인 정보가 없습니다 — 다시 로그인하세요');
+        const uid = supa.userId;
+        const top = (await listDir(uid + '/')).filter((x) => x && x.id && /\.mp3$/i.test(x.name));
+        const recsRemote = (await listDir(uid + '/rec/')).filter((x) => x && x.id);
+        const size = (x) => Number((x.metadata && (x.metadata.size || x.metadata.contentLength)) || 0);
+        body.textContent = '';
+        // ① 대사 소리 → 작품·에피소드 묶음
+        const byWork = new Map();
+        const stray = { n: 0, bytes: 0, names: [] };
+        let itemBytes = 0;
+        for (const o of top) {
+          itemBytes += size(o);
+          const base = o.name.replace(/\.mp3$/i, '');
+          const it = state.items.find((x) => supaSafeName(x.id) === base);
+          if (!it) { stray.n++; stray.bytes += size(o); stray.names.push(uid + '/' + o.name); continue; }
+          const k = (it.title || '') + (it.episode ? ' · ' + it.episode : '');
+          const g = byWork.get(k) || { n: 0, bytes: 0, names: [], ids: [] };
+          g.n++; g.bytes += size(o); g.names.push(uid + '/' + o.name); g.ids.push(it.id);
+          byWork.set(k, g);
+        }
+        const delRow = (label, meta, onDel) => el('div', { class: 'row supa-obj' }, [
+          el('span', { class: 'supa-obj-name', text: label }),
+          el('span', { class: 'count', text: meta }),
+          el('button', { class: 'btn mini danger', onclick: async (e) => {
+            if (busy) return;
+            busy = true;
+            e.target.disabled = true;
+            try { await onDel(); toast('서버에서 지웠습니다'); } catch (err) { toast('지우기 실패: ' + err.message, 6000); }
+            busy = false;
+            fill();
+          } }, '서버에서 지우기'),
+        ]);
+        if (byWork.size || stray.n) {
+          body.append(el('h4', null, '대사 소리 (별표 저장 MP3) — ' + fmtMB(itemBytes)));
+          body.append(el('p', { class: 'count' }, '지워도 이 맥과 이미 내려받은 아이폰에는 남습니다. "아이폰으로 올리기 (전체)"를 누르면 다시 올라갑니다.'));
+          for (const [k, g] of byWork) {
+            body.append(delRow(k, g.n + '개 · ' + fmtMB(g.bytes), async () => {
+              await removeObjects(g.names);
+              for (let i = 0; i < g.ids.length; i += 50) {   // 아이폰이 내려받기 단추를 더는 보여 주지 않게
+                const part = g.ids.slice(i, i + 50).map((x) => '"' + String(x).replace(/"/g, '') + '"').join(',');
+                await supaFetch('/rest/v1/items?id=in.(' + encodeURIComponent(part) + ')', {
+                  method: 'PATCH', headers: Object.assign({ 'Content-Type': 'application/json', Prefer: 'return=minimal' }, H()),
+                  body: JSON.stringify({ has_audio: false, audio_ms: 0 }),
+                });
+              }
+            }));
+          }
+          if (stray.n) body.append(delRow('지워진 대사의 소리', stray.n + '개 · ' + fmtMB(stray.bytes), () => removeObjects(stray.names)));
+        }
+        // ② 영상 오디오 (통째 MP3)
+        body.append(el('h4', null, '영상 오디오 (통째 MP3)'));
+        let extRecs = [];
+        try { extRecs = ((await B.request('recs.list')) || {}).recs || []; } catch (e) { extRecs = []; }
+        state.recs = extRecs;
+        let recBytes = 0;
+        const remoteIds = new Set();
+        for (const o of recsRemote) {
+          const info = parseRecStore(o.name);
+          if (!info) continue;
+          remoteIds.add(info.id);
+          recBytes += size(o);
+          body.append(delRow(info.title + ' — ' + fmtWhen(info.at), F.fmtClock(info.durMs / 1000) + ' · ' + fmtMB(size(o)), async () => {
+            await removeObjects([uid + '/rec/' + o.name]);
+            const ext = extRecs.find((x) => x.id === info.id);
+            if (ext) await B.request('recs.mark', { id: ext.id, patch: { skip: true, sent: 0 } }).catch(() => {});   // 다시 자동으로 올라가지 않게
+          }));
+        }
+        if (recBytes) body.append(el('p', { class: 'count' }, '영상 오디오 합계 ' + fmtMB(recBytes) + ' · 아이폰 앱 목록 맨 위(에피소드 제목 아래)에서 내려받아 듣습니다'));
+        const pending = extRecs.filter((r) => !r.sent && !r.skip && r.file && r.file.location === 'folder');
+        const stuck = extRecs.filter((r) => !r.sent && !r.skip && (!r.file || r.file.location !== 'folder'));
+        const skipped = extRecs.filter((r) => r.skip);
+        if (pending.length) {
+          body.append(el('div', { class: 'row' }, [
+            el('span', { class: 'count' }, '아직 안 올라간 녹음 ' + pending.length + '개 — ' + pending.map((r) => r.title).slice(0, 3).join(', ') + (pending.length > 3 ? ' …' : '')),
+            el('button', { class: 'btn mini primary', onclick: async (e) => {
+              e.target.disabled = true;
+              const st = el('span', { class: 'count' });
+              e.target.after(st);
+              const r = await recsUpload((m) => { st.textContent = ' ' + m; }).catch((err) => ({ ok: 0, fail: 1, lastErr: err.message }));
+              toast(r.ok ? '영상 오디오 ' + r.ok + '개를 올렸습니다' : '올리지 못했습니다' + (r.lastErr ? ': ' + r.lastErr : ''), 6000);
+              fill();
+            } }, '지금 올리기'),
+          ]));
+        }
+        if (stuck.length) body.append(el('p', { class: 'count' }, '크롬 다운로드 폴더라 못 읽는 녹음 ' + stuck.length + '개 — 팝업에서 저장 폴더를 지정하면 다음 녹음부터 올라갑니다'));
+        for (const r of skipped) {
+          body.append(el('div', { class: 'row supa-obj' }, [
+            el('span', { class: 'supa-obj-name', text: r.title }),
+            el('span', { class: 'count', text: '서버에서 지움 (다시 안 올라감)' }),
+            el('button', { class: 'btn mini', onclick: async () => { await B.request('recs.mark', { id: r.id, patch: { skip: false } }).catch(() => {}); fill(); } }, '다시 올리기 허용'),
+          ]));
+        }
+        if (!remoteIds.size && !pending.length && !stuck.length && !skipped.length) body.append(el('p', { class: 'count' }, '영상 오디오가 없습니다 — 플레이어 패널 아래의 "⏺ MP3" 로 뽑으면 여기서 올립니다'));
+        const total = itemBytes + recBytes;
+        body.append(el('p', { class: 'count' }, '서버 사용량 합계 ≈ ' + fmtMB(total) + ' (Supabase 무료 저장 1GB)'));
+      } catch (e) {
+        body.textContent = '서버 목록을 읽지 못했습니다: ' + ((e && e.message) || e);
+      }
+    }
+    let loaded = false;
+    box.addEventListener('toggle', () => { if (box.open && !loaded) { loaded = true; fill(); } });
+    return box;
   }
 
   // 자동 백업 상태 줄: 폴더가 지정돼 있으면 마지막 백업·다음 조건, 아니면 백업 권장 안내
@@ -2982,7 +3263,8 @@
     await B.waitReady(2000);
     state.extOk = B.detect();
     renderExtStatus();
-    B.on('ready', () => { if (!state.extOk) { state.extOk = true; renderExtStatus(); loadStats().then(() => loadItems()); loadWords(); } });
+    if (state.extOk) loadRecs();
+    B.on('ready', () => { if (!state.extOk) { state.extOk = true; renderExtStatus(); loadStats().then(() => loadItems()); loadWords(); loadRecs(); } });
     B.on('items.changed', () => loadItems());
     B.on('words.changed', () => loadWords());
     setInterval(updateWordCount, 60000);

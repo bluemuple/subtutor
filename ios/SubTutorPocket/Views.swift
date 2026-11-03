@@ -338,6 +338,7 @@ struct RootView: View {
             }
             ForEach(sections) { work in
                 Section {
+                    WorkEpiRow(work: work)   // 이 에피소드의 통째 오디오가 서버에 있으면 맨 위에 플레이어
                     ForEach(work.items) { item in
                         ItemRow(item: item, showWork: work.id == "all")
                             .swipeActions(edge: .trailing) {
@@ -791,6 +792,7 @@ struct SettingsView: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var player: Player
     @EnvironmentObject var speak: SpeakStore
+    @EnvironmentObject var recs: RecStore
     @Environment(\.dismiss) private var dismiss
     @State private var password = ""
 
@@ -897,10 +899,28 @@ struct SettingsView: View {
                         speak.persist()
                     }
                     .disabled(speak.stages.count >= 6)
+                    Toggle("10초 안에 끝낸 녹음은 저장하지 않기", isOn: Binding(
+                        get: { speak.dropShort }, set: { speak.dropShort = $0; speak.persist() }))
                 } header: {
                     Text("입트기 — 줄여 말하기 단계")
                 } footer: {
                     Text("상단 바의 말풍선(입트기)에서 같은 대답을 단계마다 점점 짧은 시간에 다시 말합니다(기본 75→60→45초). 시간이 넘으면 +1초씩 올라가고, 끝나면 몇 초 초과·부족인지 보여 줍니다. 단계는 밀어서 지울 수 있습니다. 녹음 파일은 폰에만 남고, 프롬프트와 기록(길이·날짜·별점·메모·받아 적기)만 웹과 동기화됩니다.")
+                }
+                Section {
+                    NavigationLink {
+                        RecordingsView()
+                    } label: {
+                        HStack {
+                            Text("영상 오디오 (통째 MP3)")
+                            Spacer()
+                            if !recs.files.isEmpty { Text("\(recs.files.count)개").foregroundStyle(.secondary) }
+                        }
+                    }
+                    Stepper("⏪⏩ 건너뛰는 초 — \(recs.skipS)초", value: $recs.skipS, in: 1...60)
+                } header: {
+                    Text("영상 오디오")
+                } footer: {
+                    Text("맥 플레이어 패널의 \"⏺ MP3\" 로 뽑아 웹 설정 › 서버 소리 관리에서 올린 에피소드 오디오입니다. 저장한 자막 목록의 작품 머리에도 플레이어가 보입니다. 배속(−/＋)은 음높이를 바꾸지 않습니다.")
                 }
                 Section("저장소") {
                     LabeledContent("대사", value: "\(store.items.count)개 (소리 저장 \(store.audioCount)개)")

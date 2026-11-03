@@ -184,6 +184,72 @@ final class Supa {
         return (try JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
     }
 
+    // ── 영상 오디오 (storage audio/<uid>/rec/…): 목록·내려받기(진행률)·지우기 ──
+    var uid: String? { userId }
+
+    func listStorage(url: String, key: String, prefix: String) async throws -> [[String: Any]] {
+        guard let uid = userId else { throw SupaError.notSignedIn }
+        let u = try base(url).appendingPathComponent("storage/v1/object/list/audio")
+        let body: [String: Any] = ["prefix": "\(uid)/\(prefix)", "limit": 1000, "sortBy": ["column": "name", "order": "desc"]]
+        var t = try await token(url: url, key: key)
+        do {
+            return parseRows(try await request(u, key: key, method: "POST", token: t, json: body).0)
+        } catch SupaError.http(401, _) {
+            accessToken = nil
+            t = try await refresh(url: url, key: key)
+            return parseRows(try await request(u, key: key, method: "POST", token: t, json: body).0)
+        }
+    }
+    private func parseRows(_ d: Data) -> [[String: Any]] { (try? JSONSerialization.jsonObject(with: d) as? [[String: Any]]) ?? [] }
+
+    func deleteStorage(url: String, key: String, path: String) async throws {
+        guard let uid = userId else { throw SupaError.notSignedIn }
+        let u = try base(url).appendingPathComponent("storage/v1/object/audio/\(uid)/\(path)")
+        var t = try await token(url: url, key: key)
+        do { _ = try await request(u, key: key, method: "DELETE", token: t) }
+        catch SupaError.http(401, _) {
+            accessToken = nil
+            t = try await refresh(url: url, key: key)
+            _ = try await request(u, key: key, method: "DELETE", token: t)
+        }
+    }
+
+    // 큰 MP3 를 조금씩 받아 파일로 쓴다 (진행률 0~1) — 통째로 메모리에 들지 않는다
+    func downloadStorage(url: String, key: String, path: String, to dest: URL, retried: Bool = false, onProgress: @escaping (Double) -> Void) async throws {
+        guard let uid = userId else { throw SupaError.notSignedIn }
+        let t = try await token(url: url, key: key)
+        var req = URLRequest(url: try base(url).appendingPathComponent("storage/v1/object/audio/\(uid)/\(path)"))
+        req.setValue(key, forHTTPHeaderField: "apikey")
+        req.setValue("Bearer \(t)", forHTTPHeaderField: "Authorization")
+        let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+        let http = resp as! HTTPURLResponse
+        if http.statusCode == 401, !retried {
+            accessToken = nil
+            _ = try await refresh(url: url, key: key)
+            return try await downloadStorage(url: url, key: key, path: path, to: dest, retried: true, onProgress: onProgress)
+        }
+        guard http.statusCode < 300 else { throw SupaError.http(http.statusCode, "") }
+        let total = Double(max(1, http.expectedContentLength))
+        try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: dest.path, contents: nil)
+        let h = try FileHandle(forWritingTo: dest)
+        defer { try? h.close() }
+        var buf = Data()
+        buf.reserveCapacity(1 << 16)
+        var got = 0.0
+        for try await b in bytes {
+            buf.append(b)
+            if buf.count >= 1 << 16 {
+                try h.write(contentsOf: buf)
+                got += Double(buf.count)
+                onProgress(min(1, got / total))
+                buf.removeAll(keepingCapacity: true)
+            }
+        }
+        if !buf.isEmpty { try h.write(contentsOf: buf) }
+        onProgress(1)
+    }
+
     func signOut() {
         accessToken = nil
         refreshToken = nil

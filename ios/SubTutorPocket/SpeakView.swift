@@ -465,9 +465,10 @@ struct SpeakRecordView: View {
     }
     private func finishStage() {
         guard let (url, ms) = rec.stop() else { return }
-        if ms < 700 {   // 너무 짧으면 버린다
+        if ms < 700 || (speak.dropShort && ms < 10_000) {   // 잘못 누른 짧은 녹음은 버린다 (설정에서 끔)
             try? FileManager.default.removeItem(at: url)
-            if mode == "free" { dismiss() } else { result = ("너무 짧아 저장 안 함", 0) }
+            Haptic.tap()
+            if mode == "free" { dismiss() } else { result = (ms < 700 ? "너무 짧아 저장 안 함" : "10초가 안 되어 저장 안 함", 0) }
             return
         }
         let id = takeId

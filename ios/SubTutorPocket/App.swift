@@ -31,6 +31,7 @@ struct SubTutorPocketApp: App {
                 .environmentObject(player)
                 .environmentObject(recorder)
                 .environmentObject(SpeakStore.shared)
+                .environmentObject(RecStore.shared)
                 .task { await store.autoSyncIfDue() }                 // 켜면 자동 동기화 (10분에 한 번)
                 .onChange(of: scenePhase) { ph in                     // 백그라운드에서 돌아와도
                     if ph == .active { Task { await store.autoSyncIfDue() } }

@@ -489,3 +489,14 @@ input.rate:focus { outline: none; color: var(--accent2); }
 .speak-rec .r-result { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; text-align: center; display: grid; gap: 10px; }
 .speak-rec .r-result b { font-size: 18px; }
 .speak-rec .r-cancel { background: none; border: none; color: var(--dim); font-size: 13px; }
+
+/* 에피소드 오디오 플레이어 (작품 묶음 머리) */
+.epi-audio { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; background: var(--card2); border: 1px solid var(--line); border-radius: 9px; padding: 6px 10px; margin: 2px 0 8px; font-size: 13px; }
+.epi-audio .ea-seek { flex: 1; min-width: 90px; accent-color: var(--accent); }
+.epi-audio .ea-label { color: var(--muted); font-weight: 600; }
+/* 서버 소리 관리 */
+.supa-storage { margin-top: 10px; }
+.supa-storage summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+.supa-storage-body h4 { margin: 12px 0 4px; }
+.supa-obj { align-items: center; gap: 8px; }
+.supa-obj .supa-obj-name { font-weight: 600; }

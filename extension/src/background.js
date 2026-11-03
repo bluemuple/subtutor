@@ -9,7 +9,7 @@ const Sites = globalThis.SubTutorSites;
 const SITE_URL = 'https://bluemuple.github.io/subtutor/';
 const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
-  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', saveSentence: true, savePick: true, saveTailSec: 4, saveNextTexts: true, enabled: {},
+  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', saveSentence: true, savePick: true, saveTailSec: 4, saveNextTexts: true, recAuto: false, enabled: {},
   audioDirName: '', // 사용자가 고른 오디오 저장 폴더 이름 (핸들은 IndexedDB). 비어 있으면 다운로드 폴더
   koMode: 'hold', koRepeats: 3, secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, nzNotes: true, vocabProfile: true, missedTag: '못 알아들음',
   web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1], fastRates: [1, 1.25, 1.5, 1] },
@@ -531,22 +531,39 @@ async function recSave(meta) {
   recParts.delete(meta.recId);
   if (!parts.length) return { ok: false, error: '받은 오디오 조각이 없습니다' };
   const safe = (x) => String(x || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || '영상 오디오';
+  const title = safe(recState && recState.title);
   const d = new Date();
   const two = (n) => String(n).padStart(2, '0');
   const stamp = d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + ' ' + two(d.getHours()) + '.' + two(d.getMinutes());
-  const fileName = 'SubTutor/영상 오디오/' + safe(recState && recState.title) + ' ' + stamp + '.mp3';
+  const fileName = 'SubTutor/영상 오디오/' + title + ' ' + stamp + '.mp3';
   const b64 = parts.join('');
   recState = null;
   const out = { ok: true, fileName, durMs: meta.durMs || 0, skippedMs: meta.skippedMs || 0, bytes: meta.bytes || 0, reason: meta.reason || '' };
   const folder = await saveToFolder(fileName, b64);
-  if (folder.ok) { out.location = 'folder'; out.fileName = folder.path; return out; }
-  try {
-    out.downloadId = await chrome.downloads.download({ url: 'data:audio/mpeg;base64,' + b64, filename: fileName, conflictAction: 'uniquify', saveAs: false });
-    out.location = 'downloads';
-    return out;
-  } catch (e) {
-    return { ok: false, error: '파일 저장 실패: ' + ((e && e.message) || e) };
+  if (folder.ok) { out.location = 'folder'; out.fileName = folder.path; }
+  else {
+    try {
+      out.downloadId = await chrome.downloads.download({ url: 'data:audio/mpeg;base64,' + b64, filename: fileName, conflictAction: 'uniquify', saveAs: false });
+      out.location = 'downloads';
+    } catch (e) {
+      return { ok: false, error: '파일 저장 실패: ' + ((e && e.message) || e) };
+    }
   }
+  // 녹음 목록에 적어 둔다 — 웹(설정 › 서버 소리 관리)이 읽어 Supabase 로 올리고, 아이폰이 내려받는다
+  const recs = await getRecs();
+  recs.push({ id: 'r' + Date.now().toString(36), title, at: Date.now(), durMs: out.durMs, bytes: out.bytes,
+    file: { location: out.location, path: out.fileName, downloadId: out.downloadId || 0 }, sent: 0, skip: false });
+  await setRecs(recs);
+  return out;
+}
+// ── 영상 오디오 녹음 목록 (chrome.storage) + 웹 브리지 ──
+async function getRecs() { return ((await chrome.storage.local.get('recordings')).recordings) || []; }
+async function setRecs(recs) { await chrome.storage.local.set({ recordings: recs.slice(-200) }); }
+function bytesToB64(bytes) {
+  let out = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) out += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  return btoa(out);
 }
 // ───────── 호출(단축키·우클릭 메뉴) ─────────
 // 탭 오디오 캡처는 사용자가 이 탭에서 확장 프로그램을 '호출'해야 허용된다(activeTab, 크롬 규칙). 팝업(아이콘) 말고도 크롬 명령 단축키와 우클릭 메뉴가 같은 효과를 낸다
@@ -733,6 +750,31 @@ async function handleMessage(msg, sender) {
       const arr = recParts.get(msg.recId) || [];
       arr[msg.seq] = msg.data;
       recParts.set(msg.recId, arr);
+      return { ok: true };
+    }
+    case 'rec.elemSave': {   // DRM 없는 사이트: 콘텐츠 스크립트가 영상 요소에서 담아 조각(rec.part)을 보낸 뒤 저장을 맡긴다
+      recState = { tabId, title: msg.title || '', startedAt: 0 };
+      return recSave(msg.meta || {});
+    }
+    case 'web.recs.list': return { recs: await getRecs(), dir: await audioDirStatus() };
+    case 'web.recs.data': {   // 웹이 올리기 전에 폴더의 MP3 를 6MB 조각으로 읽어 간다
+      const rec = (await getRecs()).find((x) => x.id === p.id);
+      if (!rec) return { reason: 'missing' };
+      if (!rec.file || rec.file.location !== 'folder') return { reason: 'downloads' };
+      const r = await FS.readFile(rec.file.path);
+      if (!r.ok) return { reason: r.reason || 'error' };
+      const SLICE = 6 * 1024 * 1024;
+      const off = (p.seq || 0) * SLICE;
+      return { data: bytesToB64(r.bytes.subarray(off, off + SLICE)), done: off + SLICE >= r.bytes.length, size: r.bytes.length };
+    }
+    case 'web.recs.mark': {
+      const recs = await getRecs();
+      const rec = recs.find((x) => x.id === p.id);
+      if (rec) { Object.assign(rec, p.patch || {}); await setRecs(recs); }
+      return { ok: true };
+    }
+    case 'web.recs.remove': {
+      await setRecs((await getRecs()).filter((x) => x.id !== p.id));
       return { ok: true };
     }
     case 'rec.auto': {   // 심장박동 끊김·용량 초과로 offscreen 이 스스로 끝냈다 — 저장하고 플레이어 탭에 알린다

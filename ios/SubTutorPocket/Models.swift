@@ -224,6 +224,7 @@ final class Store: ObservableObject {
             let need = items.filter { $0.hasAudio && !hasLocalAudio($0) }.count
             let added = items.filter { !before.contains($0.id) }.count
             await SpeakStore.shared.sync(url: supaUrl, key: supaKey)   // 입트기(프롬프트·기록)도 함께 — 실패해도 목록 동기화는 성공
+            await RecStore.shared.refresh(url: supaUrl, key: supaKey)  // 영상 오디오(통째 MP3) 목록도
             syncStatus = "목록 동기화 끝 — 대사 \(items.count)개" + (added > 0 ? " (새 \(added)개)" : "") + (need > 0 ? " · 안 받은 소리 \(need)개 (⬇ 전체/작품별 다운로드)" : "")
             return true
         } catch {

@@ -1444,6 +1444,9 @@ async function runSites() {
         const w = [0.15, 0.8].map(win);
         assert(w.every((x) => x.rms > 1200), '빈 구간이 없다: ' + JSON.stringify(w));
         assert(w[1].hz > w[0].hz + 80, '이어 붙인 자리 너머로도 스위프가 올라간다: ' + JSON.stringify(w));
+        // 웹이 아이폰으로 올릴 수 있게 녹음 목록에 적힌다
+        const recs = await sw.evaluate(async () => (await chrome.storage.local.get('recordings')).recordings || []);
+        assert(recs.length === 1 && recs[0].title === 'E2E Sweep' && !recs[0].sent && recs[0].file && recs[0].file.location === 'folder', '녹음 목록 항목: ' + JSON.stringify(recs));
       } finally {
         // 다음 단계(지정 폴더에 MP3 1개 검사)를 위해 통째 녹음 파일·내려받기를 치운다
         await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'rec.stop' }, {})).catch(() => {});
@@ -1453,6 +1456,7 @@ async function runSites() {
         });
         const dls = await sw.evaluate(() => new Promise((r) => chrome.downloads.search({}, r)));
         for (const d of dls) { await sw.evaluate((id) => chrome.downloads.removeFile(id).catch(() => {}), d.id).catch(() => {}); await sw.evaluate((id) => new Promise((r) => chrome.downloads.erase({ id }, r)), d.id).catch(() => {}); }
+        await sw.evaluate(() => chrome.storage.local.remove('recordings'));   // 다음 스텝이 제 것을 심는다
       }
     });
 
@@ -2591,7 +2595,7 @@ async function runSites() {
         localStorage.setItem('st.supaUrl', 'http://127.0.0.1:8769');
         localStorage.setItem('st.supaKey', 'test-anon');
         localStorage.setItem('st.supaRefresh', 'rt-speak');
-        localStorage.setItem('st.speak', JSON.stringify({ stages: [1, 1] }));   // 줄여 말하기 단계를 1초·1초로 (설정에서 바꿀 수 있는 값)
+        localStorage.setItem('st.speak', JSON.stringify({ stages: [1, 1], drop10: false }));   // 줄여 말하기 단계를 1초·1초로 + 10초 미만 버리기는 꺼 둔다 (아래 스텝들이 1초짜리를 녹음한다)
       } catch (e) { /* ignore */ } });
       await w4.goto('http://localhost:8766/#/speak', { waitUntil: 'load' });
       await w4.waitForSelector('.speak-p', { visible: true });
@@ -2696,6 +2700,24 @@ async function runSites() {
       assert(takes.length === 2 && takes.filter((t) => t.deleted).length === 1, '지움 표식이 남아 동기화로 전해진다: ' + JSON.stringify(takes.map((t) => !!t.deleted)));
     });
 
+    await step('입트기(웹) 10초 미만 자동 삭제: 스위치를 켜면 짧은 녹음을 버리고 알린다', async () => {
+      await w4.evaluate(() => { document.querySelector('.speak-drop10 input').click(); });   // 끈 상태(선주입)에서 켠다
+      assert(await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).drop10 === true), '스위치가 저장된다');
+      const before = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes.length);
+      const mine = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).prompts.filter((x) => x.cat === 'mine' && !x.deleted));
+      await w4.evaluate((id) => { const c = document.querySelector('[data-sp="' + id + '"]'); if (!c.classList.contains('open')) c.querySelector('.p-head').click(); }, mine[0].id);
+      await w4.evaluate((id) => { [...document.querySelector('[data-sp="' + id + '"]').querySelectorAll('.speak-bigbtns .btn')].find((b) => b.textContent.includes('자유')).click(); }, mine[0].id);
+      await w4.waitForSelector('.speak-rec', { visible: true });
+      await new Promise((r) => setTimeout(r, 1200));
+      await w4.evaluate(() => document.querySelector('.speak-rec .rbtn.stop').click());
+      await waitFor(() => w4.evaluate(() => !document.querySelector('.speak-rec')), 8000, 'short recording closes');
+      const after = await w4.evaluate(() => ({ n: JSON.parse(localStorage.getItem('st.speak')).takes.length, toast: document.querySelector('#toast') ? document.querySelector('#toast').textContent : '' }));
+      assert(after.n === before, '10초 미만이라 저장되지 않는다: ' + before + ' → ' + after.n);
+      assert(/10초/.test(after.toast), '안내 토스트: ' + after.toast);
+      await w4.evaluate(() => { document.querySelector('.speak-drop10 input').click(); });   // 뒤 스텝들(1초 녹음)을 위해 다시 끈다
+      assert(await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).drop10 === false), '다시 꺼짐');
+    });
+
     await step('입트기(웹) 줄여 말하기: 1초 단계를 넘기면 원형 타이머에 +N초가 올라가고(주황), 멈추면 "N초 초과" → 다음 단계는 일찍 멈춰 "N초 부족" · 기록 줄에 목표와 초과/부족', async () => {
       const mine = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).prompts.filter((x) => x.cat === 'mine' && !x.deleted));
       await w4.evaluate((id) => { const c = document.querySelector('[data-sp="' + id + '"]'); if (!c.classList.contains('open')) c.querySelector('.p-head').click(); }, mine[0].id);
@@ -2749,6 +2771,86 @@ async function runSites() {
         assert(await w4.evaluate((id) => document.querySelector('[data-sp="' + id + '"] .p-text').textContent === 'Edited on phone', edited.id), '받아 온 글이 화면에도 보인다');
       } finally {
         await w4.close().catch(() => {});
+      }
+    });
+
+    await step('영상 오디오 → 아이폰: 웹이 폴더 MP3 를 올리고, 서버 소리 관리에서 대사 소리·영상 오디오를 지우며, 목록 머리에 플레이어가 선다', async () => {
+      const UID = '00000000-0000-4000-8000-000000000001';
+      const recAt = Date.now();
+      const recId = 'r' + recAt.toString(36);
+      // 씨앗: 폴더에 가짜 MP3, 확장 프로그램에 대사 1개 + 녹음 목록 1개, 모의 서버에 그 대사의 소리 객체·행
+      await opt.evaluate(async (bytes) => {
+        const root = await navigator.storage.getDirectory();
+        let dir = await root.getDirectoryHandle('e2e-docs', { create: true });
+        for (const seg of ['SubTutor', '영상 오디오']) dir = await dir.getDirectoryHandle(seg, { create: true });
+        const f = await dir.getFileHandle('Rec Show S1 E1.mp3', { create: true });
+        const w = await f.createWritable();
+        await w.write(new Uint8Array(bytes));
+        await w.close();
+      }, Array.from(Buffer.concat([Buffer.from([0xff, 0xfb, 0x90, 0x44]), Buffer.alloc(3000, 7)])));
+      await sw.evaluate(async (recId2, recAt2) => {
+        await chrome.storage.local.set({
+          items: [{ id: 'rec:show:1', platform: 'netflix', title: 'Rec Show', episode: 'S1 E1', text: 'Hello there.', translation: '', startMs: 1000, endMs: 2000, savedAt: Date.now(), tags: [], box: 'learning' }],
+          recordings: [{ id: recId2, title: 'Rec Show S1 E1', at: recAt2, durMs: 754000, bytes: 3004, file: { location: 'folder', path: 'e2e-docs/SubTutor/영상 오디오/Rec Show S1 E1.mp3', downloadId: 0 }, sent: 0, skip: false }],
+        });
+      }, recId, recAt);
+      await fetch('http://127.0.0.1:8769/rest/v1/items', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify([{ id: 'rec:show:1', title: 'Rec Show', episode: 'S1 E1', has_audio: true, audio_ms: 1000, box: 'learning', tags: [] }]) });
+      await fetch('http://127.0.0.1:8769/storage/v1/object/audio/' + UID + '/rec_show_1.mp3', { method: 'POST', body: Buffer.from([1, 2, 3, 4]) });
+      const w5 = await browser.newPage();
+      await w5.evaluateOnNewDocument(() => { try {
+        localStorage.setItem('st.supaUrl', 'http://127.0.0.1:8769');
+        localStorage.setItem('st.supaKey', 'test-anon');
+        localStorage.setItem('st.supaRefresh', 'rt-rec');
+        localStorage.setItem('st.supaAuto', '0');
+      } catch (e) { /* ignore */ } });
+      try {
+        await w5.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+        await waitFor(() => w5.evaluate(() => !!document.querySelector('.supa-storage')), 8000, 'settings renders');
+        // items 로딩이 끝나면 설정이 다시 그려져 닫힌 패널로 바뀐다 — 읽을 때마다 열어 둔다
+        const bodyText = () => w5.evaluate(() => {
+          const d = document.querySelector('.supa-storage');
+          if (d && !d.open) d.open = true;
+          const b = document.querySelector('.supa-storage-body');
+          return b ? b.textContent : '';
+        });
+        await waitFor(async () => /아직 안 올라간 녹음 1개/.test(await bodyText()), 15000, 'pending recording listed');
+        assert(/Rec Show · S1 E1/.test(await bodyText()), '대사 소리 묶음이 보인다: ' + (await bodyText()).slice(0, 200));
+        // 지금 올리기 → 모의 Storage 에 rec/<id>.<길이36>.<제목 base64url>.mp3 가 생기고 목록에 sent 표시
+        await w5.evaluate(() => { [...document.querySelectorAll('.supa-storage-body button')].find((b) => b.textContent === '지금 올리기').click(); });
+        await waitFor(async () => (await supaState()).objects.some(([k]) => k.includes('/rec/')), 20000, 'rec uploaded to storage');
+        const obj = (await supaState()).objects.find(([k]) => k.includes('/rec/'));
+        assert(obj[0].startsWith('audio/' + UID + '/rec/' + recId + '.') && obj[1] === 3004, '파일 이름·바이트: ' + JSON.stringify(obj));
+        await waitFor(() => sw.evaluate(async () => ((((await chrome.storage.local.get('recordings')).recordings) || [])[0] || {}).sent > 0), 8000, 'sent mark');
+        await waitFor(async () => /Rec Show S1 E1 — /.test(await bodyText()) && /영상 오디오 합계/.test(await bodyText()), 10000, 'remote rec row with decoded title');
+        // 대사 소리 묶음을 서버에서 지우면: 객체 삭제 + 행의 has_audio 꺼짐 (아이폰이 내려받기를 권하지 않게)
+        await w5.evaluate(() => { const r = [...document.querySelectorAll('.supa-storage-body .supa-obj')].find((x) => /Rec Show · S1 E1/.test(x.textContent)); r.querySelector('button').click(); });
+        await waitFor(async () => !(await supaState()).objects.some(([k]) => k.endsWith('/rec_show_1.mp3')), 10000, 'episode audio object removed');
+        // 객체 삭제 뒤에 has_audio 패치가 이어진다 — 끝날 때까지 기다린다
+        await waitFor(async () => {
+          const row = (await supaState()).items.find((x) => x.id === 'rec:show:1');
+          return row && row.has_audio === false && row.audio_ms === 0;
+        }, 8000, '행의 has_audio 가 꺼진다');
+        // 저장한 자막 목록: 작품 머리 아래 에피소드 오디오 플레이어 (길이 12:34 = 754초)
+        await w5.goto('http://localhost:8766/#/', { waitUntil: 'load' });
+        await waitFor(() => w5.evaluate(() => !!document.querySelector('.epi-audio')), 10000, 'episode player row');
+        const ea = await w5.evaluate(() => document.querySelector('.epi-audio').textContent);
+        assert(/에피소드 오디오/.test(ea) && /12:34/.test(ea), '플레이어에 통째 길이가 보인다: ' + ea);
+        assert(await w5.evaluate(() => !!document.querySelector('.epi-audio .ea-seek') && document.querySelectorAll('.epi-audio button').length >= 5), '⏪⏩·배속 단추: ' + (await w5.evaluate(() => document.querySelectorAll('.epi-audio button').length)));
+        // 영상 오디오를 서버에서 지우면 skip 이 남아 자동으로 다시 올라가지 않는다
+        await w5.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+        await waitFor(async () => [...(await bodyText()).matchAll(/Rec Show S1 E1 — /g)].length >= 1, 15000, 'rec row listed again');
+        await w5.evaluate(() => { const r = [...document.querySelectorAll('.supa-storage-body .supa-obj')].find((x) => /Rec Show S1 E1 — /.test(x.textContent)); r.querySelector('button').click(); });
+        await waitFor(async () => !(await supaState()).objects.some(([k]) => k.includes('/rec/')), 10000, 'rec object removed');
+        await waitFor(() => sw.evaluate(async () => ((((await chrome.storage.local.get('recordings')).recordings) || [])[0] || {}).skip === true), 8000, 'skip mark');
+        await waitFor(async () => /다시 올리기 허용/.test(await bodyText()), 8000, 're-upload button shows');
+      } finally {
+        await w5.close().catch(() => {});
+        await sw.evaluate(async () => {
+          await chrome.storage.local.remove('recordings');
+          const { items } = await chrome.storage.local.get('items');
+          await chrome.storage.local.set({ items: (items || []).filter((i) => i.id !== 'rec:show:1') });
+        });
+        await opt.evaluate(async () => { try { const root = await navigator.storage.getDirectory(); const d = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); await d.removeEntry('영상 오디오', { recursive: true }); } catch (e) { /* 없음 */ } });
       }
     });
 
