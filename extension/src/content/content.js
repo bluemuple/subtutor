@@ -1006,8 +1006,10 @@
   }
   // ── 지금 보는 영상의 오디오를 통째로 MP3 로 (보는 동안 실시간 녹음 — 멈춘 시간은 건너뛴다) ──
   // DRM 없는 사이트(유튜브·TVNZ+·일반)는 영상 요소에서 바로 담아 허용 단계가 없고,
-  // 보호된 재생(넷플릭스·프라임·디즈니+)만 크롬 규칙상 탭 캡처(탭마다 한 번 허용 — Alt+R 한 번이면 허용+녹음)를 쓴다
+  // 보호된 재생(넷플릭스·프라임·디즈니+)만 크롬 규칙상 탭 캡처(탭마다 한 번 허용 — Control+R(Mac) 한 번이면 허용+녹음)를 쓴다
   const DRM_SITES = ['netflix', 'prime', 'disney'];
+  const IS_MAC = /Mac/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '');
+  const REC_KEY_TEXT = IS_MAC ? 'Control+R' : 'Alt+R';   // 에피소드 통째 녹음 단축키 (Mac 은 ⌃R)
   const recFull = { on: false, startedAt: 0, timer: null, tick: 0, pending: false, elem: null, title0: '', autoFor: null };
   // AudioData 한 조각 → 모노 Float32
   function recElemMono(ad) {
@@ -1180,7 +1182,7 @@
     }
     return recTabStart();
   }
-  // 보호된 재생(넷플릭스류): 탭 캡처 — 크롬 규칙상 이 탭에서 한 번 허용해야 한다 (Alt+R·Alt+E·우클릭 메뉴·아이콘 — 허용되면 바로 이어서)
+  // 보호된 재생(넷플릭스류): 탭 캡처 — 크롬 규칙상 이 탭에서 한 번 허용해야 한다 (Control+R·Option+E·우클릭 메뉴·아이콘 — 허용되면 바로 이어서)
   async function recTabStart() {
     let started = null;
     try { started = await bg({ type: 'rec.start', title: recTitle() }); }
@@ -1220,7 +1222,7 @@
   function grantHint(shortcut, recShortcut) {
     const ways = [];
     if (recShortcut) ways.push(recShortcut + ' (MP3 녹음 단축키 — 허용과 녹음을 한 번에)');
-    else if (recShortcut === '') ways.push('chrome://extensions/shortcuts 에서 "영상 오디오 통째 MP3 녹음"에 Option+R 을 지정하면 다음부터 허용과 녹음이 한 번에');
+    else if (recShortcut === '') ways.push('chrome://extensions/shortcuts 에서 "영상 오디오 통째 MP3 녹음"에 ' + REC_KEY_TEXT + ' 을 지정하면 다음부터 허용과 녹음이 한 번에');
     if (shortcut) ways.push(shortcut + ' (저장 단축키)');
     ways.push('영상 우클릭 → "SubTutor: 지금 자막 저장"', '툴바의 SubTutor 아이콘');
     return '오디오 녹음은 크롬 규칙상 이 탭에서 한 번 허용해야 합니다: ' + ways.join(' · ') + (shortcut ? '' : ' (단축키는 chrome://extensions/shortcuts 에서 지정)') + '. 허용되면 바로 녹음합니다';
@@ -1395,7 +1397,7 @@
     bg({ type: 'commands.get' }).then((r) => {
       const key = (r && r.rec) || '';
       recFull.shortcut = key;
-      if (ui.btnRec) ui.btnRec.title += ' · 단축키 ' + (key || 'Option+R') + (key ? ' (넷플릭스류는 누르는 순간 녹음 허용까지)' : ' — 크롬 단축키로는 아직 지정 안 됨: chrome://extensions/shortcuts 에서 지정하면 넷플릭스류도 허용까지 한 번에');
+      if (ui.btnRec) ui.btnRec.title += ' · 단축키 ' + REC_KEY_TEXT + (key ? (key.replace(/\s/g, '') === '⌃R' || /^(Ctrl|MacCtrl)\+R$/i.test(key) || !IS_MAC ? ' (넷플릭스류는 누르는 순간 녹음 허용까지)' : ' — 크롬 단축키는 지금 ' + key + ' 로 지정돼 있음: chrome://extensions/shortcuts 에서 ' + REC_KEY_TEXT + ' 로 바꾸면 넷플릭스류도 허용까지 한 번에') : ' — 크롬 단축키로는 아직 지정 안 됨: chrome://extensions/shortcuts 에서 지정하면 넷플릭스류도 허용까지 한 번에');
     }).catch(() => { /* ignore */ });
 
     ui.overlay = el('div', { id: 'st-overlay', class: 'st-hidden' });
@@ -3505,9 +3507,10 @@
     KeyJ: () => { if (!state.dubRec) runDubLadder(); },
     KeyK: () => { if (!state.dubLadder && !(state.dubRec && state.dubRec.phase === 'save')) recordDubTake(); },
   };
-  // Option(Alt)+R: 영상 오디오 통째 MP3 켜기/끄기. 크롬 단축키로 지정돼 있으면 크롬이 먼저 받아(그때는 녹음 허용까지) 여기로는 안 온다 —
+  // Control+R(Mac) · Alt+R(윈도우 등 — 거기선 Ctrl+R 이 새로고침): 영상 오디오 통째 MP3 켜기/끄기.
+  // 크롬 단축키로 지정돼 있으면 크롬이 먼저 받아(그때는 녹음 허용까지) 여기로는 안 온다 —
   // 지정이 안 돼 있어도 패널에서 똑같이 먹게 받아 둔다 (보호된 재생은 이 경우 "단축키를 지정하면 허용까지 한 번에" 안내)
-  const isRecKey = (e) => e.code === 'KeyR' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+  const isRecKey = (e) => e.code === 'KeyR' && !e.metaKey && !e.shiftKey && (IS_MAC ? (e.ctrlKey && !e.altKey) : (e.altKey && !e.ctrlKey));
   function keyAction(e) {
     if (isRecKey(e)) return recToggle;
     if (e.code === 'Comma' || e.code === 'Period') return (e.shiftKey && SHIFT_ACTIONS[e.code]) || null;

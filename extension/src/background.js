@@ -605,7 +605,7 @@ async function invokeOnTab(tab, source, action) {
   try { return await chrome.tabs.sendMessage(tab.id, { type: 'invoke', source: source || 'command', shortcut, action: action || '' }); } catch (e) { return { ok: false, error: '이 탭에서는 SubTutor가 실행 중이 아닙니다' }; }
 }
 globalThis.__subtutorInvoke = invokeOnTab; // 테스트용
-// Alt+E: 지금 자막 저장 · Alt+R: 영상 오디오 통째 MP3 켜고 끄기 — 둘 다 누르는 순간 이 탭의 녹음 허용(activeTab)이 된다
+// Alt(Option)+E: 지금 자막 저장 · Control+R(Mac)/Alt+R: 영상 오디오 통째 MP3 켜고 끄기 — 둘 다 누르는 순간 이 탭의 녹음 허용(activeTab)이 된다
 if (chrome.commands) chrome.commands.onCommand.addListener((command, tab) => {
   if (command === 'save-cue') invokeOnTab(tab, 'command');
   else if (command === 'rec-episode') invokeOnTab(tab, 'command', 'rec');

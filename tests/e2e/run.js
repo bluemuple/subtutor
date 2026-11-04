@@ -1660,16 +1660,23 @@ async function runSites() {
         await waitFor(async () => (await sw.evaluate(async () => ((await chrome.storage.local.get('recordings')).recordings || []).length)) === 2, 15000, 'auto recording saved');
         const recCount = () => sw.evaluate(async () => ((await chrome.storage.local.get('recordings')).recordings || []).length);
         const recOn = () => yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on'));
-        // 단축키 ① Option(Alt)+R — 크롬 단축키로 지정이 안 돼 있어도 패널이 직접 받아 켜고 끈다
-        const optR = async () => { await yt.keyboard.down('Alt'); await yt.keyboard.press('KeyR'); await yt.keyboard.up('Alt'); };
+        // 단축키 ① Control+R (Mac — 윈도우 등은 Alt+R) — 크롬 단축키로 지정이 안 돼 있어도 패널이 직접 받아 켜고 끈다
+        const isMac = await yt.evaluate(() => /Mac/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || ''));
+        const mod = isMac ? 'Control' : 'Alt';
+        const optR = async () => { await yt.keyboard.down(mod); await yt.keyboard.press('KeyR'); await yt.keyboard.up(mod); };
+        if (isMac) {   // 예전 Option+R 은 이제 아무 일도 하지 않는다
+          await yt.keyboard.down('Alt'); await yt.keyboard.press('KeyR'); await yt.keyboard.up('Alt');
+          await sleep(600);
+          assert(!(await yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on'))), 'Mac 에서 Option+R 은 녹음을 켜지 않는다');
+        }
         await yt.evaluate(() => { const v = document.querySelector('video'); if (v.paused) v.play(); document.body.focus(); });
         await optR();
-        await waitFor(recOn, 4000, 'Option+R starts recording');
-        assert(!(await yt.evaluate(() => !!document.querySelector('.st-dubbox:not(.st-hidden)'))), 'Option+R 은 더빙 칸(R)을 열지 않는다');
+        await waitFor(recOn, 4000, 'Control+R starts recording');
+        assert(!(await yt.evaluate(() => !!document.querySelector('.st-dubbox:not(.st-hidden)'))), 'Control+R 은 더빙 칸(R)을 열지 않는다');
         await sleep(1600);
         await optR();
-        await waitFor(async () => (await recCount()) === 3, 15000, 'Option+R stops and saves');
-        // 단축키 ② 크롬 명령(rec-episode) — 실제 Option+R 이 크롬 단축키로 지정돼 있을 때 오는 길 (누르는 순간 녹음 허용)
+        await waitFor(async () => (await recCount()) === 3, 15000, 'Control+R stops and saves');
+        // 단축키 ② 크롬 명령(rec-episode) — 실제 Control+R 이 크롬 단축키로 지정돼 있을 때 오는 길 (누르는 순간 녹음 허용)
         const ytTab = await sw.evaluate(async () => (await chrome.tabs.query({ url: 'https://www.youtube.com/*' }))[0].id);
         let r = await sw.evaluate((id) => globalThis.__subtutorInvoke({ id }, 'command', 'rec'), ytTab);
         assert(r && r.ok && r.did === 'rec-start', 'command starts: ' + JSON.stringify(r));
@@ -1678,11 +1685,11 @@ async function runSites() {
         r = await sw.evaluate((id) => globalThis.__subtutorInvoke({ id }, 'command', 'rec'), ytTab);
         assert(r && r.ok && r.did === 'rec-stop', 'command stops: ' + JSON.stringify(r));
         await waitFor(async () => (await recCount()) === 4, 15000, 'command recording saved');
-        // ⏺ MP3 버튼 설명과 ⌨ 단축키 목록에 Option+R 이 적혀 있다
+        // ⏺ MP3 버튼 설명과 ⌨ 단축키 목록에 Control+R 이 적혀 있다
         const tip = await yt.$eval('#st-panel .st-rec-btn', (b) => b.title);
-        assert(/단축키/.test(tip), '버튼 설명에 단축키: ' + tip);
+        assert(/단축키 (Control|Alt)\+R/.test(tip), '버튼 설명에 단축키: ' + tip);
         await yt.evaluate(() => [...document.querySelectorAll('#st-panel .st-foot-btn')].find((b) => /단축키/.test(b.textContent)).click());
-        await waitFor(() => yt.evaluate(() => { const b = document.querySelector('.st-infobox'); return b && !b.classList.contains('st-hidden') && /Option\(Alt\)\+R/.test(b.textContent); }), 4000, 'shortcut list mentions Option+R');
+        await waitFor(() => yt.evaluate(() => { const b = document.querySelector('.st-infobox'); return b && !b.classList.contains('st-hidden') && /Control\+R/.test(b.textContent); }), 4000, 'shortcut list mentions Control+R');
         await yt.evaluate(() => { const x = document.querySelector('.st-infobox-head .st-icon'); if (x) x.click(); });
       } finally {
         await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: false } }, {})).catch(() => {});
