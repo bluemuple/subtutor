@@ -859,6 +859,18 @@ async function runSites() {
       assert(items[0].title === 'Mock Show' && items[0].episode === 'S1:E2 The Test', 'title/episode: ' + items[0].title + '/' + items[0].episode);
       await page.evaluate(() => document.querySelector('video').pause());
     });
+    await step('저장된 줄에서 E 한 번 더: 지우지 않고 "알고 있는 표현"으로(초록 ☆) · 또 누르면 학습 복귀', async () => {
+      const box = () => sw.evaluate(async () => ((((await chrome.storage.local.get('items')).items) || []).find((i) => i.id === 'netflix:12345:22000') || {}).box);
+      await page.keyboard.press('KeyE');   // 방금 저장한 줄 → 알고 있는 표현
+      await waitFor(async () => (await box()) === 'known', 5000, 'moved to known');
+      const row = await waitFor(() => page.evaluate(() => { const r = [...document.querySelectorAll('.st-row')].find((x) => x.classList.contains('known-mark')); return r ? { star: r.querySelector('.st-star').textContent, color: getComputedStyle(r.querySelector('.st-star')).color, saved: r.classList.contains('saved') } : null; }), 4000, 'known row');
+      assert(row.star === '☆' && row.color === 'rgb(34, 197, 94)' && !row.saved, '초록 ☆ 표시: ' + JSON.stringify(row));
+      const chipInfo = await page.evaluate(() => { const c = document.querySelector('.st-chip'); return c ? c.className + '|' + c.title : ''; });
+      assert(/st-chip-known/.test(chipInfo) && /알고 있는 표현/.test(chipInfo), '안내 칩: ' + chipInfo);
+      await page.keyboard.press('KeyE');   // 다시 별표 → 학습 복귀
+      await waitFor(async () => (await box()) === 'learning', 5000, 'back to learning');
+      await waitFor(() => page.$$eval('.st-row.saved', (r) => r.length === 1), 4000, 'star back');
+    });
     await step('크롬 명령(Alt+E)·우클릭 메뉴 호출: 아이콘 없이 지금 자막을 저장하고, 이미 저장된 줄이면 중복 없이 표시한다', async () => {
       const tabId = await sw.evaluate(async () => (await chrome.tabs.query({ url: 'https://www.netflix.com/*' }))[0].id);
       // 이미 저장된 줄(frisbee)에서 호출 → 중복 저장 없이 '이미 저장' 아이콘
@@ -945,7 +957,8 @@ async function runSites() {
           const items2 = await sw.evaluate(async () => (((await chrome.storage.local.get('items')).items) || []).map((i) => i.id + '@' + i.startMs));
           throw new Error(err.message + ' ┃diag=' + JSON.stringify(diag) + ' ┃after=' + JSON.stringify(diag2) + ' ┃settings=' + JSON.stringify(st) + ' ┃items=' + JSON.stringify(items2));
         });
-      await page.keyboard.press('KeyE');
+      // 별표 해제는 이제 "알고 있는 표현"으로 옮기므로, 이 정리는 직접 지운다
+      await sw.evaluate(async () => { const it = (((await chrome.storage.local.get('items')).items) || []).find((i) => i.text.includes('facts')); if (it) await globalThis.__subtutorHandle({ type: 'web.items.removeMany', payload: { ids: [it.id] } }, {}); });
       await waitFor(async () => { const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); return !items.some((i) => i.text.includes('facts')); }, 4000, 'unsaved');
       const stored = await sw.evaluate(async () => (await chrome.storage.local.get('offsets')).offsets);
       assert(stored && stored['netflix:12345'] && stored['netflix:12345'].ms === -2000, 'offset persisted: ' + JSON.stringify(stored));
@@ -1412,9 +1425,9 @@ async function runSites() {
       } finally {
         // 정리(검사가 실패해도 실행): 별표 해제로 항목·오디오 삭제, 설정 복원 — 안 하면 뒤 단계의 항목 수가 어긋나 줄줄이 실패한다
         const still = () => sw.evaluate(async () => !!(((await chrome.storage.local.get('items')).items || []).find((i) => i.id === 'netflix:12345:14000')));
-        if (await still()) {
-          await page.keyboard.press('KeyE');
-          await waitFor(async () => !(await still()), 5000, 'unstarred').catch(() => sw.evaluate(() => globalThis.__subtutorHandle({ type: 'web.items.removeMany', payload: { ids: ['netflix:12345:14000'] } }, {})));
+        if (await still()) {   // 별표 해제는 이제 지우지 않고 "알고 있는 표현"으로 옮기므로, 정리는 바로 지운다
+          await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'web.items.removeMany', payload: { ids: ['netflix:12345:14000'] } }, {}));
+          await waitFor(async () => !(await still()), 5000, 'removed');
         }
         await sw.evaluate(async () => { const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: Object.assign({}, settings, { audioMode: 'off', captureTest: '' }) }); });
         await sleep(300);

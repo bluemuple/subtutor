@@ -279,7 +279,7 @@
     state.cues = []; state.koCues = []; state.enTrack = null; state.koTrack = null;
     state.current = -1; state.lastShown = -1; state.prevIdx = -1; state.lastDisplayIdx = -2;
     state.loop = false; state.loopIdx = -1; state.pausedFor = -1; state.clip = null; state.capturing = null;
-    state.saved = new Map(); state.meta = null; state.offsetMs = 0; state.offsetSource = ''; state.alignSamples = []; state.lastNativeText = '';
+    state.saved = new Map(); state.known = new Map(); state.meta = null; state.offsetMs = 0; state.offsetSource = ''; state.alignSamples = []; state.lastNativeText = '';
     clearShadow(); clearEndTimer(); stopTextTrackPoll(); clearTimeout(state.ensureTimer);
     closeDubBox(); stopDubPlay(); closeWordView();
     state.dubSegs = [];
@@ -775,8 +775,10 @@
     if (!state.videoId) return;
     try {
       const res = await bg({ type: 'items.list', platform: adapter.name, videoId: state.videoId });
-      state.saved = new Map(((res && res.items) || []).map((it) => [it.id, it]));
-      state.missed = new Set(Array.from(state.saved.values()).filter((it) => it.missed).map((it) => it.id));
+      const all = (res && res.items) || [];
+      state.saved = new Map(all.filter((it) => it.box !== 'known').map((it) => [it.id, it]));
+      state.known = new Map(all.filter((it) => it.box === 'known').map((it) => [it.id, it]));   // 별표를 해제해 "알고 있는 표현"으로 보낸 것들
+      state.missed = new Set(all.filter((it) => it.missed).map((it) => it.id));
       refreshSavedMarks();
       renderOverlay(true);
     } catch (e) { /* ignore */ }
@@ -830,10 +832,23 @@
     const id = itemIdFor(c);
     try {
       if (state.saved.has(id)) {
+        // 별표 해제: 지우지 않고 "알고 있는 표현"으로 옮긴다 — 소리·태그·썸네일은 그대로 (완전히 지우려면 웹 목록에서)
+        const it = state.saved.get(id);
         state.saved.delete(id);
+        it.box = 'known';
+        state.known.set(id, it);
         refreshSavedMarks(); renderOverlay(true);
-        await bg({ type: 'items.remove', id });
-        chip('unsaved', '저장 취소');
+        await bg({ type: 'items.update', id, patch: { box: 'known', boxAt: Date.now() } });
+        chip('known', '알고 있는 표현으로 옮겼습니다 — 다시 ★ 누르면 학습으로');
+      } else if (state.known.has(id)) {
+        // 알고 있는 표현에 있던 자막을 다시 별표: 학습으로 되돌린다
+        const it = state.known.get(id);
+        state.known.delete(id);
+        it.box = 'learning';
+        state.saved.set(id, it);
+        refreshSavedMarks(); renderOverlay(true);
+        await bg({ type: 'items.update', id, patch: { box: 'learning', boxAt: Date.now() } });
+        chip('saved', '다시 학습 목록으로');
       } else {
         const picked = await pickSentences(i); // 문장이 여러 개면 영상을 멈추고 고른다 (아니면 바로 null)
         if (picked === false) return;          // 취소
@@ -903,13 +918,16 @@
       const c = state.cues[i];
       const id = c && itemIdFor(c);
       const saved = c && state.saved.has(id);
+      const known = c && state.known.has(id);
       const missed = c && state.missed.has(id);
       ui.rows[i].classList.toggle('saved', !!saved);
+      ui.rows[i].classList.toggle('known-mark', !!known);     // 별표 해제로 "알고 있는 표현"에 둔 줄: 초록 ☆
       ui.rows[i].classList.toggle('missed-star', !!missed);   // Q: 빨간 별 (오디오 없이 표시만)
       const star = ui.rows[i].lastElementChild;
       if (star) {
         star.textContent = saved ? '★' : '☆';
-        star.title = missed ? '못 알아들음 (Q 로 해제) — 오디오 없이 표시만' : '저장 (E)';
+        star.title = missed ? '못 알아들음 (Q 로 해제) — 오디오 없이 표시만'
+          : known ? '알고 있는 표현에 있음 — ★ 누르면 다시 학습으로' : '저장 (E)';
       }
     }
   }
@@ -1635,7 +1653,7 @@
     toastTimer = setTimeout(() => ui.toast.classList.remove('show'), ms || 1400);
   }
   // 구석 상태 아이콘: 저장·녹음처럼 자주 뜨는 알림은 화면을 가리는 토스트 대신 영상 오른쪽 위에 작은 아이콘으로만 (마우스를 올리면 설명). ms 0 = 다음 알림까지 유지
-  const CHIP_ICON = { saved: '★', unsaved: '☆', missed: 'Q', rec: '●', wait: '●', audio: '♪', info: 'i', error: '!' };
+  const CHIP_ICON = { saved: '★', unsaved: '☆', known: '✓', missed: 'Q', rec: '●', wait: '●', audio: '♪', info: 'i', error: '!' };
   let chipTimer;
   function chip(kind, title, ms) {
     if (!ui.chip) return;
