@@ -31,6 +31,9 @@
     if (area === 'local' && changes.items) post({ __subtutorWeb: 'event', event: 'items.changed' });
     if (area === 'local' && changes.words) post({ __subtutorWeb: 'event', event: 'words.changed' });
   });
+  // 확장 프로그램을 새로 불러오면 이 탭의 브리지는 끊긴다 — 웹에 알려 새로고침 안내를 띄우게 한다
+  const alive = () => { try { return !!(chrome.runtime && chrome.runtime.id); } catch (e) { return false; } };
+  const orphanTimer = setInterval(() => { if (!alive()) { clearInterval(orphanTimer); post({ __subtutorWeb: 'event', event: 'orphaned' }); } }, 3000);
   const announce = () => post({ __subtutorWeb: 'event', event: 'ready', payload: { version } });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', announce);
   else announce();

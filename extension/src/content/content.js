@@ -35,6 +35,7 @@
     leadMs: 150,
     tailMs: 200,
     audioMode: 'off',           // off | store | download | both : 별표 저장 시 오디오 처리
+    recAuto: false,             // 에피소드를 재생하면 자동으로 영상 오디오 통째 MP3 녹음
     saveSentence: true,         // 문장 단위 저장: 자막이 문장 중간에서 끝나면 문장이 끝나는 자막까지 묶어서 저장 (근거: lib/explain.js saveSentence)
     savePick: true,             // 한 자막에 문장이 여러 개면, 저장할 때 영상을 멈추고 어떤 문장을 저장할지 고른다 (뒷문장만도 가능)
     saveTailSec: 4,             // MP3 에 자막 끝 뒤 여유를 담는 초 (0~10) — 웹에서 구간을 늘려도 들을 소리가 파일에 있게
@@ -269,6 +270,8 @@
     if (ui.root) { syncPanelWidth(); fitVideoBesidePanel(); }
   }
   function startVideo(id) {
+    if (recFull.on) recToggle();     // 에피소드가 바뀌면 담던 영상 오디오를 저장하고
+    recFull.autoFor = null;          // 자동 녹음이 새 에피소드에서 다시 시작하게
     state.runToken++;
     state.trackRun++;
     state.videoId = id;
@@ -948,8 +951,19 @@
     const mode = settings.audioMode;
     let result;
     chip('rec', '대사 오디오 녹음 중…', 0);
-    if (adapter.name === 'youtube' || !chrome.runtime.getURL) result = await captureViaElement(startV, endV);
-    else result = await captureViaTab(startV, endV, item, i);
+    // DRM 없는 사이트는 영상 요소에서 바로 녹음한다 — 확장 프로그램 아이콘을 누르는(허용) 단계가 필요 없다.
+    // 보호된 재생이라 무음이거나 캡처가 막히면 그 영상은 탭 캡처(탭마다 한 번 허용)로 넘어간다
+    const tryElement = !chrome.runtime.getURL || (!DRM_SITES.includes(adapter.name) && state.elemCapSilent !== state.videoId);
+    if (tryElement) {
+      try { result = await captureViaElement(startV, endV); }
+      catch (e) { if (!chrome.runtime.getURL) throw e; result = { silent: true, elemError: String((e && e.message) || e) }; }
+      if (result && result.silent && chrome.runtime.getURL) {
+        state.elemCapSilent = state.videoId;
+        result = await captureViaTab(startV, endV, item, i);
+      }
+    } else {
+      result = await captureViaTab(startV, endV, item, i);
+    }
     if (!result) { if (!capture.pendingGrant) chipHide(); return; }
     if (result.silent) { chipHide(); toast('이 영상의 오디오는 캡처가 차단되어 있습니다(보호된 재생)'); return; }
     const r = await bg({ type: 'audio.save', id: item.id, mode, store: result.store, storeFormat: result.storeFormat || 'wav', storeMime: result.storeMime || 'audio/wav', storeRate: result.storeRate || 16000, download: result.download, downloadMime: result.downloadMime || 'audio/wav', downloadRate: result.downloadRate || 0, fileName: fileNameFor(item, result.downloadFormat || 'wav'), durationMs: result.durationMs, leadMs: Number.isFinite(result.leadMs) ? result.leadMs : 250, stats: result.stats || null });
@@ -966,7 +980,105 @@
     if (state.saved.has(item.id)) state.saved.get(item.id).audio = { ms: result.durationMs };
   }
   // ── 지금 보는 영상의 오디오를 통째로 MP3 로 (보는 동안 실시간 녹음 — 멈춘 시간은 건너뛴다) ──
-  const recFull = { on: false, startedAt: 0, timer: null, tick: 0, pending: false };
+  // DRM 없는 사이트(유튜브·TVNZ+·일반)는 영상 요소에서 바로 담아 허용 단계가 없고,
+  // 보호된 재생(넷플릭스·프라임·디즈니+)만 크롬 규칙상 탭 캡처(탭마다 한 번 허용 — Alt+R 한 번이면 허용+녹음)를 쓴다
+  const DRM_SITES = ['netflix', 'prime', 'disney'];
+  const recFull = { on: false, startedAt: 0, timer: null, tick: 0, pending: false, elem: null, title0: '', autoFor: null };
+  // AudioData 한 조각 → 모노 Float32
+  function recElemMono(ad) {
+    const n = ad.numberOfFrames, nch = ad.numberOfChannels || 1;
+    try {
+      const mono = new Float32Array(n);
+      const plane = new Float32Array(n);
+      for (let ch = 0; ch < nch; ch++) {
+        ad.copyTo(plane, { planeIndex: ch, format: 'f32-planar' });
+        for (let k = 0; k < n; k++) mono[k] += plane[k];
+      }
+      if (nch > 1) for (let k = 0; k < n; k++) mono[k] /= nch;
+      return mono;
+    } catch (e) { return null; }
+  }
+  // 영상 요소에서 PCM 을 받아 그 자리에서 64kbps 모노 MP3 로 눌러 담는다 (영상이 멈춘 동안은 담지 않는다)
+  function recElemStart() {
+    const Au = globalThis.SubTutorAudio;
+    const v = adapter.video();
+    if (!v || !Au || !Au.hasMp3() || typeof MediaStreamTrackProcessor !== 'function') return null;
+    let stream = null;
+    try { stream = v.captureStream ? v.captureStream() : null; } catch (e) { stream = null; }
+    const track = stream && stream.getAudioTracks()[0];
+    if (!track) return null;
+    const cur = { track, reader: null, enc: null, sampleRate: 0, parts: [], bytes: 0, frames: 0, skipped: 0, closed: false, soundSeen: false };
+    try { cur.reader = new MediaStreamTrackProcessor({ track }).readable.getReader(); } catch (e) { try { track.stop(); } catch (e2) { /* ignore */ } return null; }
+    const loop = () => cur.reader.read().then(({ done, value }) => {
+      if (done || cur.closed) { if (value) { try { value.close(); } catch (e) { /* ignore */ } } return; }
+      try {
+        if (!cur.sampleRate && value.sampleRate) {
+          cur.sampleRate = value.sampleRate;
+          cur.enc = new (globalThis.lamejs).Mp3Encoder(1, value.sampleRate, 64);
+        }
+        if (value.sampleRate === cur.sampleRate && cur.enc) {
+          const mono = recElemMono(value);
+          const vd = adapter.video();
+          if (!mono) { /* 형식을 못 읽은 조각은 버린다 */ }
+          else if (vd && vd.paused) { cur.skipped += value.numberOfFrames; }
+          else {
+            const b = cur.enc.encodeBuffer(Au.floatToInt16(mono));
+            if (b.length) { cur.parts.push(new Uint8Array(b)); cur.bytes += b.length; }
+            cur.frames += value.numberOfFrames;
+            if (!cur.soundSeen && !Au.isSilent(mono)) cur.soundSeen = true;
+          }
+        }
+      } catch (e) { /* 조각 하나 실패해도 계속 */ }
+      finally { try { value.close(); } catch (e) { /* ignore */ } }
+      return loop();
+    }).catch(() => {});
+    loop();
+    return cur;
+  }
+  async function recElemFinish(cur, reason) {
+    cur.closed = true;
+    try { cur.reader.cancel().catch(() => {}); } catch (e) { /* ignore */ }
+    try { cur.track.stop(); } catch (e) { /* ignore */ }
+    const Au = globalThis.SubTutorAudio;
+    if (cur.enc) {
+      const end = cur.enc.flush();
+      if (end.length) { cur.parts.push(new Uint8Array(end)); cur.bytes += end.length; }
+    }
+    const durMs = Math.round((cur.frames / (cur.sampleRate || 48000)) * 1000);
+    if (!cur.bytes || durMs < 1000) return { ok: false, error: '담긴 오디오가 너무 짧습니다 (' + durMs + 'ms) — 영상이 재생되는 동안 담깁니다' };
+    const bytes = new Uint8Array(cur.bytes);
+    let off = 0;
+    for (const x of cur.parts) { bytes.set(x, off); off += x.length; }
+    cur.parts = [];
+    const SLICE = 6 * 1024 * 1024;   // 3의 배수 — base64 조각을 그대로 이어 붙인다
+    const recId = 'rec' + Math.floor(Math.random() * 1e9).toString(36);
+    for (let o = 0, seq = 0; o < bytes.length; o += SLICE, seq++) {
+      await bg({ type: 'rec.part', recId, seq, data: Au.bytesToBase64(bytes.subarray(o, o + SLICE)) });
+    }
+    return bg({ type: 'rec.elemSave', title: recFull.title0 || recTitle(), meta: { recId, bytes: bytes.length, durMs, skippedMs: Math.round((cur.skipped / (cur.sampleRate || 48000)) * 1000), reason } });
+  }
+  // 에피소드를 재생하면 자동으로 담기 시작 (⚙ 설정 · 에피소드마다 한 번 — 사용자가 멈추면 그 에피소드에서는 다시 켜지 않는다)
+  function recAutoTick() {
+    if (!settings.recAuto || recFull.on || recFull.pending || !state.active || !isEnabled() || !state.videoId) return;
+    if (recFull.autoFor === state.videoId) return;
+    const v = adapter.video();
+    if (!v || v.paused || v.ended) return;
+    recFull.autoFor = state.videoId;
+    recToggle();
+  }
+  setInterval(recAutoTick, 2000);
+  // 확장 프로그램을 새로 불러오면(⟳·업데이트) 이미 열려 있던 탭의 이 스크립트는 끊긴다 — 크롬은 열린 탭에 새 코드를 넣어 주지 않는다.
+  // 끊긴 것을 알아차리면 화면 위쪽에 새로고침 안내를 띄운다 (안 그러면 옛 패널이 그대로 남아 새 기능이 안 보인다)
+  const extAlive = () => { try { return !!(chrome.runtime && chrome.runtime.id); } catch (e) { return false; } };
+  const orphanTimer = setInterval(() => {
+    if (extAlive()) return;
+    clearInterval(orphanTimer);
+    const bar = el('div', { class: 'st-orphan', style: 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;display:flex;gap:10px;align-items:center;background:#7c3aed;color:#fff;font:600 14px/1.4 -apple-system,system-ui,sans-serif;padding:10px 14px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.45)' }, [
+      el('span', null, 'SubTutor 가 새로 설치됐습니다 — 이 탭을 새로고침해야 새 기능이 켜집니다'),
+      el('button', { style: 'all:unset;cursor:pointer;background:#fff;color:#4c1d95;padding:4px 10px;border-radius:7px;font-weight:700', onclick: () => location.reload() }, '새로고침'),
+    ]);
+    (document.fullscreenElement || document.body || document.documentElement).append(bar);
+  }, 3000);
   const fmtMinSec = (ms) => { const t = Math.max(0, Math.round(ms / 1000)); return (t >= 60 ? Math.floor(t / 60) + '분 ' : '') + (t % 60) + '초'; };
   function recTitle() {
     const m = state.meta || {};
@@ -983,15 +1095,30 @@
     recFull.on = true;
     recFull.startedAt = startedAt || now();
     recFull.tick = 0;
+    recFull.title0 = recTitle();   // 에피소드가 바뀌며 저장될 때도 담기 시작한 제목으로
     clearInterval(recFull.timer);
     recFull.timer = setInterval(() => {
       recSetUi();
       recFull.tick++;
-      if (recFull.tick % 3 !== 0) return;             // 심장박동은 3초에 한 번
+      if (recFull.tick % 3 !== 0) return;             // 3초에 한 번
       const v = adapter.video();
-      bg({ type: 'rec.beat', paused: !!(v && v.paused), title: recTitle() })
-        .then((r) => { if (r && r.recording === false && recFull.on) recEndUi(); })   // 저쪽이 이미 끝냈으면(자동 저장 등) 버튼을 되돌린다
-        .catch(() => { /* ignore */ });
+      if (recFull.elem) {
+        // 요소 캡처가 5초 넘게 무음이면(뜻밖의 보호된 재생) 탭 캡처로 넘어간다
+        const c = recFull.elem;
+        if (!c.soundSeen && c.sampleRate && c.frames / c.sampleRate > 5) {
+          c.closed = true;
+          try { c.track.stop(); } catch (e) { /* ignore */ }
+          recFull.elem = null;
+          recEndUi();
+          toast('이 영상은 보호된 재생이라 탭 캡처로 넘어갑니다');
+          recTabStart();
+          return;
+        }
+      } else {
+        bg({ type: 'rec.beat', paused: !!(v && v.paused), title: recTitle() })
+          .then((r) => { if (r && r.recording === false && recFull.on) recEndUi(); })   // 저쪽이 이미 끝냈으면(자동 저장 등) 버튼을 되돌린다
+          .catch(() => { /* ignore */ });
+      }
       if (v && v.ended) recToggle();                   // 영상이 끝나면 알아서 저장
     }, 1000);
     recSetUi();
@@ -1003,10 +1130,12 @@
   }
   async function recToggle() {
     if (recFull.on) {
+      const elem = recFull.elem;
+      recFull.elem = null;
       recEndUi();
       chip('rec', '영상 오디오를 MP3 파일로 묶는 중…', 0);
       try {
-        const r = await bg({ type: 'rec.stop' });
+        const r = elem ? await recElemFinish(elem, 'user') : await bg({ type: 'rec.stop' });
         chipHide();
         if (!r || !r.ok) { toast('영상 오디오 저장 실패: ' + ((r && r.error) || '알 수 없음'), 7000); return; }
         const where = r.location === 'folder' ? r.fileName : '다운로드 폴더/' + r.fileName;
@@ -1014,12 +1143,26 @@
       } catch (e) { chipHide(); toast('영상 오디오 저장 실패: ' + (e && e.message), 7000); }
       return;
     }
+    // DRM 없는 사이트: 영상 요소에서 바로 — 확장 프로그램 아이콘을 누르는(허용) 단계가 없다
+    if (!DRM_SITES.includes(adapter.name)) {
+      const cur = recElemStart();
+      if (cur) {
+        recFull.elem = cur;
+        recBegin(now());
+        toast('⏺ 영상 오디오를 MP3 로 담는 중 — 보는 동안 실시간으로 담기고, 일시정지한 시간은 건너뜁니다. 같은 버튼으로 저장', 7000);
+        return;
+      }
+    }
+    return recTabStart();
+  }
+  // 보호된 재생(넷플릭스류): 탭 캡처 — 크롬 규칙상 이 탭에서 한 번 허용해야 한다 (Alt+R·Alt+E·우클릭 메뉴·아이콘 — 허용되면 바로 이어서)
+  async function recTabStart() {
     let started = null;
     try { started = await bg({ type: 'rec.start', title: recTitle() }); }
     catch (e) { toast('영상 오디오 녹음 시작 실패: ' + (e && e.message), 7000); return; }
     if (started && started.unavailable === 'grant') {
       recFull.pending = true;
-      const hint = grantHint(started.shortcut);
+      const hint = grantHint(started.shortcut, started.recShortcut);
       chip('wait', '영상 오디오 녹음 허용 대기 — ' + hint, 0);
       toast('🎙 ' + hint, 8000);
       return;
@@ -1049,8 +1192,9 @@
     return res;
   }
   // 크롬 규칙: 탭 오디오 녹음은 사용자가 이 탭에서 확장 프로그램을 호출(단축키·우클릭 메뉴·툴바 아이콘)해야 허용된다. 탭마다 한 번이면 된다
-  function grantHint(shortcut) {
+  function grantHint(shortcut, recShortcut) {
     const ways = [];
+    if (recShortcut) ways.push(recShortcut + ' (MP3 녹음 단축키 — 허용과 녹음을 한 번에)');
     if (shortcut) ways.push(shortcut + ' (저장 단축키)');
     ways.push('영상 우클릭 → "SubTutor: 지금 자막 저장"', '툴바의 SubTutor 아이콘');
     return '오디오 녹음은 크롬 규칙상 이 탭에서 한 번 허용해야 합니다: ' + ways.join(' · ') + (shortcut ? '' : ' (단축키는 chrome://extensions/shortcuts 에서 지정)') + '. 허용되면 바로 녹음합니다';
@@ -1069,6 +1213,19 @@
   function onPopupOpened() { resumePendingCapture(); }
   // 단축키(Alt+E 등 크롬 명령)·우클릭 메뉴: 기다리던 녹음이 있으면 잇고, 아니면 지금 자막을 저장한다(저장된 줄인데 오디오가 없으면 녹음만 다시)
   function onInvoke(msg) {
+    if (msg && msg.action === 'rec') {
+      // 단축키를 누른 것 자체가 이 탭의 녹음 허용 — 기다리던 대사 녹음이 있으면 그것도 이어서 한다
+      if (capture.pendingGrant) {
+        const p = capture.pendingGrant;
+        capture.pendingGrant = null;
+        if (state.saved.has(p.item.id)) queueCapture(p.i, p.item);
+      }
+      if (recFull.pending) { recFull.pending = false; chipHide(); recToggle(); return { ok: true, did: 'rec-resume' }; }
+      if (!state.active || !isEnabled()) return { ok: false, error: '재생 화면이 아닙니다' };
+      const was = recFull.on;
+      recToggle();
+      return { ok: true, did: was ? 'rec-stop' : 'rec-start' };
+    }
     if (resumePendingCapture()) return { ok: true, did: 'resume' };
     if (!state.active || !isEnabled()) return { ok: false, error: '재생 화면이 아닙니다' };
     const shown = displayIndex();
@@ -1184,7 +1341,6 @@
     ui.list.addEventListener('mousedown', (e) => { if (e.offsetX > ui.list.clientWidth) markScroll(); });
     ui.foot = el('div', { class: 'st-foot' }, [
       el('button', { class: 'st-foot-btn', title: '단축키', onclick: () => showInfo('keys') }, '⌨ 단축키'),
-      el('button', { class: 'st-foot-btn', title: '두 번 보기 순서', onclick: () => showInfo('twoPass') }, '두 번 보기'),
       el('button', { class: 'st-foot-btn', title: '이 에피소드의 어휘 통계 (3천 밖 단어·말 속도)', onclick: showVocab }, '어휘 통계'),
       el('button', { class: 'st-foot-btn st-foot-words', title: '이 영상의 단어 목록 (어려운 단어부터 · 뜻 · 단어장 저장)', onclick: () => toggleWordView() }, '단어 목록'),
       el('button', { class: 'st-foot-btn st-foot-dub', title: '지금 자막으로 더빙 (R)', onclick: () => toggleDubBox() }, '🎙 더빙'),
@@ -1737,6 +1893,7 @@
       field('명료도 피드백 (실험적 · 인터넷 필요)', sw('dubFeedback'), 'dubFeedback'),
       el('h4', { text: '저장' }),
       field('별표 저장 시 오디오', f.audioMode, 'audioStore'),
+      field('에피소드를 재생하면 자동으로 오디오 MP3 녹음', sw('recAuto'), 'recFull'),
       field('문장 단위로 저장 (다음 자막으로 이어지면 함께)', sw('saveSentence'), 'saveSentence'),
       field('저장할 문장 고르기 (한 자막에 여러 문장일 때)', sw('savePick'), 'savePick'),
       field('MP3 꼬리 여유 (자막 끝 뒤 초, 0=끄기)', (f.saveTailSec = el('input', { type: 'number', min: 0, max: 10, step: 1, onchange: (e) => saveSettings({ saveTailSec: clamp(+e.target.value || 0, 0, 10) }) })), 'saveSentence'),
@@ -1761,6 +1918,7 @@
     f.koMode.value = settings.koMode || 'hold';
     f.cloze.value = settings.cloze || 'off';
     f.secondPass.checked = !!settings.secondPass; f.soundsLike.checked = !!settings.soundsLike; f.kiwiNotes.checked = !!settings.kiwiNotes; f.nzNotes.checked = settings.nzNotes !== false; f.vocabProfile.checked = !!settings.vocabProfile; renderLadderCfgExt();
+    f.recAuto.checked = !!settings.recAuto;
     f.saveSentence.checked = settings.saveSentence !== false; f.saveNextTexts.checked = settings.saveNextTexts !== false; f.savePick.checked = settings.savePick !== false;
     f.saveTailSec.value = String(clamp(+settings.saveTailSec || 0, 0, 10));
     f.fontScale.value = settings.fontScale;

@@ -3294,6 +3294,14 @@
     if (state.extOk) loadRecs();
     B.on('ready', () => { if (!state.extOk) { state.extOk = true; renderExtStatus(); loadStats().then(() => loadItems()); loadWords(); loadRecs(); } });
     B.on('items.changed', () => loadItems());
+    B.on('orphaned', () => {   // 확장 프로그램을 새로 불러와 이 페이지의 연결이 끊겼다 — 새로고침하면 새 버전으로 다시 붙는다
+      state.extOk = false;
+      if (document.querySelector('.ext-orphan')) return;
+      document.body.append(el('div', { class: 'ext-orphan' }, [
+        el('span', null, 'SubTutor 확장 프로그램이 새로 설치됐습니다 — 이 페이지를 새로고침하세요'),
+        el('button', { class: 'btn primary', onclick: () => location.reload() }, '새로고침'),
+      ]));
+    });
     B.on('words.changed', () => loadWords());
     setInterval(updateWordCount, 60000);
     $('#info-close').addEventListener('click', () => $('#info-dialog').close());

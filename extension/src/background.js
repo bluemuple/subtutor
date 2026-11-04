@@ -517,10 +517,10 @@ async function recStart(msg, tabId) {
       streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
     } catch (e) {
       const m = String((e && e.message) || e);
-      if (/not been invoked|activeTab|invoked|permission/i.test(m)) return { ok: false, unavailable: 'grant', error: m, shortcut: await saveShortcut() };
+      if (/not been invoked|activeTab|invoked|permission/i.test(m)) return { ok: false, unavailable: 'grant', error: m, shortcut: await saveShortcut(), recShortcut: await commandShortcut('rec-episode') };
       throw e;
     }
-    if (!streamId) return { ok: false, unavailable: 'grant', error: 'no stream id', shortcut: await saveShortcut() };
+    if (!streamId) return { ok: false, unavailable: 'grant', error: 'no stream id', shortcut: await saveShortcut(), recShortcut: await commandShortcut('rec-episode') };
   }
   const r = await offscreenCall({ cmd: 'recStart', streamId, test: msg.test });
   if (r && r.ok) recState = { tabId, title: msg.title || '', startedAt: r.startedAt || Date.now() };
@@ -576,16 +576,21 @@ function bytesToB64(bytes) {
 }
 // ───────── 호출(단축키·우클릭 메뉴) ─────────
 // 탭 오디오 캡처는 사용자가 이 탭에서 확장 프로그램을 '호출'해야 허용된다(activeTab, 크롬 규칙). 팝업(아이콘) 말고도 크롬 명령 단축키와 우클릭 메뉴가 같은 효과를 낸다
-async function saveShortcut() {
-  try { const c = (await chrome.commands.getAll()).find((x) => x.name === 'save-cue'); return (c && c.shortcut) || ''; } catch (e) { return ''; }
+async function commandShortcut(name) {
+  try { const c = (await chrome.commands.getAll()).find((x) => x.name === name); return (c && c.shortcut) || ''; } catch (e) { return ''; }
 }
-async function invokeOnTab(tab, source) {
+const saveShortcut = () => commandShortcut('save-cue');
+async function invokeOnTab(tab, source, action) {
   if (!tab || !Number.isInteger(tab.id)) return { ok: false, error: '탭 없음' };
   const shortcut = await saveShortcut();
-  try { return await chrome.tabs.sendMessage(tab.id, { type: 'invoke', source: source || 'command', shortcut }); } catch (e) { return { ok: false, error: '이 탭에서는 SubTutor가 실행 중이 아닙니다' }; }
+  try { return await chrome.tabs.sendMessage(tab.id, { type: 'invoke', source: source || 'command', shortcut, action: action || '' }); } catch (e) { return { ok: false, error: '이 탭에서는 SubTutor가 실행 중이 아닙니다' }; }
 }
 globalThis.__subtutorInvoke = invokeOnTab; // 테스트용
-if (chrome.commands) chrome.commands.onCommand.addListener((command, tab) => { if (command === 'save-cue') invokeOnTab(tab, 'command'); });
+// Alt+E: 지금 자막 저장 · Alt+R: 영상 오디오 통째 MP3 켜고 끄기 — 둘 다 누르는 순간 이 탭의 녹음 허용(activeTab)이 된다
+if (chrome.commands) chrome.commands.onCommand.addListener((command, tab) => {
+  if (command === 'save-cue') invokeOnTab(tab, 'command');
+  else if (command === 'rec-episode') invokeOnTab(tab, 'command', 'rec');
+});
 if (chrome.contextMenus) chrome.contextMenus.onClicked.addListener((info, tab) => { if (info.menuItemId === 'st-save-cue') invokeOnTab(tab, 'menu'); });
 
 // ───────── 자동 백업 ─────────

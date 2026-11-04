@@ -680,7 +680,7 @@ async function runSites() {
     await step('어휘 프로파일: 상태줄의 말 속도·3천 밖 비율, 어휘 목록 상자, 에피소드 통계', async () => {
       const status = await page.$eval('.st-status', (e) => e.textContent);
       assert(/wpm/.test(status) && /3천 밖 \d+%/.test(status), 'status with profile: ' + status);
-      await page.click('.st-foot-btn:nth-child(3)');
+      await page.evaluate(() => [...document.querySelectorAll('#st-panel .st-foot-btn')].find((b) => b.textContent.trim() === '어휘 통계').click());   // 순번이 아니라 글자로 (발치 버튼은 바뀔 수 있다)
       await waitFor(() => page.evaluate(() => { const b = document.querySelector('.st-infobox'); return b && !b.classList.contains('st-hidden') && /이 에피소드 어휘/.test(b.textContent) && document.querySelectorAll('.st-vocab-row').length >= 1; }), 4000, 'vocab box');
       const words = await page.$$eval('.st-vocab-row b', (els) => els.map((e) => e.textContent));
       assert(words.includes('frisbee'), 'beyond-3k words include frisbee: ' + words.join(','));
@@ -1594,6 +1594,52 @@ async function runSites() {
       const chipTitle = await yt.$eval('.st-chip', (c) => c.className + '|' + c.textContent + '|' + c.title).catch(() => '');
       assert(/st-chip-audio/.test(chipTitle) && /\|♪\|/.test(chipTitle) && /e2e-docs\/SubTutor/.test(chipTitle) && /MP3 는 이 파일 하나/.test(chipTitle), 'corner ♪ chip names the folder (no toast): ' + chipTitle);
       assert(!(await yt.evaluate(() => { const t = document.querySelector('.st-toast'); return t && t.classList.contains('show'); })), 'no toast after saving the MP3');
+    });
+
+    await step('유튜브(DRM 없음): 패널 발치에 "두 번 보기" 대신 ⏺ MP3 · 허용(아이콘) 없이 영상 요소에서 통째 MP3 · ⚙ "자동으로 오디오 MP3 녹음"을 켜면 재생 중에 알아서 담는다', async () => {
+      const recDirGone = () => opt.evaluate(async () => { try { const root = await navigator.storage.getDirectory(); const d = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); await d.removeEntry('영상 오디오', { recursive: true }); } catch (e) { /* 없음 */ } });
+      try {
+        const foot = await yt.$$eval('#st-panel .st-foot-btn', (els) => els.map((e) => e.textContent.trim()));
+        assert(!foot.some((t) => t === '두 번 보기') && foot.some((t) => t === '⏺ MP3'), '발치 버튼: ' + JSON.stringify(foot));
+        // ⚙ 저장 칸에 자동 녹음 스위치가 있다 (켜기 전에 확인만)
+        const autoRow = await yt.evaluate(() => { const lab = [...document.querySelectorAll('#st-panel .st-settings .st-field label')].find((l) => /자동으로 오디오 MP3 녹음/.test(l.textContent)); return lab ? !!lab.closest('.st-field').querySelector('input.st-switch') : null; });
+        assert(autoRow === true, '⚙ 저장에 자동 녹음 스위치가 있다: ' + autoRow);
+        // 허용 없이(탭 캡처 아님) 영상 요소에서 바로 담는다
+        await yt.evaluate(() => { const v = document.querySelector('video'); v.currentTime = 4; v.play(); });
+        await sleep(400);
+        await yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').click());
+        await waitFor(() => yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on')), 4000, 'recording starts without a grant');
+        assert(!(await yt.evaluate(() => { const c = document.querySelector('.st-chip'); return c && c.classList.contains('st-chip-wait') && c.classList.contains('show'); })), '허용 대기 칩이 뜨지 않는다');
+        await sleep(2600);
+        await yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').click());
+        const rec = await waitFor(async () => { const r = await sw.evaluate(async () => (await chrome.storage.local.get('recordings')).recordings || []); return r.length === 1 ? r[0] : null; }, 15000, 'element recording saved');
+        assert(/Mock Lecture Title/.test(rec.title) && rec.file.location === 'folder' && rec.durMs > 1800 && rec.durMs < 6000, '요소 캡처 녹음: ' + JSON.stringify({ title: rec.title, file: rec.file, durMs: rec.durMs }));
+        const bytes = await opt.evaluate(async (pth) => {
+          const root = await navigator.storage.getDirectory();
+          let dir = await root.getDirectoryHandle('e2e-docs');
+          const parts = pth.split('/').slice(1);
+          for (const seg of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(seg);
+          const f = await (await dir.getFileHandle(parts[parts.length - 1])).getFile();
+          const head = new Uint8Array(await f.slice(0, 2).arrayBuffer());
+          return { size: f.size, b0: head[0], b1: head[1] };
+        }, rec.file.path);
+        assert(bytes.size > 4000 && bytes.b0 === 0xff && (bytes.b1 & 0xe0) === 0xe0, '폴더의 MP3: ' + JSON.stringify(bytes));
+        // 자동 녹음: ⚙ 스위치를 켜면 재생 중인 에피소드를 알아서 담기 시작한다
+        await yt.evaluate(() => { const lab = [...document.querySelectorAll('#st-panel .st-settings .st-field label')].find((l) => /자동으로 오디오 MP3 녹음/.test(l.textContent)); lab.closest('.st-field').querySelector('input.st-switch').click(); });
+        await waitFor(() => sw.evaluate(async () => !!(((await chrome.storage.local.get('settings')).settings || {}).recAuto)), 4000, 'recAuto saved');
+        await yt.evaluate(() => { const v = document.querySelector('video'); if (v.paused) v.play(); });
+        await waitFor(() => yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on')), 6000, 'auto recording starts');
+        await sleep(1500);
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: false } }, {}));
+        await yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').click());
+        await waitFor(async () => (await sw.evaluate(async () => ((await chrome.storage.local.get('recordings')).recordings || []).length)) === 2, 15000, 'auto recording saved');
+      } finally {
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: false } }, {})).catch(() => {});
+        await yt.evaluate(() => { const b = document.querySelector('#st-panel .st-rec-btn'); if (b && b.classList.contains('st-on')) b.click(); document.querySelector('video').pause(); }).catch(() => {});
+        await sleep(800);
+        await sw.evaluate(() => chrome.storage.local.remove('recordings'));
+        await recDirGone();
+      }
     });
 
     console.log('▶ 웹사이트');
@@ -2925,6 +2971,21 @@ async function runSites() {
           await chrome.storage.local.set({ items: (items || []).filter((i) => i.id !== 'rec:show:1') });
         });
         await opt.evaluate(async () => { try { const root = await navigator.storage.getDirectory(); const d = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); await d.removeEntry('영상 오디오', { recursive: true }); } catch (e) { /* 없음 */ } });
+      }
+    });
+
+    await step('확장 프로그램을 다시 불러오면(⟳) 열려 있던 플레이어 탭과 웹 탭에 "새로고침" 안내가 뜬다', async () => {
+      const web2 = await browser.newPage();
+      try {
+        await web2.goto('http://localhost:8766/#/list', { waitUntil: 'load' });
+        await waitFor(() => web2.evaluate(() => !!document.documentElement.getAttribute('data-subtutor')), 6000, 'bridge attached');
+        await sw.evaluate(() => { setTimeout(() => chrome.runtime.reload(), 50); return true; }).catch(() => {});
+        await waitFor(() => yt.evaluate(() => { const b = document.querySelector('.st-orphan'); return b ? b.textContent : null; }), 10000, 'player tab orphan banner')
+          .then((t) => assert(/새로고침/.test(t), 'banner text ' + t));
+        await waitFor(() => web2.evaluate(() => { const b = document.querySelector('.ext-orphan'); return b ? b.textContent : null; }), 10000, 'web tab orphan banner')
+          .then((t) => assert(/새로고침/.test(t), 'web banner text ' + t));
+      } finally {
+        await web2.close().catch(() => {});
       }
     });
 
