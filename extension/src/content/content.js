@@ -36,6 +36,7 @@
     tailMs: 200,
     audioMode: 'off',           // off | store | download | both : 별표 저장 시 오디오 처리
     recAuto: false,             // 에피소드를 재생하면 자동으로 영상 오디오 통째 MP3 녹음
+    recAutoSync: true,          // 녹음을 마치면 바로 아이폰으로 올리기 (SubTutor 웹 탭이 올린다)
     saveSentence: true,         // 문장 단위 저장: 자막이 문장 중간에서 끝나면 문장이 끝나는 자막까지 묶어서 저장 (근거: lib/explain.js saveSentence)
     savePick: true,             // 한 자막에 문장이 여러 개면, 저장할 때 영상을 멈추고 어떤 문장을 저장할지 고른다 (뒷문장만도 가능)
     saveTailSec: 4,             // MP3 에 자막 끝 뒤 여유를 담는 초 (0~10) — 웹에서 구간을 늘려도 들을 소리가 파일에 있게
@@ -1900,6 +1901,7 @@
       el('h4', { text: '저장' }),
       field('별표 저장 시 오디오', f.audioMode, 'audioStore'),
       field('에피소드를 재생하면 자동으로 오디오 MP3 녹음', sw('recAuto'), 'recFull'),
+      field('녹음을 마치면 바로 아이폰으로 올리기', sw('recAutoSync'), 'recFull'),
       field('문장 단위로 저장 (다음 자막으로 이어지면 함께)', sw('saveSentence'), 'saveSentence'),
       field('저장할 문장 고르기 (한 자막에 여러 문장일 때)', sw('savePick'), 'savePick'),
       field('MP3 꼬리 여유 (자막 끝 뒤 초, 0=끄기)', (f.saveTailSec = el('input', { type: 'number', min: 0, max: 10, step: 1, onchange: (e) => saveSettings({ saveTailSec: clamp(+e.target.value || 0, 0, 10) }) })), 'saveSentence'),
@@ -1925,6 +1927,7 @@
     f.cloze.value = settings.cloze || 'off';
     f.secondPass.checked = !!settings.secondPass; f.soundsLike.checked = !!settings.soundsLike; f.kiwiNotes.checked = !!settings.kiwiNotes; f.nzNotes.checked = settings.nzNotes !== false; f.vocabProfile.checked = !!settings.vocabProfile; renderLadderCfgExt();
     f.recAuto.checked = !!settings.recAuto;
+    f.recAutoSync.checked = settings.recAutoSync !== false;
     f.saveSentence.checked = settings.saveSentence !== false; f.saveNextTexts.checked = settings.saveNextTexts !== false; f.savePick.checked = settings.savePick !== false;
     f.saveTailSec.value = String(clamp(+settings.saveTailSec || 0, 0, 10));
     f.fontScale.value = settings.fontScale;

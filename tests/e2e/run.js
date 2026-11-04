@@ -1691,6 +1691,38 @@ async function runSites() {
       const groups = await web.$$eval('.group-title', (els) => els.map((e) => e.textContent));
       assert(groups.some((g) => g.includes('Mock Show') && g.includes('S1:E2')), 'group ' + groups);
     });
+    await step('녹음을 마치면 바로 아이폰으로: 웹에 로그인돼 있으면 열린 웹 탭에 알려 올리게 하고, 아니면 조용히 둔다 (탭 수 그대로)', async () => {
+      await web.evaluate(() => { window.__recsSaved = 0; window.SubTutorBridge.on('recs.saved', () => { window.__recsSaved++; }); });
+      const tabCount = () => sw.evaluate(() => new Promise((r) => chrome.tabs.query({}, (t) => r(t.length))));
+      const recOnce = async (title) => {
+        const started = await sw.evaluate((tt) => globalThis.__subtutorHandle({ type: 'rec.start', test: 'sweep', title: tt }, { tab: { id: 779 } }), title);
+        assert(started && started.ok, 'rec start: ' + JSON.stringify(started));
+        await sleep(1300);
+        const saved = await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'rec.stop' }, {}));
+        assert(saved && saved.ok, 'rec saved: ' + JSON.stringify(saved));
+      };
+      try {
+        // ① 웹에 로그인돼 있지 않으면: 알리지도, 탭을 새로 열지도 않는다
+        await sw.evaluate(() => chrome.storage.local.set({ webLoggedIn: false }));
+        const t0 = await tabCount();
+        await recOnce('AutoSync A');
+        await sleep(900);
+        assert((await tabCount()) === t0, '로그인 전: 새 탭 없음');
+        assert((await web.evaluate(() => window.__recsSaved)) === 0, '로그인 전: 이벤트 없음');
+        // ② 웹이 supa.flag 로 로그인 상태를 알려 두면: 녹음이 끝나는 순간 열려 있는 웹 탭이 recs.saved 를 받는다
+        const fr = await web.evaluate(() => window.SubTutorBridge.request('supa.flag', { on: true }));
+        assert(fr && fr.ok, 'supa.flag ok: ' + JSON.stringify(fr));
+        await waitFor(() => sw.evaluate(async () => (await chrome.storage.local.get('webLoggedIn')).webLoggedIn === true), 4000, 'flag stored');
+        await recOnce('AutoSync B');
+        await waitFor(() => web.evaluate(() => window.__recsSaved >= 1), 6000, 'web tab notified right after save');
+        assert((await tabCount()) === t0, '열린 웹 탭을 쓰므로 탭 수 그대로');
+      } finally {
+        await sw.evaluate(() => chrome.storage.local.set({ webLoggedIn: false }));
+        await sw.evaluate(() => chrome.storage.local.remove('recordings'));
+        await opt.evaluate(async () => { try { const root = await navigator.storage.getDirectory(); const d = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); await d.removeEntry('영상 오디오', { recursive: true }); } catch (e) { /* 없음 */ } });
+      }
+    });
+
     await step('자막/뜻은 기본으로 감춰지고, 항목별·전체 토글로 보이거나 다시 감춘다', async () => {
       const veiled = await web.$$eval('.item', (els) => els.map((e) => e.classList.contains('veil-text') && e.classList.contains('veil-ko')));
       assert(veiled.length === 3 && veiled.every(Boolean), 'all veiled by default: ' + veiled);

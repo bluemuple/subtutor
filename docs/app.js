@@ -2389,6 +2389,14 @@
     supa.userId = (j.user && j.user.id) || supa.userId || '';
     supa.exp = Date.now() + Math.max(60, (j.expires_in || 3600) - 60) * 1000;
     if (j.refresh_token) { supa.refresh = j.refresh_token; try { localStorage.setItem('st.supaRefresh', j.refresh_token); } catch (e) { /* ignore */ } }
+    supaFlag(true);
+  }
+  // 확장 프로그램에 로그인 여부를 알려 둔다 — 녹음을 마쳤을 때 올릴 수 있는지 판단용
+  let supaFlagLast = null;
+  function supaFlag(on) {
+    if (!state.extOk || supaFlagLast === on) return;
+    supaFlagLast = on;
+    B.request('supa.flag', { on: !!on }).catch(() => { supaFlagLast = null; });
   }
   // 로그인 유지: 저장해 둔 refresh 토큰으로 조용히 다시 로그인한다 (만료 전이면 그대로)
   async function supaEnsureToken() {
@@ -2402,6 +2410,7 @@
     if (!supa.token) throw new Error('로그인이 풀렸습니다 — 다시 로그인하세요');
   }
   function supaSignOut() {
+    supaFlag(false);
     supa.token = null; supa.userId = null; supa.refresh = ''; supa.exp = 0;
     localStorage.removeItem('st.supaRefresh');
   }
@@ -2507,6 +2516,19 @@
   async function loadRecs() {
     try { state.recs = ((await B.request('recs.list')) || {}).recs || []; } catch (e) { state.recs = []; }
     if (state.view === 'list') render();
+    recsAutoUpload();
+  }
+  let recsAutoBusy = false;
+  async function recsAutoUpload() {
+    if (recsAutoBusy || !supa.auto || !supa.refresh || supa.busy) return;
+    if (!state.recs.some((r) => !r.sent && !r.skip && recReadable(r))) return;
+    recsAutoBusy = true;
+    try {
+      const r = await recsUpload();
+      if (r.ok) toast('영상 오디오 ' + r.ok + '개를 아이폰으로 올렸습니다');
+      if (state.view === 'list') render();
+    } catch (e) { /* 다음 자동 동기화 때 */ }
+    recsAutoBusy = false;
   }
   // 읽을 수 있는 녹음: 지정 폴더의 파일, 또는 확장 프로그램이 자기 저장소에 둔 복사본 (다운로드 폴더로 간 녹음)
   const recReadable = (r) => !!(r && r.file && (r.file.location === 'folder' || r.file.opfs));
@@ -3329,6 +3351,8 @@
     if (state.extOk) loadRecs();
     B.on('ready', () => { if (!state.extOk) { state.extOk = true; renderExtStatus(); loadStats().then(() => loadItems()); loadWords(); loadRecs(); } });
     B.on('items.changed', () => loadItems());
+    B.on('recs.saved', () => loadRecs());   // 확장 프로그램이 녹음을 마쳤다 — 바로 아이폰으로 올린다 (자동 동기화가 켜져 있으면)
+    if (supa.refresh) setTimeout(() => supaFlag(true), 1500);   // 로그인해 둔 상태를 확장 프로그램에 알린다 (extOk 가 잡힌 뒤)
     B.on('orphaned', () => {   // 확장 프로그램을 새로 불러와 이 페이지의 연결이 끊겼다 — 새로고침하면 새 버전으로 다시 붙는다
       state.extOk = false;
       if (document.querySelector('.ext-orphan')) return;

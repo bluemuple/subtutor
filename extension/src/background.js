@@ -9,7 +9,7 @@ const Sites = globalThis.SubTutorSites;
 const SITE_URL = 'https://bluemuple.github.io/subtutor/';
 const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
-  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', saveSentence: true, savePick: true, saveTailSec: 4, saveNextTexts: true, recAuto: false, enabled: {},
+  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', saveSentence: true, savePick: true, saveTailSec: 4, saveNextTexts: true, recAuto: false, recAutoSync: true, enabled: {},
   audioDirName: '', // 사용자가 고른 오디오 저장 폴더 이름 (핸들은 IndexedDB). 비어 있으면 다운로드 폴더
   koMode: 'hold', koRepeats: 3, secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, nzNotes: true, vocabProfile: true, missedTag: '못 알아들음',
   web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1], fastRates: [1, 1.25, 1.5, 1] },
@@ -563,8 +563,27 @@ async function recSave(meta) {
   recs.push({ id: recId, title, at: Date.now(), durMs: out.durMs, bytes: out.bytes,
     file: { location: out.location, path: out.fileName, downloadId: out.downloadId || 0, opfs }, sent: 0, skip: false });
   await setRecs(recs);
+  notifyRecSync();   // 설정이 켜져 있으면(기본) 웹이 바로 아이폰으로 올린다
   return out;
 }
+// 녹음을 마치면 바로 아이폰으로: 열려 있는 SubTutor 웹 탭에 알리고(웹이 Supabase 로 올린다),
+// 없으면 뒤쪽에 탭을 하나 연다. 웹에 로그인돼 있을 때만 (웹이 supa.flag 로 알려 둔다)
+const SITE_TAB_URLS = [SITE_URL + '*', 'http://localhost/*', 'http://127.0.0.1/*'];
+async function notifyRecSync() {
+  try {
+    const settings = await getSettings();
+    if (settings.recAutoSync === false) return;
+    const { webLoggedIn } = await chrome.storage.local.get('webLoggedIn');
+    if (!webLoggedIn) return;
+    const tabs = await chrome.tabs.query({ url: SITE_TAB_URLS });
+    if (tabs.length) {
+      for (const t of tabs) chrome.tabs.sendMessage(t.id, { type: 'web.event', event: 'recs.saved' }).catch(() => {});
+    } else {
+      await chrome.tabs.create({ url: SITE_URL, active: false });   // 열리면 웹이 알아서 올린다
+    }
+  } catch (e) { /* 올리기는 다음 자동 동기화 때 */ }
+}
+
 // ── 영상 오디오 녹음 목록 (chrome.storage) + 웹 브리지 ──
 async function getRecs() { return ((await chrome.storage.local.get('recordings')).recordings) || []; }
 async function setRecs(recs) { await chrome.storage.local.set({ recordings: recs.slice(-200) }); }
@@ -888,6 +907,7 @@ async function handleMessage(msg, sender) {
     });
     case 'openSite': await openSite(); return { ok: true };
     case 'commands.get': return { save: await saveShortcut(), rec: await commandShortcut('rec-episode') };
+    case 'web.supa.flag': await chrome.storage.local.set({ webLoggedIn: !!p.on }); return { ok: true };   // 웹의 로그인 여부 — 녹음 뒤 자동 올리기 판단용
     case 'openOptions': await chrome.runtime.openOptionsPage(); return { ok: true };
     case 'audioDir.status': return audioDirStatus();
     case 'backup.now': case 'web.backup.now': return doBackup();
