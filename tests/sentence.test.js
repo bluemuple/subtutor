@@ -87,3 +87,35 @@ test('sentenceSplit: 큰따옴표 인용은 한 덩어리로 (홀수면 다음 �
 test('sentenceSplit: 빈 자막은 빈 배열', () => {
   assert.deepEqual(Sp.sentenceSplit(''), []);
 });
+
+test('sentenceSplit: 호칭·이니셜의 점은 문장 끝이 아니다 (Mr. Mrs. Ms. Dr. Det. vs. J.)', () => {
+  assert.deepEqual(Sp.sentenceSplit('Okay, now I want everyone to be looking at Ms. D,'), ['Okay, now I want everyone to be looking at Ms. D,']);
+  assert.deepEqual(Sp.sentenceSplit('Mr. and Mrs. Smith are here. Sit down.'), ['Mr. and Mrs. Smith are here.', 'Sit down.']);
+  assert.deepEqual(Sp.sentenceSplit('Dr. J. Watson called. He left.'), ['Dr. J. Watson called.', 'He left.']);
+  assert.deepEqual(Sp.sentenceSplit('Det. Sgt. Lee is here.'), ['Det. Sgt. Lee is here.']);
+  assert.deepEqual(Sp.sentenceSplit('Tom vs. Jerry. Classic.'), ['Tom vs. Jerry.', 'Classic.']);
+});
+
+test('sentenceSplit: 애매한 약어(a.m. etc. U.S.)는 다음 말이 소문자일 때만 잇는다', () => {
+  assert.deepEqual(Sp.sentenceSplit('Meet me at 9 a.m. tomorrow. Bye.'), ['Meet me at 9 a.m. tomorrow.', 'Bye.']);
+  assert.deepEqual(Sp.sentenceSplit('It starts at 9 a.m. Let us go.'), ['It starts at 9 a.m.', 'Let us go.']);
+  assert.deepEqual(Sp.sentenceSplit('apples, pears, etc. are fine. Next.'), ['apples, pears, etc. are fine.', 'Next.']);
+  assert.deepEqual(Sp.sentenceSplit('The U.S. team won. Great!'), ['The U.S. team won.', 'Great!']);
+});
+
+test('sentenceSplit: 짧은 문장 끝(No. · He sat. · It was I.)은 그대로 나누고, 소수점은 글자를 잃지 않는다', () => {
+  assert.deepEqual(Sp.sentenceSplit("No. I don't think so."), ['No.', "I don't think so."]);
+  assert.deepEqual(Sp.sentenceSplit('He sat. Then he left.'), ['He sat.', 'Then he left.']);
+  assert.deepEqual(Sp.sentenceSplit('It was I. You know it.'), ['It was I.', 'You know it.']);
+  assert.deepEqual(Sp.sentenceSplit('It costs 3.14 dollars. Okay?'), ['It costs 3.14 dollars.', 'Okay?']);
+  // 나눈 조각을 다시 이으면 원문 그대로 (글자 손실 없음)
+  const t = 'It costs $9.99, Mr. Lee. Is that OK? Sure... fine.';
+  assert.equal(Sp.sentenceSplit(t).join(' '), t);
+});
+
+test('sentenceComplete: 호칭·이니셜로 끝난 자막은 이름이 다음 자막에 있으니 미완결', () => {
+  assert.equal(Sp.sentenceComplete('Okay, now I want everyone to be looking at Ms.'), false);
+  assert.equal(Sp.sentenceComplete('This is Dr.'), false);
+  assert.equal(Sp.sentenceComplete('It was I.'), true);
+  assert.equal(Sp.sentenceComplete('We are done.'), true);
+});

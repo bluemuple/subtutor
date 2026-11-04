@@ -20,26 +20,52 @@
     const lines = String(text || '').split('\n').map((x) => x.trim()).filter(Boolean);
     const last = lines[lines.length - 1] || '';
     if (!last) return true;                      // 빈 자막은 묶지 않는다
+    if (TITLE_ABBR.test(last) || INITIAL.test(last)) return false;   // "… looking at Ms." 처럼 호칭·이니셜로 끝나면 이름이 다음 자막에
     if (SENT_END.test(last)) return true;
     if (/[♪♫]\s*$/.test(last)) return true;   // ♪ 노래 줄
     return false;                                 // 쉼표·구두점 없음 등 — 다음 자막으로 이어진다
   }
-  // 한 자막 안에서 문장 나누기: 끝 구두점(닫는 따옴표·괄호 허용) + 공백 기준.
+  // 마침표(.)가 문장 끝이 아닌 경우 — 여기서 자르지 않고 다음 조각과 잇는다
+  //  · 호칭·직함(항상 이름이 따라온다): Mr. Mrs. Ms. Dr. Prof. St. Jr. Det. Capt. Sgt. … · vs.
+  //  · 이니셜: 대문자 한 글자 + 점 (J. Smith) — 단 대명사 I 는 제외
+  //  · 애매한 약어(문장 끝일 수도 있다): etc. a.m. p.m. e.g. i.e. U.S. Inc. … → 다음 조각이 소문자·숫자로 시작할 때만 잇는다
+  //  · 숫자 소수점(3.14, $9.99)은 애초에 자르지 않는다 (점 뒤가 공백이 아니므로)
+  const TITLE_ABBR = /(^|[\s(\["'\u201c\u2018-])(mr|mrs|ms|mx|dr|prof|st|sr|jr|mt|rev|hon|fr|gen|col|capt|cpt|sgt|lt|maj|cpl|pvt|adm|cmdr|det|insp|supt|gov|pres|sen|vs)\.$/i;
+  const SOFT_ABBR = /(^|[\s(\["'\u201c\u2018-])(etc|approx|inc|ltd|co|corp|dept|est|al|cf)\.$/i;
+  const LETTER_DOTS = /(^|[\s(\[])(?:[A-Za-z]\.){2,}$/;          // a.m. p.m. e.g. i.e. U.S. U.K. N.Z.
+  const INITIAL = /(^|[\s(\["'\u201c\u2018-])(?!I\.)[A-Z]\.$/;   // J. — 대명사 I 는 문장 끝일 수 있어 제외
+  // 이 조각 뒤에서 문장이 끝나지 않았다고 볼 것인가 (next: 다음 조각)
+  function continuesAfter(piece, next) {
+    const w = String(piece || '').trim();
+    if (TITLE_ABBR.test(w) || INITIAL.test(w)) return true;
+    if (SOFT_ABBR.test(w) || LETTER_DOTS.test(w)) return next != null && /^[\s"'\u201c\u2018(]*[a-z0-9]/.test(next);
+    return false;
+  }
+  // 한 자막 안에서 문장 나누기: 끝 구두점(닫는 따옴표·괄호 허용) 뒤에 공백·끝이 오는 자리에서만 자른다.
+  // 자른 자리 사이를 그대로 잘라 내므로 글자를 잃지 않는다 (예전 정규식은 "3.14" 같은 소수점이 있으면 앞부분을 잃었다).
   // 큰따옴표가 홀수로 남으면 인용이 끊긴 것이므로 다음 조각과 합친다 ("Really? Let's go." 는 한 덩어리).
   function sentenceSplit(text) {
     const t = String(text || '').replace(/\s+/g, ' ').trim();
     if (!t) return [];
-    const raw = t.match(/[^.!?…]*[.!?…]+[\u201d\u2019"')\u00bb\u203a\]]*(?:\s+|$)|[^.!?…]+$/g) || [t];
-    const openQuote = (s) => {
-      const dq = (s.match(/"/g) || []).length % 2 === 1;
-      const curly = ((s.match(/\u201c/g) || []).length !== (s.match(/\u201d/g) || []).length);
+    const raw = [];
+    const re = /[.!?\u2026]+[\u201d\u2019"')\u00bb\u203a\]]*(?=\s|$)/g;
+    let last = 0, m;
+    while ((m = re.exec(t))) {
+      const endAt = m.index + m[0].length;
+      raw.push(t.slice(last, endAt).trim());
+      last = endAt;
+    }
+    if (last < t.length) raw.push(t.slice(last).trim());
+    const openQuote = (x) => {
+      const dq = (x.match(/"/g) || []).length % 2 === 1;
+      const curly = ((x.match(/\u201c/g) || []).length !== (x.match(/\u201d/g) || []).length);
       return dq || curly;
     };
     const out = [];
-    for (const piece of raw) {
-      const p = piece.trim();
+    for (const p of raw) {
       if (!p) continue;
-      if (out.length && openQuote(out[out.length - 1])) out[out.length - 1] += ' ' + p;
+      const prev = out[out.length - 1];
+      if (prev != null && (openQuote(prev) || continuesAfter(prev, p))) out[out.length - 1] = prev + ' ' + p;
       else out.push(p);
     }
     return out;
