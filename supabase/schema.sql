@@ -110,3 +110,8 @@ alter table public.speak_takes enable row level security;
 drop policy if exists "own speak_takes" on public.speak_takes;
 create policy "own speak_takes" on public.speak_takes
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- ── 장면 썸네일 (2026-11-04) ────────────────────────────────────────────────
+-- 자막을 저장할 때 그 장면을 가로 150px JPEG(data URL, 4~8KB)로 함께 둔다 — 아이폰 목록에서도 보인다.
+-- 이미 프로젝트를 만든 뒤라면 이 한 줄만 SQL Editor 에서 실행하면 된다. (실행 전에는 웹이 알아서 썸네일 없이 올린다)
+alter table items add column if not exists thumb text not null default '';

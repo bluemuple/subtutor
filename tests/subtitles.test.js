@@ -234,3 +234,16 @@ test('YouTube json3 ASR: append events dropped, overlapping ends clamped', () =>
   const unclamped = S.parseJson3(JSON3_ASR).cues;
   assert.equal(unclamped[0].end, 7000);
 });
+
+test('peekVeil: 1·6·11번째 단어만 보이고 나머지는 █, 짧으면 첫 단어만', () => {
+  const out = S.peekVeil('Could you cover Room 7 after morning tea today mate');
+  const words = out.split(' ');
+  assert.equal(words.length, 10);
+  assert.equal(words[0], 'Could');
+  assert.equal(words[5], 'after');
+  assert.ok(words[1].startsWith('█') && words[2].startsWith('█') && words[9].startsWith('█'));
+  assert.equal(words[4], '██');                      // "7" 처럼 짧은 단어도 최소 2칸
+  assert.equal(S.peekVeil('Sweet as, bro.').split(' ')[0], 'Sweet');   // 짧은 자막: 첫 단어만 보인다
+  assert.ok(S.peekVeil('Sweet as, bro.').split(' ').slice(1).every((w) => /^█+$/.test(w)));
+  assert.equal(S.peekVeil('  '), '');
+});

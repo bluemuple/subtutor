@@ -20,13 +20,14 @@ struct Item: Codable, Identifiable, Hashable {
     var hasAudio: Bool             // 서버에 MP3 가 있는가
     var audioMs: Int64
     var tags: [String]             // 웹·아이폰 공통 태그 (아이폰에서 바꾸면 서버로 올리고, 웹이 다음 동기화 때 받아 간다)
+    var thumb: String = ""         // 저장 때 찍은 장면 썸네일 (가로 150px JPEG data URL — DRM 사이트는 비어 있다)
 
     enum CodingKeys: String, CodingKey {
         case id, title, episode, platform, text, translation
         case startMs = "start_ms", endMs = "end_ms", savedAt = "saved_at"
         case box, comment, missed
         case missReason = "miss_reason", hasAudio = "has_audio", audioMs = "audio_ms"
-        case tags
+        case tags, thumb
     }
 
     init(from decoder: Decoder) throws {
@@ -47,6 +48,7 @@ struct Item: Codable, Identifiable, Hashable {
         hasAudio = (try? c.decode(Bool.self, forKey: .hasAudio)) ?? false
         audioMs = (try? c.decode(Int64.self, forKey: .audioMs)) ?? 0
         tags = (try? c.decode([String].self, forKey: .tags)) ?? []
+        thumb = (try? c.decode(String.self, forKey: .thumb)) ?? ""
     }
 
     // 서버 storage 파일 이름 (웹 업로드 쪽과 같은 규칙이어야 한다)
@@ -57,6 +59,17 @@ struct Item: Codable, Identifiable, Hashable {
     var timeText: String {
         let s = max(0, startMs) / 1000
         return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+// 가릴 때 띄엄띄엄 보이기: 1·6·11…번째 단어만 남기고 나머지는 █ (웹 subtitles.js 의 peekVeil 과 같은 규칙 — 짧은 자막은 첫 단어만)
+enum Veil {
+    static func peek(_ s: String) -> String {
+        let words = s.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard !words.isEmpty else { return "" }
+        return words.enumerated().map { i, w in
+            i % 5 == 0 ? w : String(repeating: "█", count: min(max(w.count, 2), 6))
+        }.joined(separator: " ")
     }
 }
 
@@ -84,6 +97,8 @@ final class Store: ObservableObject {
     // 표시·재생 취향
     @Published var veilText: Bool { didSet { UserDefaults.standard.set(veilText, forKey: "veilText") } }
     @Published var veilKo: Bool { didSet { UserDefaults.standard.set(veilKo, forKey: "veilKo") } }
+    @Published var veilPeek: Bool { didSet { UserDefaults.standard.set(veilPeek, forKey: "veilPeek") } }       // 가릴 때 단어 띄엄띄엄 보이기
+    @Published var showThumbs: Bool { didSet { UserDefaults.standard.set(showThumbs, forKey: "showThumbs") } } // 장면 썸네일 모두 보이기/감추기
     @Published var rate: Double { didSet { UserDefaults.standard.set(rate, forKey: "rate") } }
     @Published var lineRepeats: Int { didSet { UserDefaults.standard.set(lineRepeats, forKey: "lineRepeats") } }   // 연속 듣기에서 한 대사를 몇 번씩
     @Published var gapMs: Int { didSet { UserDefaults.standard.set(gapMs, forKey: "gapMs") } }                     // 대사 사이 쉼
@@ -101,6 +116,8 @@ final class Store: ObservableObject {
         let d = UserDefaults.standard
         veilText = d.object(forKey: "veilText") as? Bool ?? false
         veilKo = d.object(forKey: "veilKo") as? Bool ?? true
+        veilPeek = d.object(forKey: "veilPeek") as? Bool ?? false
+        showThumbs = d.object(forKey: "showThumbs") as? Bool ?? true
         rate = d.object(forKey: "rate") as? Double ?? 1.0
         lineRepeats = d.object(forKey: "lineRepeats") as? Int ?? 1
         gapMs = d.object(forKey: "gapMs") as? Int ?? 400

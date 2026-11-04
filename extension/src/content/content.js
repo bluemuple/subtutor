@@ -800,6 +800,26 @@
       savedAt: Date.now(), box: 'learning', comment: '', reviews: 0, forgot: 0,
     };
   }
+  // 저장 순간의 장면 썸네일 (가로 150px JPEG, 4~8KB). 보호된 재생(DRM)은 디코더가 픽셀을 주지 않아
+  // 검게 나오거나 막히므로(크기를 줄여도 같다) 조용히 건너뛴다. CORS 없는 다른 출처 mp4 도 canvas 가 잠겨 건너뛴다
+  function captureThumb() {
+    try {
+      const v = adapter.video();
+      if (!v || !v.videoWidth || v.readyState < 2) return null;
+      const w = 150, h = Math.max(2, Math.round((v.videoHeight / v.videoWidth) * 150));
+      const cv = document.createElement('canvas');
+      cv.width = w;
+      cv.height = h;
+      const ctx = cv.getContext('2d');
+      ctx.drawImage(v, 0, 0, w, h);
+      const d = ctx.getImageData(0, 0, w, h).data;
+      let lit = 0;
+      for (let k = 0; k < d.length; k += 64) if (d[k] + d[k + 1] + d[k + 2] > 24) lit++;
+      if (lit < (d.length / 64) * 0.02) return null;   // 사실상 전부 검정 — 버린다
+      return cv.toDataURL('image/jpeg', 0.6);
+    } catch (e) { return null; }
+  }
+
   async function toggleSave(i) {
     const c = state.cues[i];
     if (!c) return;
@@ -814,6 +834,8 @@
         const picked = await pickSentences(i); // 문장이 여러 개면 영상을 멈추고 고른다 (아니면 바로 null)
         if (picked === false) return;          // 취소
         const item = buildItem(c, i, picked);
+        const thumb = captureThumb();   // 이 장면의 작은 썸네일 (DRM·프레임 없음이면 없음)
+        if (thumb) item.thumb = thumb;
         state.saved.set(id, item);
         refreshSavedMarks(); renderOverlay(true);
         await bg({ type: 'items.save', item });

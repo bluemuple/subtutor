@@ -500,3 +500,7 @@ input.rate:focus { outline: none; color: var(--accent2); }
 .supa-storage-body h4 { margin: 12px 0 4px; }
 .supa-obj { align-items: center; gap: 8px; }
 .supa-obj .supa-obj-name { font-weight: 600; }
+
+/* 저장 때 찍은 장면 썸네일 (가로 150px 로 저장 — 표시도 그 크기) */
+/* 자리를 16:9 로 미리 잡는다 — data URL 이미지는 다시 그릴 때마다 비동기로 풀려, 안 잡으면 목록이 아래로 출렁이고 누르려던 버튼이 밀린다 */
+.item .thumb { display: block; width: 150px; max-width: 42%; aspect-ratio: 16 / 9; height: auto; object-fit: cover; background: var(--card2); border-radius: 8px; border: 1px solid var(--line); margin: 2px 0 6px; }

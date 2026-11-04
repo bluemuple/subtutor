@@ -28,6 +28,7 @@
     items: [], extOk: false, view: 'list',
     filterTitle: '', search: '', sort: loadPref('subtutor.sort', 'group-time'), filterTag: '',
     recs: [],                             // 익스텐션이 뽑은 영상 오디오(통째 MP3) 목록 — 맥 폴더에 있는 파일
+    thumbsOn: localStorage.getItem('st.thumbs') !== '0',   // 저장 때 찍은 장면 썸네일 모두 보이기/감추기
     tagNames: [],                         // 저장된 태그 이름 (확장 프로그램 설정 tagNames ∪ 항목들의 태그)
     trimOpen: null,                       // 구간 조정 슬라이더가 열린 항목
     web: Object.assign({}, WEB_DEFAULTS),  // 웹 학습 기능 켜기/끄기 (확장 프로그램 설정 web 에 저장)
@@ -967,6 +968,7 @@
     saveHide();
     syncVeils();
   }
+  const veilPeekOn = () => localStorage.getItem('st.veilPeek') === '1';   // 가릴 때 1·6·11…번째 단어만 보이기
   function setItemVeil(id, field, hidden) {
     const o = state.reveal.get(id) || {};
     o[field] = !hidden;
@@ -1657,7 +1659,14 @@
     const editUi = buildEditUi(items, body, () => lastFiltered);
     editSync = editUi.sync;
     wrap.classList.toggle('editing', state.edit.on);
-    const viewCtl = state.edit.on ? [] : [infoBtn('sort'), hideBtn('text'), hideBtn('ko'), infoBtn('veil'), repeatButton(), infoBtn('repeat')]; // 편집 중에는 자리를 비워 한 줄에 들어가게
+    const thumbBtn = el('button', { class: 'btn thumb-toggle' + (state.thumbsOn ? ' on' : ''), title: '저장 때 찍은 장면 썸네일을 모두 보이거나 감춥니다', onclick: (e) => {
+      state.thumbsOn = !state.thumbsOn;
+      try { localStorage.setItem('st.thumbs', state.thumbsOn ? '1' : '0'); } catch (e) { /* ignore */ }
+      e.target.textContent = state.thumbsOn ? '🖼 썸네일 감추기' : '🖼 썸네일 보이기';
+      e.target.classList.toggle('on', state.thumbsOn);
+      renderBody();
+    } }, state.thumbsOn ? '🖼 썸네일 감추기' : '🖼 썸네일 보이기');
+    const viewCtl = state.edit.on ? [] : [infoBtn('sort'), hideBtn('text'), hideBtn('ko'), thumbBtn, infoBtn('veil'), repeatButton(), infoBtn('repeat')]; // 편집 중에는 자리를 비워 한 줄에 들어가게
     if (kind === 'learning' && !state.edit.on) { const tc = todayCard(); if (tc) wrap.append(tc); } // 첫 화면 맨 위: 오늘의 훈련
     wrap.append(buildTagBar(renderBody), el('div', { class: 'toolbar' }, [sel, search, sort].concat(viewCtl, [countEl, el('span', { class: 'spacer' }), editButton(), editUi.bar])), body);
     renderBody();
@@ -1681,10 +1690,13 @@
         el('button', { class: 'btn mini vis-ko', title: '이 대사의 뜻 보기/감추기', onclick: () => setItemVeil(it.id, 'ko', !isVeiled(it.id, 'ko')) }, '뜻'),
         rates.length ? el('span', { class: 'rate-btns' }, rates) : null,
       ]),
+      it.thumb && state.thumbsOn ? el('img', { class: 'thumb', src: it.thumb, alt: '', title: '저장 때 찍은 장면' }) : null,
       el('div', { class: 'en', text: it.text }),
-      el('button', { class: 'veil veil-text-btn', title: '자막 보기', onclick: () => setItemVeil(it.id, 'text', false) }, '자막 감춤 · 눌러서 보기'),
+      el('button', { class: 'veil veil-text-btn', title: '자막 보기', onclick: () => setItemVeil(it.id, 'text', false) },
+        veilPeekOn() ? S.peekVeil(it.text) : '자막 감춤 · 눌러서 보기'),
       el('div', { class: 'ko', text: it.translation || '' }),
-      el('button', { class: 'veil veil-ko-btn', title: '뜻 보기', onclick: () => setItemVeil(it.id, 'ko', false) }, '뜻 감춤 · 눌러서 보기'),
+      el('button', { class: 'veil veil-ko-btn', title: '뜻 보기', onclick: () => setItemVeil(it.id, 'ko', false) },
+        veilPeekOn() && it.translation ? S.peekVeil(it.translation) : '뜻 감춤 · 눌러서 보기'),
       el('div', { class: 'meta' }, [
         opts.showWork ? el('span', { class: 'work' }, it.title + ' (' + platformName(it.platform) + ')' + (it.episode ? ' · ' + it.episode : '')) : null,
         el('span', { class: 'span' }, timeText(it)),
@@ -2196,6 +2208,10 @@
       el('section', null, [
         el('h3', null, '화면'),
         el('div', { class: 'row' }, [el('label', null, ['테마 ', el('select', { class: 'theme-sel', onchange: (e) => setTheme(e.target.value) }, THEMES.map(([v, t]) => el('option', { value: v, selected: state.theme === v }, t)))])]),
+        el('label', { class: 'switch-row' }, [
+          el('span', null, '가릴 때 단어 띄엄띄엄 보이기 — 1개 보이고 4개 가림 (장면 짐작용, 짧은 자막은 첫 단어만)'),
+          el('input', { type: 'checkbox', class: 'switch veil-peek', checked: veilPeekOn(), onchange: (e) => { try { localStorage.setItem('st.veilPeek', e.target.checked ? '1' : '0'); } catch (err) { /* ignore */ } render(); } }),
+        ]),
       ]),
       el('section', null, [
         el('h3', null, '통계'),
@@ -2421,8 +2437,18 @@
       box: it.box || 'learning', comment: it.comment || '', tags: it.tags || [],
       missed: !!it.missed, miss_reason: it.missReason || '',
       has_audio: supaUploaded.has(it.id), audio_ms: supaUploaded.has(it.id) ? Math.max(0, Math.round((r.endMs || 0) - (r.startMs || 0))) : 0,
+      thumb: it.thumb || '',
     }; });
-    if (rows.length) await supaFetch('/rest/v1/items', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' }, H), body: JSON.stringify(rows) });
+    if (rows.length) {
+      const post = () => supaFetch('/rest/v1/items', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' }, H), body: JSON.stringify(rows) });
+      try { await post(); }
+      catch (e) {
+        const m = String((e && e.message) || e);
+        if (!/thumb/i.test(m)) throw e;
+        rows.forEach((x) => { delete x.thumb; });   // 서버에 thumb 열이 아직 없다(schema.sql 의 썸네일 줄 미실행) — 열 없이 올린다
+        await post();
+      }
+    }
     const nextBase = {};
     for (const r of rows) nextBase[r.id] = { t: r.tags, b: r.box };
     saveSupaBase(nextBase);   // 다음 받아 오기의 기준 = 방금 올린 값

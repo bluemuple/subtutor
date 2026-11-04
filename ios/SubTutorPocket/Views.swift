@@ -372,6 +372,11 @@ struct RootView: View {
                         .font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
                         .background(Capsule().fill(Color.secondary.opacity(0.15)))
                 }
+                Button { Haptic.tap(); store.showThumbs.toggle() } label: {   // 장면 썸네일 모두 보이기/감추기
+                    Label(store.showThumbs ? "썸네일" : "썸네일 꺼짐", systemImage: store.showThumbs ? "photo" : "eye.slash")
+                        .font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                }
                 Button { showWorkPicker = true } label: {
                     Label(workLabel, systemImage: "film").lineLimit(1).frame(maxWidth: 190)
                         .font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
@@ -507,14 +512,22 @@ struct ItemRow: View {
                     if showWork {
                         Text(item.title + (item.episode.isEmpty ? "" : " · " + item.episode)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                     }
+                    if store.showThumbs, let ui = ThumbCache.image(item) {   // 저장 때 찍은 장면
+                        Image(uiImage: ui)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 150)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
                     if store.veilText && !revealText {
-                        Text("자막 가림 — 길게 눌러 보기").font(.subheadline).foregroundStyle(.secondary).italic()
+                        Text(store.veilPeek ? Veil.peek(item.text.replacingOccurrences(of: "\n", with: " ")) : "자막 가림 — 길게 눌러 보기")
+                            .font(.subheadline).foregroundStyle(.secondary).italic()
                     } else {
                         Text(item.text.replacingOccurrences(of: "\n", with: " ")).font(.body.weight(.medium))
                     }
                     if !item.translation.isEmpty {
                         if store.veilKo && !revealKo {
-                            Text("뜻 가림").font(.caption2).foregroundStyle(.tertiary).italic()
+                            Text(store.veilPeek ? Veil.peek(item.translation) : "뜻 가림").font(.caption2).foregroundStyle(.tertiary).italic()
                                 .onTapGesture { Haptic.tap(); revealKo = true }
                         } else {
                             Text(item.translation).font(.subheadline).foregroundStyle(.orange)
@@ -879,10 +892,11 @@ struct SettingsView: View {
                 Section {
                     Toggle("자막 가리기", isOn: $store.veilText)
                     Toggle("뜻 가리기", isOn: $store.veilKo)
+                    Toggle("가릴 때 단어 띄엄띄엄 보이기", isOn: $store.veilPeek)
                 } header: {
                     Text("표시")
                 } footer: {
-                    Text("가린 대사를 길게 누르면 자막과 뜻이 보이고, 다시 길게 누르면 도로 가려집니다(누를 때 진동). \"뜻 가림\"은 눌러서 뜻만 볼 수도 있습니다. 가리기를 다시 켜면 열어 둔 대사도 모두 다시 가려집니다.")
+                    Text("가린 대사를 길게 누르면 자막과 뜻이 보이고, 다시 길게 누르면 도로 가려집니다(누를 때 진동). \"뜻 가림\"은 눌러서 뜻만 볼 수도 있습니다. 가리기를 다시 켜면 열어 둔 대사도 모두 다시 가려집니다. 띄엄띄엄 보이기는 1·6·11…번째 단어만 남겨(짧은 자막은 첫 단어만) 어떤 장면인지 짐작하게 합니다.")
                 }
                 Section {
                     ForEach(speak.stages.indices, id: \.self) { i in
@@ -941,5 +955,20 @@ struct SettingsView: View {
             .navigationTitle("설정")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("닫기") { dismiss() } } }
         }
+    }
+}
+
+
+// 장면 썸네일: data URL(base64 JPEG) → UIImage, 한 번 풀면 캐시
+enum ThumbCache {
+    private static let cache = NSCache<NSString, UIImage>()
+    static func image(_ item: Item) -> UIImage? {
+        guard !item.thumb.isEmpty else { return nil }
+        if let hit = cache.object(forKey: item.id as NSString) { return hit }
+        guard let r = item.thumb.range(of: "base64,"),
+              let d = Data(base64Encoded: String(item.thumb[r.upperBound...])),
+              let ui = UIImage(data: d) else { return nil }
+        cache.setObject(ui, forKey: item.id as NSString)
+        return ui
     }
 }

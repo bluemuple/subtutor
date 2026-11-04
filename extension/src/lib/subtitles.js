@@ -281,6 +281,13 @@
     return count;
   }
 
+  /** 가릴 때 띄엄띄엄 보이기: 1·6·11…번째 단어만 남기고 나머지는 █ 로 — 어떤 장면인지 짐작할 단서만 준다. 5단어 이하면 첫 단어 하나만 보인다 */
+  function peekVeil(text) {
+    const words = String(text || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+    if (!words.length) return '';
+    return words.map((w, i) => (i % 5 === 0 ? w : '█'.repeat(Math.min(Math.max(w.length, 2), 6)))).join(' ');
+  }
+
   function normalizeForCompare(s) {
     return String(s || '')
       .toLowerCase()
@@ -674,7 +681,7 @@
   return {
     decodeEntities, cleanCueText, parseVttTime, parseTtmlTime, parseVTT, parseTTML, parseJson3, parseAny, parseSegments,
     finalizeCues, findCueIndex, lastStartedIndex, nextStartingIndex, mergeTranslations,
-    normalizeForCompare, diffWords, formatTime, parseM3U8,
+    normalizeForCompare, diffWords, formatTime, parseM3U8, peekVeil,
     parseXml, parseIsoDuration, parseMPD, presToContent, contentToPres, parseMp4Init, parseMp4Text, mergeSplitCues,
   };
 });

@@ -842,6 +842,8 @@ async function runSites() {
       const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items);
       assert(items && items.length === 1 && items[0].text.includes('frisbee'), 'storage items: ' + JSON.stringify(items));
       assert(items[0].translation.includes('프리스비'), 'translation saved: ' + items[0].translation);
+      assert(typeof items[0].thumb === 'string' && items[0].thumb.startsWith('data:image/jpeg') && items[0].thumb.length > 400 && items[0].thumb.length < 30000,
+        '장면 썸네일(가로 150px JPEG)이 함께 저장된다: ' + String(items[0].thumb).slice(0, 30) + '… len=' + String((items[0].thumb || '').length));
       assert(items[0].title === 'Mock Show' && items[0].episode === 'S1:E2 The Test', 'title/episode: ' + items[0].title + '/' + items[0].episode);
       await page.evaluate(() => document.querySelector('video').pause());
     });
@@ -1617,6 +1619,30 @@ async function runSites() {
       assert(n === 0, 'all hidden again ' + n);
       await web.screenshot({ path: path.join(TMP, 'shots', 'web-list-veiled.png') });
     });
+    await step('장면 썸네일이 목록에 보이고 🖼 로 모두 감추며, "띄엄띄엄 보이기"를 켜면 가림막에 1·6…번째 단어만 남는다', async () => {
+      const th = await web.evaluate(() => { const i = document.querySelector('.item img.thumb'); return { n: document.querySelectorAll('.item img.thumb').length, w: i ? i.getBoundingClientRect().width : 0 }; });
+      assert(th.n >= 1 && th.w > 100 && th.w <= 160, '썸네일이 목록에 보인다: ' + JSON.stringify(th));
+      await web.click('.thumb-toggle');
+      assert((await web.$$eval('.item img.thumb', (e) => e.length)) === 0, '🖼 모두 감추기');
+      await web.click('.thumb-toggle');
+      assert((await web.$$eval('.item img.thumb', (e) => e.length)) >= 1, '🖼 다시 보이기');
+      // 띄엄 가리기 (설정 › 화면): 가림막에 첫 단어 + █ 들
+      await web.evaluate(() => { try { localStorage.setItem('st.veilPeek', '1'); } catch (e) { /* ignore */ } });
+      await web.reload({ waitUntil: 'load' });
+      await web.waitForSelector('.item');
+      const peek = await web.$eval('[data-id="netflix:12345:22000"] .veil-text-btn', (e) => e.textContent);
+      assert(/█/.test(peek) && !peek.includes('감춤'), '가림막이 띄엄띄엄 글로 바뀐다: ' + peek);
+      const first = peek.split(' ')[0];
+      assert(first && !/█/.test(first), '첫 단어는 보인다: ' + peek);
+      // 설정의 스위치에도 상태가 반영된다
+      await web.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
+      assert(await web.$eval('.veil-peek', (e) => e.checked), '설정 스위치가 켜져 있다');
+      await web.evaluate(() => { document.querySelector('.veil-peek').click(); });
+      await web.goto('http://localhost:8766/#/', { waitUntil: 'load' });
+      await web.waitForSelector('.item');
+      const off = await web.$eval('[data-id="netflix:12345:22000"] .veil-text-btn', (e) => e.textContent);
+      assert(off.includes('자막 감춤'), '끄면 원래 가림막: ' + off);
+    });
     await step('정렬 옵션(작품별/전체 · 최신 위/아래)과 태그 지정·필터', async () => {
       const firstId = () => web.$eval('.item', (e) => e.dataset.id);
       const lastId = () => web.$$eval('.item', (els) => els[els.length - 1].dataset.id);
@@ -1912,8 +1938,30 @@ async function runSites() {
       assert(!(await row.$$eval('.meta span', (els) => els.map((e) => e.textContent))).some((t) => t === '유튜브'), 'platform not repeated in every card');
       assert((await web.$$eval('.group-title', (els) => els.map((e) => e.textContent))).some((g) => /\(유튜브\)/.test(g)), 'platform shown in the group title');
       await yt.evaluate(() => { window.__pauses = []; });
+      // 줄이 화면 맨 위에 걸리면 상단 고정 메뉴에 가려 클릭이 메뉴로 간다 (썸네일로 줄 높이가 바뀌며 드러남) — 가운데로 옮기고 누른다
+      await row.evaluate((e) => e.scrollIntoView({ block: 'center' }));
       await (await row.$('.play')).click();
-      await waitFor(() => web.$eval('[data-id^="youtube:"]', (e) => e.classList.contains('playing')), 5000, 'local playing');
+      await waitFor(() => web.$eval('[data-id^="youtube:"]', (e) => e.classList.contains('playing')), 5000, 'local playing').catch(async (e) => {
+        const dbg = await web.evaluate(async () => {
+          const B = window.SubTutorBridge;
+          const out = {
+            cls: (document.querySelector('[data-id^="youtube:"]') || {}).className,
+            rows: document.querySelectorAll('[data-id^="youtube:"]').length,
+            toastShown: !!(document.querySelector('#toast.show')),
+            toast: ((document.querySelector('#toast') || {}).textContent || '').slice(0, 60),
+          };
+          try {
+            const items = (await B.request('items.list')).items || [];
+            const it = items.find((x) => String(x.id).startsWith('youtube:'));
+            out.item = it ? { id: it.id, file: it.file, audio: it.audio, thumbLen: (it.thumb || '').length } : null;
+            if (it) {
+              try { const r = await B.request('audio.file', { itemId: it.id }, 15000); out.af = r ? { reason: r.reason, len: (r.data || '').length } : null; } catch (e) { out.af = 'ERR ' + e.message; }
+            }
+          } catch (e) { out.err = e.message; }
+          return out;
+        }).catch((e) => 'eval-fail ' + e.message);
+        throw new Error(e.message + ' dbg=' + JSON.stringify(dbg) + ' console=' + logs.slice(-6).join(' | ').slice(0, 500));
+      });
       await waitFor(() => web.$eval('[data-id^="youtube:"]', (e) => !e.classList.contains('playing')), 8000, 'local ended');
       const pauses = await yt.evaluate(() => window.__pauses);
       assert(pauses.length === 0, 'player tab untouched: ' + JSON.stringify(pauses));
@@ -2595,7 +2643,7 @@ async function runSites() {
         localStorage.setItem('st.supaUrl', 'http://127.0.0.1:8769');
         localStorage.setItem('st.supaKey', 'test-anon');
         localStorage.setItem('st.supaRefresh', 'rt-speak');
-        localStorage.setItem('st.speak', JSON.stringify({ stages: [1, 1], drop10: false }));   // 줄여 말하기 단계를 1초·1초로 + 10초 미만 버리기는 꺼 둔다 (아래 스텝들이 1초짜리를 녹음한다)
+        localStorage.setItem('st.speak', JSON.stringify({ stages: [1, 3], drop10: false }));   // 1단계 1초(넘겨서 +N 검사)·2단계 3초(일찍 멈춰 '부족' — 느린 머신에서 0.4초 클릭이 1초로 늦어도 반올림이 3에 못 미친다) + 10초 미만 버리기는 꺼 둔다
       } catch (e) { /* ignore */ } });
       await w4.goto('http://localhost:8766/#/speak', { waitUntil: 'load' });
       await w4.waitForSelector('.speak-p', { visible: true });
@@ -2742,7 +2790,7 @@ async function runSites() {
       await w4.evaluate(() => { [...document.querySelectorAll('.speak-rec .r-result .btn')].find((b) => b.textContent === '끝내기').click(); });
       await waitFor(() => w4.evaluate(() => !document.querySelector('.speak-rec')), 5000, 'session closes');
       const steps = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes.filter((t) => t.mode === 'step'));
-      assert(steps.length === 2 && steps.every((t) => t.targetS === 1), '줄여 기록 2개(목표 1초): ' + JSON.stringify(steps.map((t) => Math.round(t.durMs))));
+      assert(steps.length === 2 && JSON.stringify(steps.map((t) => t.targetS)) === '[1,3]', '줄여 기록 2개(목표 1·3초): ' + JSON.stringify(steps.map((t) => [t.targetS, Math.round(t.durMs)])));
       const badges = await w4.evaluate(() => [...document.querySelectorAll('.speak-take .t-over, .speak-take .t-under')].map((x) => x.textContent));
       assert(badges.some((x) => /초과/.test(x)) && badges.some((x) => /부족/.test(x)), '기록 줄에 초과·부족 배지: ' + JSON.stringify(badges));
     });
