@@ -901,10 +901,16 @@
     if (!ui.rows) return;
     for (let i = 0; i < ui.rows.length; i++) {
       const c = state.cues[i];
-      const saved = c && state.saved.has(itemIdFor(c));
+      const id = c && itemIdFor(c);
+      const saved = c && state.saved.has(id);
+      const missed = c && state.missed.has(id);
       ui.rows[i].classList.toggle('saved', !!saved);
+      ui.rows[i].classList.toggle('missed-star', !!missed);   // Q: 빨간 별 (오디오 없이 표시만)
       const star = ui.rows[i].lastElementChild;
-      if (star) star.textContent = saved ? '★' : '☆';
+      if (star) {
+        star.textContent = saved ? '★' : '☆';
+        star.title = missed ? '못 알아들음 (Q 로 해제) — 오디오 없이 표시만' : '저장 (E)';
+      }
     }
   }
 
@@ -2157,7 +2163,7 @@
           state.saved.set(id, item);
           await bg({ type: 'items.save', item });
           if (!item.translation) bg({ type: 'translate', texts: [c.text.replace(/\n/g, ' ')], from: 'en', to: 'ko' }).then((res) => { const t = res && res.translations && res.translations[0]; if (t) { c.koMt = t; updateRowKo(i); bg({ type: 'items.update', id, patch: { translation: t, translationSource: 'mt' } }).catch(() => {}); } }).catch(() => {});
-          if (settings.audioMode && settings.audioMode !== 'off') queueCapture(i, item);
+          // Q 는 "못 알아들음" 표시만 — 오디오는 녹음하지 않는다 (소리까지 담고 싶으면 E 별표 저장)
         } else {
           const it = state.saved.get(id);
           const tags = ((it && it.tags) || []).concat(tag).filter((t, k, a) => a.indexOf(t) === k);

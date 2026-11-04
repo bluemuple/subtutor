@@ -636,11 +636,23 @@ async function runSites() {
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { koMode: 'always' } }, {}));
       await waitFor(() => page.evaluate(() => document.querySelector('.st-ov-ko').textContent.includes('래피')), 3000, 'always mode again');
     });
-    await step('Q: 못 알아들음 표시 → 별표 저장 + 태그, 다시 누르면 해제', async () => {
+    await step('Q: 못 알아들음 표시 → 빨간 별만, 오디오 모드가 켜져 있어도 녹음하지 않는다 · 다시 누르면 해제', async () => {
+      await page.evaluate(() => document.querySelector('video').pause());   // 이 스텝은 몇 초 걸린다 — 재생이 흘러 다음 스텝의 자막(Raffie)을 지나치지 않게
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { audioMode: 'store' } }, {}));   // 오디오 모드가 켜져 있어도
+      await sleep(300);
       await page.keyboard.press('KeyQ');
       const it = await waitFor(async () => { const items = await sw.evaluate(async () => (await chrome.storage.local.get('items')).items); const x = (items || []).find((i) => i.id === 'netflix:12345:6000'); return x && x.missed ? x : null; }, 6000, 'missed item saved');
       assert((it.tags || []).includes('못 알아들음'), 'missed tag: ' + JSON.stringify(it.tags));
       await waitFor(() => page.evaluate(() => document.querySelector('.st-ov-star').classList.contains('missed')), 3000, 'overlay star marks missed');
+      // 목록 줄에는 빨간 별 — 그리고 오디오는 녹음되지 않는다
+      await waitFor(() => page.evaluate(() => { const r = [...document.querySelectorAll('.st-row')].find((x) => x.classList.contains('missed-star')); return r ? getComputedStyle(r.querySelector('.st-star')).color : null; }), 3000, 'red star class')
+        .then((col) => assert(col === 'rgb(239, 68, 68)', '별이 빨갛다: ' + col));
+      await sleep(2500);   // 녹음이 시작됐다면 이 사이에 칩·오디오가 생긴다
+      const audioKeys = await sw.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith('audio:netflix:12345:6000')));
+      assert(audioKeys.length === 0, 'Q 는 오디오를 담지 않는다: ' + JSON.stringify(audioKeys));
+      assert(!(await page.evaluate(() => { const c = document.querySelector('.st-chip'); return c && c.classList.contains('show') && c.classList.contains('st-chip-rec'); })), '녹음 칩이 뜨지 않는다');
+      await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { audioMode: 'off' } }, {}));
+      await sleep(300);
       const names = await sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings || {}).tagNames);
       assert(Array.isArray(names) && names.includes('못 알아들음'), 'tag name registered: ' + JSON.stringify(names));
       await page.keyboard.press('KeyQ');

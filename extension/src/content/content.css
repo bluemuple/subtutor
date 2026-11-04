@@ -45,6 +45,7 @@
 .st-star { opacity: 0; background: none; border: none; color: #fbbf24; font-size: 19px; cursor: pointer; padding: 0 4px; line-height: 1.2; flex: none; }
 .st-row:hover .st-star, .st-row.active .st-star, .st-row.saved .st-star { opacity: 1; }
 .st-star:hover { transform: scale(1.2); }
+.st-row.missed-star .st-star { color: #ef4444; opacity: 1; }   /* Q 못 알아들음: 빨간 별 (오디오 없이 표시만) */
 .st-foot { padding: 7px 12px; font-size: 11px; color: #777; border-top: 1px solid #262626; line-height: 1.6; }
 .st-foot b { color: #c4b5fd; font-weight: 600; }
 
