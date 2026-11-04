@@ -2851,7 +2851,7 @@ async function runSites() {
       await w4.evaluate((id) => { document.querySelector('[data-sp="' + id + '"] .p-head').click(); }, mine[0].id);
       await w4.evaluate((id) => { [...document.querySelector('[data-sp="' + id + '"]').querySelectorAll('.speak-bigbtns .btn')].find((b) => b.textContent.includes('자유')).click(); }, mine[0].id);
       await w4.waitForSelector('.speak-rec', { visible: true });
-      await new Promise((r) => setTimeout(r, 1300));
+      await new Promise((r) => setTimeout(r, 4300));   // 3초 앞으로·뒤로를 재 볼 수 있게 4초 남짓
       await w4.evaluate(() => document.querySelector('.speak-rec .rbtn.stop').click());
       await waitFor(() => w4.evaluate(() => !document.querySelector('.speak-rec')), 8000, 'free recording saves and closes');
       await waitFor(() => w4.evaluate(() => document.querySelectorAll('.speak-take').length >= 1), 5000, 'take row appears');
@@ -2864,24 +2864,55 @@ async function runSites() {
       await waitFor(() => w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes[0].rating === 4), 3000, 'real click: star 4');
       await w4.click(takeSel + ' .icon[title="받아 적은 문장 (음성 인식)"]');
       await waitFor(() => w4.evaluate(() => !!document.querySelector('.speak-take .t-heard')), 3000, 'real click: T opens the transcript');
-      await w4.click(takeSel + ' .icon[title="메모"]');
-      await waitFor(() => w4.evaluate(() => !!document.querySelector('.speak-take .t-memo')), 3000, 'real click: memo box opens');
-      await w4.evaluate(() => {
-        const ta = document.querySelector('.speak-take .t-memo');
-        ta.value = '막힌 데: rules 설명';
-        ta.dispatchEvent(new Event('change', { bubbles: true }));
-      });
+      // 💬 코멘트 칸: 📝 단추 없이 기록 줄마다 늘 보이고, 쳐 넣는 대로 저장된다
+      assert(await w4.evaluate(() => !document.querySelector('.speak-take .icon[title="메모"]')), '📝 단추는 없다 (코멘트 칸이 늘 보임)');
+      assert(await w4.evaluate(() => /코멘트/.test((document.querySelector('.speak-take .t-memo') || {}).placeholder || '')), '코멘트 칸이 늘 보인다');
+      await w4.click(takeSel + ' .t-memo');
+      await w4.keyboard.type('막힌 데: rules 설명');
+      await waitFor(() => w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes[0].memo === '막힌 데: rules 설명'), 3000, 'comment saved while typing');
       const t1b = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes[0]);
       assert(t1b.rating === 4 && t1b.memo === '막힌 데: rules 설명', '별점·메모 저장: ' + JSON.stringify([t1b.rating, t1b.memo]));
       // 재생 단추가 생긴다 (오디오가 이 브라우저에 있다) — 실제 클릭으로 누르면 재생이 시작된다
-      assert(await w4.evaluate(() => !!document.querySelector('.speak-take .icon[title="재생"]')), '오디오가 있어 ▶ 가 보인다');
-      await w4.evaluate(() => {   // 재생이 실제로 시작되는지 보려고 Audio.play 를 엿본다
-        window.__played = 0;
+      assert(await w4.evaluate(() => !!document.querySelector('.speak-take .icon.t-play[title="재생"]')), '오디오가 있어 ▶ 가 보인다');
+      assert(await w4.evaluate(() => !document.querySelector('.speak-take .t-player')), '누르기 전에는 재생 막대가 없다');
+      await w4.evaluate(() => {   // 재생이 실제로 시작되는지 보려고 Audio.play 를 엿본다 (마지막으로 재생한 Audio 를 잡아 둔다)
+        window.__played = 0; window.__aud = null;
         const orig = HTMLMediaElement.prototype.play;
-        HTMLMediaElement.prototype.play = function () { window.__played++; return orig.apply(this, arguments); };
+        HTMLMediaElement.prototype.play = function () { window.__played++; window.__aud = this; return orig.apply(this, arguments); };
       });
-      await w4.click(takeSel + ' .icon[title="재생"]');
-      await waitFor(() => w4.evaluate(() => window.__played > 0), 4000, 'real click: ▶ starts playback');
+      await w4.click(takeSel + ' .icon.t-play');
+      await waitFor(() => w4.evaluate(() => window.__played > 0 && window.__aud && !window.__aud.paused), 4000, 'real click: ▶ starts playback');
+      const bar = await waitFor(() => w4.evaluate(() => { const p = document.querySelector('.speak-take .t-player'); return p ? [...p.querySelectorAll('button')].map((b) => b.textContent) : null; }), 3000, 'player strip appears');
+      assert(JSON.stringify(bar) === JSON.stringify(['⏪ 3초', '⏸ 일시정지', '3초 ⏩', '⏹ 정지']), '재생 막대 단추: ' + JSON.stringify(bar));
+      assert(await w4.evaluate(() => document.querySelector('.speak-take .icon.t-play').textContent === '⏸'), '▶ 가 그 자리에서 ⏸ 로 바뀐다');
+      assert((await w4.evaluate(() => document.querySelector('.speak-take .t-memo').value)) === '막힌 데: rules 설명', '다시 그려도 코멘트가 남아 있다');
+      // ⏸ 일시정지 → 멈춤 (단추는 "▶ 이어서", 줄의 단추도 ▶)
+      await w4.click(takeSel + ' .t-player .tp-pause');
+      await waitFor(() => w4.evaluate(() => window.__aud.paused && /이어서/.test(document.querySelector('.speak-take .tp-pause').textContent) && document.querySelector('.speak-take .icon.t-play').textContent === '▶'), 3000, 'real click: pause');
+      const tPaused = await w4.evaluate(() => window.__aud.currentTime);
+      await sleep(500);
+      assert(Math.abs((await w4.evaluate(() => window.__aud.currentTime)) - tPaused) < 0.05, '일시정지 동안 위치가 그대로');
+      // 3초 ⏩: 멈춘 자리에서 3초 앞으로 + 이어서 재생
+      await w4.click(takeSel + ' .t-player .tp-fwd');
+      const tFwd = await w4.evaluate(() => window.__aud.currentTime);
+      assert(tFwd >= Math.min(tPaused + 2.9, 3.9), '3초 앞으로: ' + tPaused.toFixed(2) + ' → ' + tFwd.toFixed(2));
+      await waitFor(() => w4.evaluate(() => !window.__aud.paused || window.__aud.ended), 3000, 'resumes after the skip');
+      // ⏪ 3초: 뒤로 (0 밑으로는 안 감)
+      const tBefore = await w4.evaluate(() => window.__aud.currentTime);
+      await w4.click(takeSel + ' .t-player .tp-back');
+      const tBack = await w4.evaluate(() => window.__aud.currentTime);
+      assert(tBack <= Math.max(0, tBefore - 2.9) + 0.3 && tBack >= 0, '3초 뒤로: ' + tBefore.toFixed(2) + ' → ' + tBack.toFixed(2));
+      assert(/^\d+:\d{2} \/ \d+:\d{2}$/.test(await w4.evaluate(() => document.querySelector('.speak-take .tp-time').textContent)), '위치·길이 시간 표시');
+      // ⏹ 정지 → 소리가 멈추고 막대가 닫힌다
+      await w4.click(takeSel + ' .t-player .tp-stop');
+      await waitFor(() => w4.evaluate(() => window.__aud.paused && !document.querySelector('.speak-take .t-player') && document.querySelector('.speak-take .icon.t-play').textContent === '▶'), 3000, 'real click: stop closes the strip');
+      // 다시 ▶ 한 채로 다른 화면에 가면 멈춘다
+      await w4.click(takeSel + ' .icon.t-play');
+      await waitFor(() => w4.evaluate(() => !!document.querySelector('.speak-take .t-player') && !window.__aud.paused), 4000, 'plays again');
+      await w4.evaluate(() => { location.hash = '#/list'; });
+      await waitFor(() => w4.evaluate(() => window.__aud.paused), 3000, 'leaving the speak view stops playback');
+      await w4.evaluate(() => { location.hash = '#/speak'; });
+      await waitFor(() => w4.evaluate(() => !!document.querySelector('.speak-take') && !document.querySelector('.speak-take .t-player')), 4000, 'back on the speak view, no strip');
     });
 
     await step('입트기(웹) 범주 접기·주사위·스와이프 삭제: 제목을 누르면 접히고, 🎲 가 뽑은 범주는 자동으로 펼쳐지고, 기록을 왼쪽으로 밀면 빨간 삭제', async () => {
@@ -2993,7 +3024,7 @@ async function runSites() {
       const nums = (copied.match(/^\d\) /gm) || []).length;
       assert(nums === 3, '녹음 3개가 번호대로: ' + nums + ' ┃' + copied);
       const firstIdx = copied.indexOf('1) '), secondIdx = copied.indexOf('2) ');
-      assert(/자유 말하기/.test(copied.slice(firstIdx, secondIdx)) && /스스로 평가 ★4\/5/.test(copied.slice(firstIdx, secondIdx)) && /내 메모: 막힌 데: rules 설명/.test(copied.slice(firstIdx, secondIdx)), '1) 은 가장 오래된 자유 말하기 (별점·메모 포함): ' + copied.slice(firstIdx, secondIdx));
+      assert(/자유 말하기/.test(copied.slice(firstIdx, secondIdx)) && /스스로 평가 ★4\/5/.test(copied.slice(firstIdx, secondIdx)) && /내 코멘트: 막힌 데: rules 설명/.test(copied.slice(firstIdx, secondIdx)), '1) 은 가장 오래된 자유 말하기 (별점·코멘트 포함): ' + copied.slice(firstIdx, secondIdx));
       assert((copied.match(/줄여 말하기 \(목표 0:0[13]\)/g) || []).length === 2 && /초과\)/.test(copied) && /부족\)/.test(copied), '줄여 말하기 목표·초과/부족: ' + copied);
       assert(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(copied) && /말한 시간 \d+:\d{2}/.test(copied), '날짜·말한 시간: ' + copied);
       assert(await w4.evaluate((sel) => document.querySelector(sel).classList.contains('open'), cardSel) === openBefore, '⧉ 를 눌러도 카드가 접히거나 펼쳐지지 않는다');

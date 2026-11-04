@@ -468,7 +468,13 @@ input.rate:focus { outline: none; color: var(--accent2); }
 .speak-stars { display: inline-flex; gap: 0; }
 .speak-stars button { background: none; border: none; padding: 0 1px; font-size: 15px; color: var(--dim); }
 .speak-stars button.on { color: var(--yellow); }
-.speak-take .t-memo { width: 100%; margin-top: 6px; background: var(--sunken); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 13px; min-height: 40px; }
+.speak-take .t-memo { display: block; width: 100%; margin: 6px 0 4px; background: var(--sunken); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; font-size: 13px; line-height: 1.4; min-height: 30px; resize: none; overflow: hidden; }
+.speak-take .t-memo:focus { outline: none; border-color: var(--accent); }
+/* 입트기 기록 재생 막대: ▶ 를 누른 기록 줄 아래에만 (한 번에 하나) */
+.speak-take .t-player { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; padding: 5px 8px; background: var(--card2); border: 1px solid var(--line); border-radius: 9px; }
+.speak-take .t-player .tp-seek { flex: 1; min-width: 80px; accent-color: var(--accent); }
+.speak-take .t-player .tp-time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.speak-take .icon.t-play.on { color: var(--accent); }
 .speak-take .t-heard { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; background: var(--sunken); border-radius: 8px; padding: 6px 8px; }
 .speak-nolocal { color: var(--dim); font-size: 11.5px; }
 

@@ -32,6 +32,13 @@ struct STake: Codable, Identifiable, Equatable {
     var dirty: Bool?
 }
 
+// 재생 중인 기록의 위치·길이 — 0.2초마다 바뀌므로 SpeakStore 와 떼어 그 막대만 다시 그린다
+@MainActor
+final class TakeProgress: ObservableObject {
+    @Published var pos: Double = 0
+    @Published var dur: Double = 0
+}
+
 @MainActor
 final class SpeakStore: ObservableObject {
     static let shared = SpeakStore()
@@ -40,6 +47,8 @@ final class SpeakStore: ObservableObject {
     @Published var stages: [Int] = [75, 60, 45]    // 줄여 말하기 단계 (초) — 설정에서 바꾼다
     @Published var syncMsg = ""
     @Published var playingTake: String?
+    @Published var playPaused = false              // 재생 막대는 그대로 두고 멈춘 상태 (⏸ · 끝까지 들음 · 전화 등)
+    let pb = TakeProgress()
     @Published var collapsed: Set<String> = []     // 접어 둔 범주
     @Published var transcribing: Set<String> = []  // 받아 적는 중인 기록
     @Published var dropShort = true                // 10초 안에 끝낸 녹음은 잘못 누른 것으로 보고 버린다
@@ -167,9 +176,10 @@ final class SpeakStore: ObservableObject {
         persist()
     }
     func setRating(_ id: String, _ r: Int) { mark(id) { $0.rating = $0.rating == r ? 0 : r }; pushSoon() }
-    func setMemo(_ id: String, _ m: String) { mark(id) { $0.memo = m } }
+    func setMemo(_ id: String, _ m: String) { mark(id) { $0.memo = m }; pushSoon() }
     func setHeard(_ id: String, _ h: String) { mark(id) { $0.heard = h }; pushSoon() }
     func deleteTake(_ id: String) {
+        if playingTake == id { stopPlay() }
         mark(id) { $0.deleted = true }
         try? FileManager.default.removeItem(at: SpeakStore.audioURL(id))
         pushSoon()
@@ -198,7 +208,7 @@ final class SpeakStore: ObservableObject {
         let secs = { (a: [STake]) in Int((a.reduce(0) { $0 + $1.durMs } / 1000).rounded()) }
         return "오늘 \(today.count)회 · \(SpeakStore.clock(secs(today))) — 이번 주 \(week.count)회 · \(SpeakStore.clock(secs(week)))"
     }
-    // 프롬프트 + 녹음들(날짜·모드·말한 시간·wpm·별점·메모·받아 적은 문장) — 웹 spCopyText 와 같은 꼴, 오래된 녹음부터
+    // 프롬프트 + 녹음들(날짜·모드·말한 시간·wpm·별점·코멘트·받아 적은 문장) — 웹 spCopyText 와 같은 꼴, 오래된 녹음부터
     func copyText(for p: SPrompt) -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm"
@@ -218,7 +228,7 @@ final class SpeakStore: ObservableObject {
             if t.rating > 0 { parts.append("스스로 평가 ★\(t.rating)/5") }
             lines.append("")
             lines.append("\(k + 1)) " + parts.joined(separator: " · "))
-            if !t.memo.isEmpty { lines.append("내 메모: " + t.memo) }
+            if !t.memo.isEmpty { lines.append("내 코멘트: " + t.memo) }
             lines.append(t.heard.isEmpty ? "(받아 적지 못함)" : t.heard)
         }
         return lines.joined(separator: "\n")
@@ -238,9 +248,9 @@ final class SpeakStore: ObservableObject {
         return Int((Double(words) / (durMs / 60000)).rounded())
     }
 
-    // ── 재생 (폰에 있는 녹음만) ──
+    // ── 재생 (폰에 있는 녹음만) — ▶ 다시 누르면 일시정지/이어서, ⏪⏩ 는 ⚙ 영상 오디오의 "건너뛰는 초", ⏹ 는 끝내기 ──
     func play(_ take: STake) {
-        if playingTake == take.id { stopPlay(); return }
+        if playingTake == take.id { togglePause(); return }
         stopPlay()
         let u = SpeakStore.audioURL(take.id)
         guard let p = try? AVAudioPlayer(contentsOf: u) else { return }
@@ -248,18 +258,37 @@ final class SpeakStore: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(true)
         player = p
         playingTake = take.id
+        playPaused = false
+        pb.dur = p.duration
+        pb.pos = 0
         p.play()
         playerWatch = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let p = self.player else { return }
-                if !p.isPlaying { self.stopPlay() }
+                if self.pb.pos != p.currentTime { self.pb.pos = p.currentTime }
+                // 끝까지 들었거나 전화 등으로 끊겼다: 막대는 그대로 두고 멈춘 상태로 (▶ 로 다시 듣기)
+                if !p.isPlaying && !self.playPaused { self.playPaused = true }
             }
         }
+    }
+    func togglePause() {
+        guard let p = player else { return }
+        if p.isPlaying { p.pause(); playPaused = true } else { p.play(); playPaused = false }
+        pb.pos = p.currentTime
+    }
+    func skipPlay(_ d: Double) {
+        guard let p = player else { return }
+        p.currentTime = max(0, min(p.duration, p.currentTime + d))
+        if !p.isPlaying && p.currentTime < p.duration - 0.05 { p.play(); playPaused = false }
+        pb.pos = p.currentTime
     }
     func stopPlay() {
         player?.stop()
         player = nil
         playingTake = nil
+        playPaused = false
+        pb.pos = 0
+        pb.dur = 0
         playerWatch?.invalidate()
         playerWatch = nil
     }

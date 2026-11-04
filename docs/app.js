@@ -1017,7 +1017,7 @@
       collapsed: new Set(Array.isArray(o.collapsed) ? o.collapsed : []),
       drop10: o.drop10 !== false,   // 10초 안에 끝낸 녹음은 잘못 누른 것으로 보고 버린다 (스위치로 끔)
       syncMsg: '', open: null, edit: false, importOpen: false,
-      hintOpen: new Set(), memoOpen: new Set(), heardOpen: new Set(), audioIds: new Set(), audioLoaded: false,
+      hintOpen: new Set(), heardOpen: new Set(), audioIds: new Set(), audioLoaded: false,
     };
     // 내장 프롬프트 채우기: 처음 한 번 + 새 버전에서 추가된 것 (지운 것은 tombstone 이 남아 다시 생기지 않는다)
     (window.SPEAK_PROMPTS || []).forEach((b) => {
@@ -1027,6 +1027,31 @@
     return sp;
   }
   const sp = loadSpeak();
+  // 입트기 녹음 재생 — 한 번에 하나. paint: 지금 그 기록 줄의 재생 막대를 다시 칠한다 · seen: 이번 그림에 그 줄이 있었나
+  const spPlay = { audio: null, id: null, url: null, paint: null, seen: false, gen: 0 };
+  function spPlayStop() {
+    spPlay.gen++;
+    const a = spPlay.audio, url = spPlay.url, paint = spPlay.paint;
+    spPlay.audio = null; spPlay.id = null; spPlay.url = null; spPlay.paint = null;
+    if (a) { try { a.pause(); } catch (e) { /* ignore */ } }
+    if (url) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } }
+    if (paint) paint();
+  }
+  async function spPlayStart(t) {
+    spPlayStop();
+    try { R.stop(); } catch (e) { /* ignore */ }
+    const gen = spPlay.gen;
+    const b = await spAudioGet(t.id);
+    if (gen !== spPlay.gen) return;   // 기다리는 사이 다른 기록을 눌렀다
+    if (!b) { toast('소리 파일이 없습니다'); return; }
+    const url = URL.createObjectURL(b);
+    const a = new Audio(url);
+    const repaint = () => { if (spPlay.audio === a && spPlay.paint) spPlay.paint(); };
+    ['timeupdate', 'play', 'pause', 'ended', 'durationchange'].forEach((ev) => a.addEventListener(ev, repaint));
+    spPlay.audio = a; spPlay.id = t.id; spPlay.url = url; spPlay.paint = null;
+    render();   // 이 기록 줄 아래에 재생 막대를 붙인다
+    try { await a.play(); } catch (e) { if (spPlay.audio === a) toast('재생하지 못했습니다: ' + ((e && e.message) || e)); }
+  }
   const saveSpeak = () => { try { localStorage.setItem('st.speak', JSON.stringify({ prompts: sp.prompts, takes: sp.takes, stages: sp.stages, lastSync: sp.lastSync, seeded: sp.seeded, collapsed: [...sp.collapsed], drop10: sp.drop10 })); } catch (e) { /* ignore */ } };
   saveSpeak();
 
@@ -1173,6 +1198,7 @@
     return t;
   }
   async function openSpeakRec(prompt, mode) {
+    spPlayStop();
     let sess = null;
     try { sess = await R.session(); } catch (e) { toast('마이크를 허용해야 녹음할 수 있습니다'); return; }
     if (navigator.wakeLock && navigator.wakeLock.request) navigator.wakeLock.request('screen').then((w) => { spRec.wakeLock = w; }).catch(() => {});
@@ -1359,7 +1385,7 @@
     return wrap;
   }
 
-  // 프롬프트 + 이 프롬프트의 녹음들(날짜·모드·말한 시간·wpm·별점·메모·받아 적은 문장)을 GPT 에 붙여 넣기 좋게 — 오래된 녹음부터
+  // 프롬프트 + 이 프롬프트의 녹음들(날짜·모드·말한 시간·wpm·별점·코멘트·받아 적은 문장)을 GPT 에 붙여 넣기 좋게 — 오래된 녹음부터
   function spCopyText(p) {
     const two = (n) => String(n).padStart(2, '0');
     const stamp = (ms) => { const d = new Date(ms); return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + ' ' + two(d.getHours()) + ':' + two(d.getMinutes()); };
@@ -1380,7 +1406,7 @@
       if (w) parts.push(w + ' wpm');
       if (t.rating) parts.push('스스로 평가 ★' + t.rating + '/5');
       lines.push('', (k + 1) + ') ' + parts.join(' · '));
-      if (t.memo) lines.push('내 메모: ' + t.memo);
+      if (t.memo) lines.push('내 코멘트: ' + t.memo);
       lines.push(t.heard ? t.heard : '(받아 적지 못함)');
     });
     return lines.join('\n');
@@ -1448,9 +1474,9 @@
       row.dataset.swiped = cur <= -W / 2 ? '1' : '';
     };
     row.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0 || e.target.closest('.t-del') || e.target.closest('textarea')) return;
+      if (e.button !== 0 || e.target.closest('.t-del') || e.target.closest('textarea, input')) return;
       drag = true; horiz = false; sx = e.clientX; sy = e.clientY; base = cur;
-      // 여기서 포인터를 붙잡으면(setPointerCapture) 그냥 누른 클릭도 줄로 가서 ▶·T·📝·별 버튼이 먹지 않는다 —
+      // 여기서 포인터를 붙잡으면(setPointerCapture) 그냥 누른 클릭도 줄로 가서 ▶·T·별 버튼이 먹지 않는다 —
       // 가로로 밀기 시작했다고 판단한 뒤에만 붙잡는다
     });
     row.addEventListener('pointermove', (e) => {
@@ -1495,29 +1521,86 @@
     }
     const w = F.wpm(t.heard, t.durMs);
     if (w) line.append(el('span', { class: 't-wpm', text: w + ' wpm' }));
+    let player = null;
     if (sp.audioIds.has(t.id)) {
-      line.append(el('button', { class: 'icon', title: '재생', onclick: async () => { const b = await spAudioGet(t.id); if (b) R.play(b); else toast('소리 파일이 없습니다'); } }, '▶'));
+      player = spPlayerFor(t);
+      line.append(player.playBtn);
     } else {
       line.append(el('span', { class: 'speak-nolocal', title: '오디오는 동기화하지 않습니다', text: '소리는 녹음한 기기에' }));
     }
     const heardOn = sp.heardOpen.has(t.id);
     line.append(el('button', { class: 'icon' + (heardOn ? ' on' : ''), title: '받아 적은 문장 (음성 인식)', onclick: () => { if (heardOn) sp.heardOpen.delete(t.id); else sp.heardOpen.add(t.id); render(); } }, 'T'));
-    const memoOn = sp.memoOpen.has(t.id);
-    line.append(el('button', { class: 'icon' + (t.memo ? ' on' : ''), title: '메모', onclick: () => { if (memoOn) sp.memoOpen.delete(t.id); else sp.memoOpen.add(t.id); render(); } }, '📝'));
     const stars = el('span', { class: 'speak-stars', title: '스스로 평가 (별점)' });
     for (let i = 1; i <= 5; i++) stars.append(el('button', { class: (t.rating || 0) >= i ? 'on' : '', onclick: () => { t.rating = t.rating === i ? 0 : i; spMarkT(t); render(); } }, '★'));
     line.append(stars);
     inner.append(line);
-    if (memoOn) {
-      const ta = el('textarea', { class: 't-memo', placeholder: '메모 — 막힌 데, 다음에 쓸 표현…' });
-      ta.value = t.memo || '';
-      ta.onchange = () => { t.memo = ta.value; spMarkT(t); };
-      inner.append(ta);
-    }
+    if (player && player.strip) inner.append(player.strip);
     if (heardOn) inner.append(el('p', { class: 't-heard', text: t.heard ? '들린 문장: ' + t.heard : '이 녹음은 받아 적지 못했습니다 (조용했거나 이 브라우저의 음성 인식이 지원되지 않음)' }));
+    // 코멘트: 이 녹음에 대한 내 피드백 — 늘 보이는 칸, 쓰는 대로 저장 (기기 사이 동기화 · ⧉ 복사에 "내 코멘트")
+    const ta = el('textarea', { class: 't-memo', rows: 1, placeholder: '💬 코멘트 — 이 녹음에 대한 내 피드백 (고칠 점·막힌 데·다음에 쓸 표현)' });
+    ta.value = t.memo || '';
+    const fit = () => { ta.style.height = 'auto'; ta.style.height = Math.max(30, ta.scrollHeight + 2) + 'px'; };
+    let saveT = 0;
+    ta.oninput = () => { t.memo = ta.value; fit(); clearTimeout(saveT); saveT = setTimeout(() => spMarkT(t), 500); };
+    ta.onchange = () => { clearTimeout(saveT); t.memo = ta.value; spMarkT(t); };
+    requestAnimationFrame(fit);
+    inner.append(ta);
     row.append(inner);
-    spAttachSwipe(row, inner, () => { t.deleted = true; spMarkT(t); spAudioDel(t.id); render(); });
+    spAttachSwipe(row, inner, () => { if (spPlay.id === t.id) spPlayStop(); t.deleted = true; spMarkT(t); spAudioDel(t.id); render(); });
     return row;
+  }
+  // ▶: 누르면 재생하고 그 자리에서 ⏸(일시정지)·▶(이어서)로 바뀐다. 재생 중인 기록 줄 아래에는
+  // ⏪ N초 · ⏸ 일시정지 · N초 ⏩ · ⏹ 정지 · 위치 막대 · 시간 (N 은 에피소드 오디오와 같은 설정, 기본 3초)
+  function spPlayerFor(t) {
+    const mine = () => (spPlay.id === t.id ? spPlay.audio : null);
+    const durOf = (a) => (a && a.duration && isFinite(a.duration) ? a.duration : t.durMs / 1000);   // 브라우저 녹음(webm)은 길이를 모를 때가 있다
+    const playBtn = el('button', { class: 'icon t-play', title: '재생' }, '▶');
+    const toggle = async () => {
+      const a = mine();
+      if (a) { if (a.paused) a.play().catch(() => {}); else a.pause(); return; }
+      await spPlayStart(t);
+    };
+    playBtn.onclick = toggle;
+    let strip = null, seek = null, timeEl = null, pauseBtn = null, dragging = false;
+    const paint = () => {
+      const a = mine();
+      playBtn.textContent = a && !a.paused ? '⏸' : '▶';
+      playBtn.title = !a ? '재생' : a.paused ? '이어서 재생' : '일시정지';
+      playBtn.classList.toggle('on', !!a);
+      if (!a || !strip) return;
+      pauseBtn.textContent = a.paused ? '▶ 이어서' : '⏸ 일시정지';
+      const d = durOf(a);
+      seek.max = String(Math.max(0.1, d));
+      if (!dragging) seek.value = String(Math.min(a.currentTime, d));
+      timeEl.textContent = F.fmtClock(Math.min(a.currentTime, d)) + ' / ' + F.fmtClock(d);
+    };
+    if (mine()) {
+      const s = recSkipS();
+      const skip = (d) => {
+        const a = mine();
+        if (!a) return;
+        const end = durOf(a);
+        a.currentTime = Math.max(0, Math.min(end, a.currentTime + d));
+        if (a.paused && a.currentTime < end - 0.05) a.play().catch(() => {});
+        paint();
+      };
+      pauseBtn = el('button', { class: 'btn mini tp-pause', title: '일시정지 / 이어서 재생', onclick: toggle }, '⏸ 일시정지');
+      seek = el('input', { type: 'range', class: 'tp-seek', min: 0, max: Math.max(0.1, t.durMs / 1000), step: 0.1, value: 0, title: '재생 위치' });
+      seek.oninput = () => { dragging = true; };
+      seek.onchange = () => { const a = mine(); if (a) a.currentTime = +seek.value; dragging = false; paint(); };
+      timeEl = el('span', { class: 'tp-time' });
+      strip = el('div', { class: 't-player' }, [
+        el('button', { class: 'btn mini tp-back', title: s + '초 뒤로 (초는 설정 › 아이폰 동기화 › 서버 소리 관리에서)', onclick: () => skip(-s) }, '⏪ ' + s + '초'),
+        pauseBtn,
+        el('button', { class: 'btn mini tp-fwd', title: s + '초 앞으로', onclick: () => skip(s) }, s + '초 ⏩'),
+        el('button', { class: 'btn mini tp-stop', title: '정지 — 재생을 끝내고 막대를 닫습니다', onclick: () => { spPlayStop(); render(); } }, '⏹ 정지'),
+        seek, timeEl,
+      ]);
+      spPlay.paint = paint;
+      spPlay.seen = true;
+    }
+    paint();
+    return { playBtn, strip };
   }
 
   // ───────── 라우팅/렌더 ─────────
@@ -1529,10 +1612,12 @@
   }
   window.addEventListener('hashchange', route);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.edit.on && !isEditable(e.target)) setEdit(false); });
-  document.addEventListener('focusout', () => { if (renderPending) setTimeout(() => { if (renderPending && !(document.activeElement && document.activeElement.classList.contains('comment'))) render(); }, 50); });
+  // 글을 쓰는 중인 칸(대사 코멘트·입트기 기록 코멘트)이 있으면 다시 그리기를 미룬다 — 쓰던 글과 커서가 날아가지 않게
+  const typingBox = () => { const a = document.activeElement; return !!(a && a.classList && (a.classList.contains('comment') || a.classList.contains('t-memo'))); };
+  document.addEventListener('focusout', () => { if (renderPending) setTimeout(() => { if (renderPending && !typingBox()) render(); }, 50); });
 
   function render() {
-    if (document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('comment')) { renderPending = true; return; }
+    if (typingBox()) { renderPending = true; return; }
     renderPending = false;
     editSync = null;
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === state.view));
@@ -1540,6 +1625,7 @@
     app.textContent = '';
     const titles = { list: '저장한 자막', quiz: '퀴즈', words: '단어장', known: '알고 있는 표현', settings: '설정', shadow: '쉐도잉', today: '오늘의 훈련', speak: '입트기' };
     document.title = 'SubTutor · ' + titles[state.view];
+    spPlay.seen = false;
     switch (state.view) {
       case 'list': app.append(renderList(learning(), 'learning')); break;
       case 'known': app.append(renderList(known(), 'known')); break;
@@ -1551,6 +1637,7 @@
       case 'speak': app.append(renderSpeak()); break;
       default: break;
     }
+    if (spPlay.audio && !spPlay.seen) spPlayStop();
     renderClipStates();
     syncVeils(); // 목록이 문서에 붙은 뒤에 감추기 상태를 입힌다
     renderTrimBoxes();
@@ -2718,7 +2805,7 @@
     const box = el('details', { class: 'supa-storage' }, [el('summary', null, '서버 소리 관리 — 올라간 MP3 보기·지우기 · 영상 오디오 올리기')]);
     const body = el('div', { class: 'supa-storage-body count' }, '…');
     const skipRow = el('label', { class: 'switch-row' }, [
-      el('span', null, '에피소드 오디오 플레이어 — ⏪⏩ 건너뛰는 초'),
+      el('span', null, '⏪⏩ 건너뛰는 초 — 에피소드 오디오 플레이어 · 입트기 녹음 재생'),
       el('input', { type: 'number', min: 1, max: 60, step: 1, value: recSkipS(), style: 'width:70px', onchange: (e) => { try { localStorage.setItem('st.recSkip', String(clampNum(+e.target.value || 3, 1, 60))); } catch (err) { /* ignore */ } } }),
     ]);
     box.append(skipRow, body);

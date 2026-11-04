@@ -6,6 +6,7 @@ import SwiftUI
 struct SpeakView: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var speak: SpeakStore
+    @EnvironmentObject var recs: RecStore         // 건너뛰는 초(⏪⏩)를 에피소드 오디오 플레이어와 같이 쓴다
     @Environment(\.dismiss) private var dismiss
     @State private var openId: String?
     @State private var editMode = false
@@ -13,7 +14,6 @@ struct SpeakView: View {
     @State private var importText = ""
     @State private var importKind = "short"
     @State private var hintOpen: Set<String> = []
-    @State private var memoOpen: Set<String> = []
     @State private var heardOpen: Set<String> = []
     @State private var recTarget: RecTarget?
     @State private var showInfo = false
@@ -86,13 +86,15 @@ struct SpeakView: View {
                     Button { showInfo = true } label: { Image(systemName: "info.circle") }
                 }
             }
+            .onChange(of: openId) { _ in speak.stopPlay() }
+            .onDisappear { speak.stopPlay() }
             .fullScreenCover(item: $recTarget) { t in   // iOS 16: navigationDestination(item:) 이 없다
                 SpeakRecordView(prompt: t.prompt, mode: t.mode)
             }
             .alert("입트기 — 말하기 유창성 연습", isPresented: $showInfo) {
                 Button("닫기", role: .cancel) {}
             } message: {
-                Text("프롬프트를 눌러 바로 녹음하며 말하기를 연습합니다. 자유 말하기는 시간 제한 없이, \"줄여 말하기\"는 같은 대답을 점점 짧은 시간(설정에서 변경) 안에 다시 말합니다 — 같은 내용을 점점 짧게 되풀이하는 4/3/2 활동은 말 속도를 높이고 막힘을 줄이는 것으로 확인돼 있습니다 (Nation 1989; Boers 2014; de Jong & Perfetti 2011). 녹음을 마치면 음성 인식이 받아 적어 말 속도(wpm)를 재고, 별점·메모로 스스로 평가를 남깁니다. 오디오 파일은 폰에만 두고 프롬프트·기록만 웹과 동기화합니다.")
+                Text("프롬프트를 눌러 바로 녹음하며 말하기를 연습합니다. 자유 말하기는 시간 제한 없이, \"줄여 말하기\"는 같은 대답을 점점 짧은 시간(설정에서 변경) 안에 다시 말합니다 — 같은 내용을 점점 짧게 되풀이하는 4/3/2 활동은 말 속도를 높이고 막힘을 줄이는 것으로 확인돼 있습니다 (Nation 1989; Boers 2014; de Jong & Perfetti 2011). 녹음을 마치면 음성 인식이 받아 적어 말 속도(wpm)를 재고, 별점·코멘트로 스스로 평가를 남깁니다. 녹음은 ▶ 로 듣고 ⏪ 3초 · ⏸ · 3초 ⏩ · ⏹ 로 다룹니다. 오디오 파일은 폰에만 두고 프롬프트·기록만 웹과 동기화합니다.")
             }
             .task {
                 if store.signedIn { await speak.sync(url: store.supaUrl, key: store.supaKey) }
@@ -279,9 +281,11 @@ struct SpeakView: View {
             }
             HStack(spacing: 10) {
                 if speak.hasAudio(t.id) {
+                    let on = speak.playingTake == t.id
                     Button { Haptic.tap(); speak.play(t) } label: {
-                        Image(systemName: speak.playingTake == t.id ? "stop.circle.fill" : "play.circle")
+                        Image(systemName: on ? (speak.playPaused ? "play.circle.fill" : "pause.circle.fill") : "play.circle")
                     }
+                    .accessibilityLabel(on ? (speak.playPaused ? "이어서 재생" : "일시정지") : "재생")
                 } else {
                     Text("소리는 녹음한 기기에").font(.caption2).foregroundStyle(.tertiary)
                 }
@@ -289,10 +293,6 @@ struct SpeakView: View {
                     Image(systemName: "text.quote").foregroundStyle(t.heard.isEmpty ? Color.secondary : Color.yellow)
                 }
                 .accessibilityLabel("받아 적은 문장")
-                Button { Haptic.tap(); toggle(&memoOpen, t.id) } label: {
-                    Image(systemName: "note.text").foregroundStyle(t.memo.isEmpty ? Color.secondary : Color.yellow)
-                }
-                .accessibilityLabel("메모")
                 HStack(spacing: 0) {
                     ForEach(1...5, id: \.self) { i in
                         Button { Haptic.tap(); speak.setRating(t.id, i) } label: {
@@ -306,13 +306,7 @@ struct SpeakView: View {
                 Spacer()
             }
             .buttonStyle(.borderless)
-            if memoOpen.contains(t.id) {
-                TextField("메모 — 막힌 데, 다음에 쓸 표현…", text: Binding(
-                    get: { t.memo }, set: { speak.setMemo(t.id, $0) }), axis: .vertical)
-                    .font(.caption)
-                    .padding(6)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.1)))
-            }
+            if speak.playingTake == t.id { takePlayer(t) }
             if heardOpen.contains(t.id) {
                 VStack(alignment: .leading, spacing: 6) {
                     if speak.transcribing.contains(t.id) {
@@ -335,11 +329,60 @@ struct SpeakView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.1)))
             }
+            // 💬 코멘트: 이 녹음에 대한 내 피드백 — 늘 보이는 칸, 쓰는 대로 저장·동기화 (⧉ 복사에 "내 코멘트")
+            TextField("💬 코멘트 — 이 녹음에 대한 내 피드백 (고칠 점·막힌 데·다음에 쓸 표현)", text: Binding(
+                get: { t.memo }, set: { speak.setMemo(t.id, $0) }), axis: .vertical)
+                .font(.caption)
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.1)))
+                .accessibilityLabel("코멘트")
         }
         .padding(.leading, 2)
     }
+
+    // 재생 중인 기록 줄 아래: ⏪ N초 · ⏸ 일시정지(▶ 이어서) · N초 ⏩ · ⏹ 정지 · 위치 막대 · 시간
+    // (N 은 ⚙ 영상 오디오의 "건너뛰는 초" — 에피소드 오디오 플레이어와 같은 값, 기본 3초)
+    @ViewBuilder private func takePlayer(_ t: STake) -> some View {
+        let s = recs.skipS
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 13) {
+                Button { Haptic.tap(); speak.skipPlay(-Double(s)) } label: { Label("\(s)초", systemImage: "gobackward") }
+                    .accessibilityLabel("\(s)초 뒤로")
+                Button { Haptic.tap(); speak.togglePause() } label: {
+                    Label(speak.playPaused ? "이어서" : "일시정지", systemImage: speak.playPaused ? "play.fill" : "pause.fill")
+                }
+                Button { Haptic.tap(); speak.skipPlay(Double(s)) } label: { Label("\(s)초", systemImage: "goforward") }
+                    .accessibilityLabel("\(s)초 앞으로")
+                Button { Haptic.tap(); speak.stopPlay() } label: { Label("정지", systemImage: "stop.fill") }
+                Spacer(minLength: 0)
+            }
+            .font(.caption)
+            .labelStyle(.titleAndIcon)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)              // 12 mini(375pt)에서도 한 줄에
+            .buttonStyle(.borderless)
+            TakeProgressBar(pb: speak.pb, fallbackDur: t.durMs / 1000)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 9).fill(Color.accentColor.opacity(0.08)))
+    }
     private func toggle(_ set: inout Set<String>, _ id: String) {
         if set.contains(id) { set.remove(id) } else { set.insert(id) }
+    }
+}
+
+// 입트기 기록 재생 위치 막대 — TakeProgress 만 지켜봐서 0.2초마다 이 막대만 다시 그린다
+struct TakeProgressBar: View {
+    @ObservedObject var pb: TakeProgress
+    let fallbackDur: Double
+    var body: some View {
+        let dur = pb.dur > 0 ? pb.dur : fallbackDur
+        HStack(spacing: 8) {
+            ProgressView(value: min(pb.pos, dur), total: max(dur, 0.1))
+            Text(SpeakStore.clock(min(pb.pos, dur)) + " / " + SpeakStore.clock(dur))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -468,6 +511,7 @@ struct SpeakRecordView: View {
     }
 
     private func begin() async {
+        speak.stopPlay()
         takeId = SpeakStore.newTakeId()
         let ok = await rec.start(url: SpeakStore.audioURL(takeId))
         if !ok { failed = true }
