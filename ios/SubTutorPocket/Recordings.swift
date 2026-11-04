@@ -5,7 +5,7 @@ import Foundation
 import SwiftUI
 import AVFoundation
 
-struct RecFile: Identifiable, Equatable {
+struct RecFile: Identifiable, Equatable, Codable {
     var name: String          // 서버 파일 이름 (rec/ 다음, 예: r123abc.4f2.SGVsbG8.mp3)
     var id: String            // r<base36 ms>
     var title: String
@@ -53,6 +53,17 @@ final class RecStore: ObservableObject {
     private var watch: Timer?
     private var fetchedAt: Double = 0
 
+    // 목록은 폰에 저장해 둔다 — 앱을 다시 켜도(오프라인이어도) 다음 동기화 전에 플레이어가 바로 보이게
+    static var listURL: URL { Store.docs.appendingPathComponent("recordings.json") }
+    init() {
+        if let d = try? Data(contentsOf: RecStore.listURL), let saved = try? JSONDecoder().decode([RecFile].self, from: d) {
+            files = saved
+        }
+    }
+    private func persistList() {
+        if let d = try? JSONEncoder().encode(files) { try? d.write(to: RecStore.listURL, options: .atomic) }
+    }
+
     static var dir: URL { Store.docs.appendingPathComponent("recordings", isDirectory: true) }
     static func localURL(_ name: String) -> URL { dir.appendingPathComponent(name) }
     func hasLocal(_ f: RecFile) -> Bool { FileManager.default.fileExists(atPath: RecStore.localURL(f.name).path) }
@@ -73,11 +84,15 @@ final class RecStore: ObservableObject {
         defer { loading = false }
         do {
             let rows = try await Supa.shared.listStorage(url: url, key: key, prefix: "rec/")
-            files = rows.compactMap { row -> RecFile? in
+            let fresh = rows.compactMap { row -> RecFile? in
                 guard let name = row["name"] as? String, !(row["id"] is NSNull), row["id"] != nil else { return nil }
                 let size = (((row["metadata"] as? [String: Any])?["size"]) as? NSNumber)?.intValue ?? 0
                 return RecFile.parse(name: name, size: size)
-            }.sorted { $0.at > $1.at }
+            }
+            // 서버에서 지워졌어도 폰에 받아 둔 파일은 목록에 남긴다 (계속 들을 수 있게)
+            let keep = files.filter { f in !fresh.contains { $0.name == f.name } && hasLocal(f) }
+            files = (fresh + keep).sorted { $0.at > $1.at }
+            persistList()
             fetchedAt = SpeakStore.now()
             msg = ""
         } catch {
@@ -195,7 +210,8 @@ final class RecStore: ObservableObject {
     func removeServer(_ f: RecFile, url: String, key: String) async {
         do {
             try await Supa.shared.deleteStorage(url: url, key: key, path: "rec/" + f.name)
-            files.removeAll { $0.name == f.name }
+            if !hasLocal(f) { files.removeAll { $0.name == f.name } }   // 폰에 받은 파일은 남으므로 목록에도 남긴다
+            persistList()
             msg = ""
         } catch { msg = "서버에서 지우지 못했습니다: " + Supa.describe(error) }
     }
@@ -253,11 +269,13 @@ struct EpiPlayerRow: View {
                 .accessibilityLabel(mine && recs.loopB != nil ? "구간 반복 해제" : (mine && recs.loopA != nil ? "구간 끝 지정" : "구간 시작 지정"))
                 Text((mine ? SpeakStore.clock(dragging ? dragPos : recs.playPos) : "0:00") + " / " + SpeakStore.clock(mine && recs.playDur > 0 ? recs.playDur : f.durMs / 1000))
                     .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                if mine, let a = recs.loopA {
-                    Text(recs.loopB != nil ? "반복 \(SpeakStore.clock(a))–\(SpeakStore.clock(recs.loopB ?? a))" : "시작 \(SpeakStore.clock(a)) — 끝에서 한 번 더")
+                if mine, let a = recs.loopA {   // 좁은 폰에서도 구간 끝이 잘리지 않게 짧게 + 자동 축소
+                    Text(recs.loopB != nil ? "\(SpeakStore.clock(a))–\(SpeakStore.clock(recs.loopB ?? a))" : "A \(SpeakStore.clock(a))")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(recs.loopB != nil ? Color.accentColor : Color.orange)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 Spacer(minLength: 0)
                 // 배속: 더 늦게 · 더 빠르게 (0.5~2.0, 음높이는 그대로)

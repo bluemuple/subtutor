@@ -296,12 +296,11 @@ async function runDisney() {
       await dp.goto('https://www.disneyplus.com/play/mockdisney2', { waitUntil: 'domcontentloaded' });
       await dp.waitForSelector('#st-panel', { timeout: 20000 });
       await waitFor(() => dp.$$eval('.st-row', (r) => r.length === 5), 20000, 'adjacent rows');
-      await dp.select('.st-shadow-sec', 'r1');
       await dp.evaluate(() => { const v = document.querySelector('video'); v.muted = false; v.play(); });
       await sleep(500);
       await dp.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 2.6; });
       await sleep(700);
-      await dp.keyboard.press('KeyW');
+      await dp.select('.st-shadow-sec', 'r1');   // 자리를 잡은 뒤 고른다 — 고르면 저절로 켜진다
       await waitFor(() => dp.$eval('.st-mode.st-shadow', (b) => b.classList.contains('on')), 3000, 'follow mode on (disney)');
       await dp.evaluate(() => document.querySelector('video').play());
       const at = await waitFor(() => dp.evaluate(() => { const v = document.querySelector('video'); return v.paused ? { t: v.currentTime, ov: document.querySelector('.st-ov-text').textContent, row: document.querySelector('.st-row.active') && document.querySelector('.st-row.active').dataset.i } : null; }), 8000, 'paused after line one');
@@ -786,8 +785,11 @@ async function runSites() {
       await sleep(200);
     });
     await step('W: 따라하기(고정 시간) — 자막 끝에서 1초 쉬고 자동으로 이어 재생', async () => {
-      await page.select('.st-shadow-sec', 's1');
-      await page.keyboard.press('KeyW');
+      await page.select('.st-shadow-sec', 's1');   // 쉬는 시간을 고르면 따라하기가 저절로 켜진다
+      await waitFor(() => page.$eval('.st-mode.st-shadow', (b) => b.classList.contains('on') && /따라하기 켬/.test(b.textContent)), 2000, 'shadow on by choosing the pause');
+      await page.keyboard.press('KeyW');            // W 로 끄고
+      await waitFor(() => page.$eval('.st-mode.st-shadow', (b) => !b.classList.contains('on') && /따라하기 끔/.test(b.textContent)), 2000, 'W turns it off');
+      await page.keyboard.press('KeyW');            // 다시 켠다
       await waitFor(() => page.$eval('.st-mode.st-shadow', (b) => b.classList.contains('on')), 2000, 'shadow on');
       await setTime(page, 17.7, true);
       await waitFor(async () => (await videoPaused(page)), 5000, 'paused at cue end');
@@ -809,8 +811,7 @@ async function runSites() {
         await page.evaluate(() => document.querySelector('video').pause());
         await setTime(page, 13.7, false);
         await sleep(300);
-        await page.select('.st-shadow-sec', 'r1');   // 자막 길이 ×1.0 (목 자막은 한 줄이 2초)
-        await page.keyboard.press('KeyW');
+        await page.select('.st-shadow-sec', 'r1');   // 자막 길이 ×1.0 (목 자막은 한 줄이 2초) — 고르면 저절로 켜진다
         await waitFor(() => page.$eval('.st-mode.st-shadow', (b) => b.classList.contains('on')), 2000, 'follow mode on');
         const chip = await page.$eval('.st-ov-chip.on-shadow', (e) => e.textContent).catch(() => '');
         assert(/따라하기 자막 길이 ×1$/.test(chip.trim()), 'mode chip shows the ratio: ' + chip);
@@ -834,8 +835,8 @@ async function runSites() {
         const txt2 = await page.$eval('.st-ov-shadow', (e) => e.textContent);
         assert(/3초 뒤 다음 자막/.test(txt2), '×1.5 → 3초 안내: ' + txt2);
       } finally {
+        await page.select('.st-shadow-sec', 's1').catch(() => {});   // 쉬는 시간을 먼저 되돌리고(고르면 켜지므로) 그다음에 끈다
         await page.evaluate(() => { const b = document.querySelector('.st-mode.st-shadow.on'); if (b) b.click(); }).catch(() => {});
-        await page.select('.st-shadow-sec', 's1').catch(() => {});
         await setTime(page, 10.3, true);
         await sleep(250);
       }
@@ -1551,8 +1552,7 @@ async function runSites() {
         await yt.evaluate(() => document.querySelector('video').pause());
         await setTime(yt, 13.7, false);
         await sleep(300);
-        await yt.select('.st-shadow-sec', 'r1');   // 자막 길이 ×1.0 (유튜브 목 자막도 한 줄 2초)
-        await yt.keyboard.press('KeyW');
+        await yt.select('.st-shadow-sec', 'r1');   // 자막 길이 ×1.0 (유튜브 목 자막도 한 줄 2초) — 고르면 저절로 켜진다
         await waitFor(() => yt.$eval('.st-mode.st-shadow', (b) => b.classList.contains('on')), 3000, 'follow mode on (youtube)');
         await yt.evaluate(() => document.querySelector('video').play());
         await waitFor(async () => (await videoPaused(yt)), 8000, 'paused at cue end');
@@ -1565,8 +1565,8 @@ async function runSites() {
         const waited = Date.now() - t0;
         assert(waited >= 1300 && waited <= 3300, '약 2초 쉬고 이어 재생: ' + waited + 'ms');
       } finally {
+        await yt.select('.st-shadow-sec', 's1').catch(() => {});   // 쉬는 시간을 먼저 되돌리고(고르면 켜지므로) 그다음에 끈다
         await yt.evaluate(() => { const b = document.querySelector('.st-mode.st-shadow.on'); if (b) b.click(); }).catch(() => {});
-        await yt.select('.st-shadow-sec', 's1').catch(() => {});
         await yt.evaluate(() => document.querySelector('video').pause()).catch(() => {});
         await sleep(200);
       }

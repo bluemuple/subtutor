@@ -1345,8 +1345,9 @@
     // 맨 왼쪽: 내 더빙 재생 켬/끔 (예전에는 작품 이름이 있던 자리 — 이름은 상태줄에 마우스를 올리면 보인다)
     ui.dubToggle = el('button', { class: 'st-dub-toggle', role: 'switch', onclick: () => setDubPlayback(settings.dubPlayback === false) }, [el('span', { class: 'st-dub-toggle-knob' }), el('span', { class: 'st-dub-toggle-text' })]);
     ui.btnAP = el('button', { class: 'st-mode', title: '자동 일시정지 (P): 자막이 끝나면 멈춥니다. F로 다시 듣기', onclick: () => setMode('autoPause', !settings.autoPause) }, 'AP');
-    ui.btnShadow = el('button', { class: 'st-mode st-shadow', title: '따라하기 (W): 자막이 끝나면 그 자막 길이만큼 쉬었다가 다음 자막으로 이어 재생합니다', onclick: () => setMode('shadowing', !settings.shadowing) }, '따라하기');
-    ui.shadowSec = el('select', { class: 'st-shadow-sec', title: '따라하기: 자막이 끝난 뒤 쉬는 시간', onchange: (e) => saveSettings(shadowPausePatch(e.target.value)) });
+    ui.btnShadow = el('button', { class: 'st-mode st-shadow st-switchy', role: 'switch', title: '따라하기 켜기/끄기 (단축키 W): 켜면 자막이 끝날 때마다 옆에서 고른 시간만큼 쉬었다가 다음 자막으로 이어 재생합니다', onclick: () => setMode('shadowing', !settings.shadowing) }, [el('span', { class: 'st-dub-toggle-knob' }), el('span', { class: 'st-shadow-text' }, '따라하기')]);
+    // 쉬는 시간을 고르면 따라하기도 켠다 — 시간만 바꾸고 모드는 꺼져 있어 그냥 재생되던 혼동을 막는다
+    ui.shadowSec = el('select', { class: 'st-shadow-sec', title: '따라하기: 자막이 끝난 뒤 쉬는 시간 (고르면 따라하기가 켜집니다)', onchange: (e) => { saveSettings(shadowPausePatch(e.target.value)); if (!settings.shadowing) setMode('shadowing', true); } });
     shadowPauseOptions(false).forEach((g) => ui.shadowSec.append(g));
     ui.btnSettings = el('button', { class: 'st-icon', title: '설정', onclick: () => { ui.settings.classList.toggle('st-hidden'); syncSettingsForm(); } }, '⚙');
     ui.btnClose = el('button', { class: 'st-icon', title: '패널 닫기 (`)', onclick: () => setPanelOpen(false) }, '✕');
@@ -1608,6 +1609,8 @@
     updateDubToggle();
     ui.btnAP.classList.toggle('on', !!settings.autoPause);
     ui.btnShadow.classList.toggle('on', !!settings.shadowing);
+    ui.btnShadow.setAttribute('aria-checked', String(!!settings.shadowing));
+    { const tx = ui.btnShadow.querySelector('.st-shadow-text'); if (tx) tx.textContent = settings.shadowing ? '따라하기 켬' : '따라하기 끔'; }
     ui.ovModes.textContent = '';
     if (state.loop) ui.ovModes.append(el('span', { class: 'st-ov-chip on-loop' }, '🔁 반복'));
     if (settings.autoPause) ui.ovModes.append(el('span', { class: 'st-ov-chip on-ap' }, '⏸ AP'));
@@ -1884,7 +1887,7 @@
     [['off', '끄기'], ['function', '기능어(약형) 가리기'], ['random', '아무 단어나 가리기']].forEach(([v, t]) => f.cloze.append(el('option', { value: v }, t)));
     f.fontScale = el('input', { type: 'range', min: 60, max: 160, step: 5 });
     f.fontScale.addEventListener('input', () => saveSettings({ fontScale: +f.fontScale.value }));
-    f.shadowPause = el('select', { onchange: (e) => saveSettings(shadowPausePatch(e.target.value)) });
+    f.shadowPause = el('select', { onchange: (e) => { saveSettings(shadowPausePatch(e.target.value)); if (!settings.shadowing) setMode('shadowing', true); } });
     shadowPauseOptions(true).forEach((g) => f.shadowPause.append(g));
     const num = (key, min, max) => { const i = el('input', { type: 'number', min, max, step: 50 }); i.addEventListener('change', () => saveSettings({ [key]: clamp(+i.value || 0, min, max) })); f[key] = i; return i; };
     f.offset = el('input', { type: 'number', min: -120000, max: 120000, step: 100 });
@@ -2445,7 +2448,7 @@
     else { patch.shadowing = !!on; if (on) patch.autoPause = false; }
     saveSettings(patch);
     if (!on) cancelModesPending();
-    toast(mode === 'autoPause' ? (on ? '⏸ 자동 일시정지 켬 (F: 다시 듣기)' : '자동 일시정지 끔') : (on ? '🗣 따라하기 켬 · ' + shadowPauseText() + '만큼 쉬고 다음 자막' : '따라하기 끔'));
+    toast(mode === 'autoPause' ? (on ? '⏸ 자동 일시정지 켬 (F: 다시 듣기)' : '자동 일시정지 끔') : (on ? '🗣 따라하기 켬 · 자막이 끝나면 ' + shadowPauseText() + '만큼 쉬고 다음 자막 (W 로 끄기)' : '따라하기 끔 (W 로 켜기)'));
     updateModeUI();
   }
   function pauseFor(i) {

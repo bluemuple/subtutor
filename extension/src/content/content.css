@@ -238,3 +238,8 @@ u.st-kiwi { text-decoration: underline dotted #fbbf24; text-underline-offset: 3p
 
 /* 영상 오디오 통째 MP3 녹음 중이면 빨갛게 + 흐르는 시간 */
 #st-panel .st-rec-btn.st-on { color: #f87171; border-color: #f87171; font-variant-numeric: tabular-nums; }
+
+/* 따라하기: "더빙 켬" 과 같은 스위치 꼴 — 켬/끔이 한눈에 */
+#st-panel .st-mode.st-switchy { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 5px; white-space: nowrap; }
+#st-panel .st-mode.st-switchy.on .st-dub-toggle-knob { background: #34d399; }
+#st-panel .st-mode.st-switchy.on .st-dub-toggle-knob::after { transform: translateX(12px); background: #fff; }
