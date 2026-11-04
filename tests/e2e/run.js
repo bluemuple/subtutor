@@ -1596,7 +1596,7 @@ async function runSites() {
       assert(!(await yt.evaluate(() => { const t = document.querySelector('.st-toast'); return t && t.classList.contains('show'); })), 'no toast after saving the MP3');
     });
 
-    await step('유튜브(DRM 없음): 패널 발치에 "두 번 보기" 대신 ⏺ MP3 · 허용(아이콘) 없이 영상 요소에서 통째 MP3 · ⚙ "자동으로 오디오 MP3 녹음"을 켜면 재생 중에 알아서 담는다', async () => {
+    await step('유튜브(DRM 없음): 패널 발치에 "두 번 보기" 대신 ⏺ MP3 · 허용(아이콘) 없이 영상 요소에서 통째 MP3 · ⚙ "자동으로 오디오 MP3 녹음"을 켜면 재생 중에 알아서 담는다 · Option+R(패널이 직접)·크롬 명령으로 켜고 끈다', async () => {
       const recDirGone = () => opt.evaluate(async () => { try { const root = await navigator.storage.getDirectory(); const d = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); await d.removeEntry('영상 오디오', { recursive: true }); } catch (e) { /* 없음 */ } });
       try {
         const foot = await yt.$$eval('#st-panel .st-foot-btn', (els) => els.map((e) => e.textContent.trim()));
@@ -1633,6 +1633,32 @@ async function runSites() {
         await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: false } }, {}));
         await yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').click());
         await waitFor(async () => (await sw.evaluate(async () => ((await chrome.storage.local.get('recordings')).recordings || []).length)) === 2, 15000, 'auto recording saved');
+        const recCount = () => sw.evaluate(async () => ((await chrome.storage.local.get('recordings')).recordings || []).length);
+        const recOn = () => yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on'));
+        // 단축키 ① Option(Alt)+R — 크롬 단축키로 지정이 안 돼 있어도 패널이 직접 받아 켜고 끈다
+        const optR = async () => { await yt.keyboard.down('Alt'); await yt.keyboard.press('KeyR'); await yt.keyboard.up('Alt'); };
+        await yt.evaluate(() => { const v = document.querySelector('video'); if (v.paused) v.play(); document.body.focus(); });
+        await optR();
+        await waitFor(recOn, 4000, 'Option+R starts recording');
+        assert(!(await yt.evaluate(() => !!document.querySelector('.st-dubbox:not(.st-hidden)'))), 'Option+R 은 더빙 칸(R)을 열지 않는다');
+        await sleep(1600);
+        await optR();
+        await waitFor(async () => (await recCount()) === 3, 15000, 'Option+R stops and saves');
+        // 단축키 ② 크롬 명령(rec-episode) — 실제 Option+R 이 크롬 단축키로 지정돼 있을 때 오는 길 (누르는 순간 녹음 허용)
+        const ytTab = await sw.evaluate(async () => (await chrome.tabs.query({ url: 'https://www.youtube.com/*' }))[0].id);
+        let r = await sw.evaluate((id) => globalThis.__subtutorInvoke({ id }, 'command', 'rec'), ytTab);
+        assert(r && r.ok && r.did === 'rec-start', 'command starts: ' + JSON.stringify(r));
+        await waitFor(recOn, 4000, 'command recording on');
+        await sleep(1600);
+        r = await sw.evaluate((id) => globalThis.__subtutorInvoke({ id }, 'command', 'rec'), ytTab);
+        assert(r && r.ok && r.did === 'rec-stop', 'command stops: ' + JSON.stringify(r));
+        await waitFor(async () => (await recCount()) === 4, 15000, 'command recording saved');
+        // ⏺ MP3 버튼 설명과 ⌨ 단축키 목록에 Option+R 이 적혀 있다
+        const tip = await yt.$eval('#st-panel .st-rec-btn', (b) => b.title);
+        assert(/단축키/.test(tip), '버튼 설명에 단축키: ' + tip);
+        await yt.evaluate(() => [...document.querySelectorAll('#st-panel .st-foot-btn')].find((b) => /단축키/.test(b.textContent)).click());
+        await waitFor(() => yt.evaluate(() => { const b = document.querySelector('.st-infobox'); return b && !b.classList.contains('st-hidden') && /Option\(Alt\)\+R/.test(b.textContent); }), 4000, 'shortcut list mentions Option+R');
+        await yt.evaluate(() => { const x = document.querySelector('.st-infobox-head .st-icon'); if (x) x.click(); });
       } finally {
         await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: false } }, {})).catch(() => {});
         await yt.evaluate(() => { const b = document.querySelector('#st-panel .st-rec-btn'); if (b && b.classList.contains('st-on')) b.click(); document.querySelector('video').pause(); }).catch(() => {});
@@ -2955,7 +2981,18 @@ async function runSites() {
         await waitFor(() => w5.evaluate(() => !!document.querySelector('.epi-audio')), 10000, 'episode player row');
         const ea = await w5.evaluate(() => document.querySelector('.epi-audio').textContent);
         assert(/에피소드 오디오/.test(ea) && /12:34/.test(ea), '플레이어에 통째 길이가 보인다: ' + ea);
-        assert(await w5.evaluate(() => !!document.querySelector('.epi-audio .ea-seek') && document.querySelectorAll('.epi-audio button').length >= 5), '⏪⏩·배속 단추: ' + (await w5.evaluate(() => document.querySelectorAll('.epi-audio button').length)));
+        assert(await w5.evaluate(() => !!document.querySelector('.epi-audio .ea-seek') && document.querySelectorAll('.epi-audio button').length >= 6), '⏪⏩·배속·반복 단추: ' + (await w5.evaluate(() => document.querySelectorAll('.epi-audio button').length)));
+        // 구간 반복 버튼 하나로: 시작 지정 → 끝 지정(반복) → 해제
+        const loopSel = '.epi-audio .ea-loop';
+        await w5.click(loopSel);
+        await waitFor(() => w5.$eval(loopSel, (b) => b.textContent === 'A→' && b.classList.contains('ea-mid')), 4000, 'loop start set');
+        await w5.click(loopSel);
+        const onTitle = await waitFor(() => w5.$eval(loopSel, (b) => (b.classList.contains('on') ? b.title : null)), 4000, 'loop range set');
+        assert(/반복 중 0:00–0:0\d/.test(onTitle), '구간이 제목에 보인다: ' + onTitle);
+        assert(await w5.evaluate(() => /^반복 /.test(document.querySelector('.epi-audio .ea-looplab').textContent)), '구간 표시 글');
+        await w5.click(loopSel);
+        await waitFor(() => w5.$eval(loopSel, (b) => !b.classList.contains('on') && !b.classList.contains('ea-mid') && b.textContent === '🔁'), 4000, 'loop cleared');
+        assert(await w5.evaluate(() => document.querySelector('.epi-audio .ea-looplab').textContent === ''), '해제하면 구간 글도 사라진다');
         // 영상 오디오를 서버에서 지우면 skip 이 남아 자동으로 다시 올라가지 않는다
         await w5.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
         await waitFor(async () => [...(await bodyText()).matchAll(/Rec Show S1 E1 — /g)].length >= 1, 15000, 'rec row listed again');

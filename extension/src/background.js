@@ -887,6 +887,7 @@ async function handleMessage(msg, sender) {
       return { settings: s };
     });
     case 'openSite': await openSite(); return { ok: true };
+    case 'commands.get': return { save: await saveShortcut(), rec: await commandShortcut('rec-episode') };
     case 'openOptions': await chrome.runtime.openOptionsPage(); return { ok: true };
     case 'audioDir.status': return audioDirStatus();
     case 'backup.now': case 'web.backup.now': return doBackup();

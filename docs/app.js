@@ -1525,11 +1525,11 @@
   // ── 에피소드 오디오 플레이어: 익스텐션이 뽑은 통째 MP3 를 그 작품 묶음 맨 위에서 듣는다 ──
   const recSkipS = () => clampNum(+(localStorage.getItem('st.recSkip') || 3) || 3, 1, 60);
   const recRate = () => clampNum(+(localStorage.getItem('st.recRate') || 1) || 1, 0.5, 2);
-  const epi = { audio: null, id: null, paint: null };   // 한 번에 하나만 재생
+  const epi = { audio: null, id: null, paint: null, loop: null };   // 한 번에 하나만 재생 · loop: {a, b|null} 구간 반복
   function epiStop() {
     if (epi.audio) { try { epi.audio.pause(); } catch (e) { /* ignore */ } }
     const paint = epi.paint;
-    epi.audio = null; epi.id = null; epi.paint = null;
+    epi.audio = null; epi.id = null; epi.paint = null; epi.loop = null;
     if (paint) paint();
   }
   function epiRowEl(rec) {
@@ -1537,6 +1537,8 @@
     const playBtn = el('button', { class: 'btn mini ea-play', title: '이 에피소드의 통째 오디오 재생 (맥 폴더의 MP3)' }, '▶');
     const seek = el('input', { type: 'range', class: 'ea-seek', min: 0, max: Math.max(1, Math.round(rec.durMs / 1000)), step: 1, value: 0 });
     const timeEl = el('span', { class: 'count ea-time', text: '0:00 / ' + F.fmtClock(rec.durMs / 1000) });
+    const loopBtn = el('button', { class: 'btn mini ea-loop', title: '구간 반복 — 한 번: 시작 지정 · 두 번: 끝 지정(그 뒤로 반복) · 세 번: 해제' }, '🔁');
+    const loopLab = el('span', { class: 'count ea-looplab' });
     const rateEl = el('span', { class: 'count ea-rate', title: '재생 속도', text: recRate().toFixed(1) + '×' });
     let dragging = false;
     const mine = () => (epi.id === rec.id ? epi.audio : null);
@@ -1544,6 +1546,14 @@
       const a = mine();
       playBtn.textContent = a && !a.paused ? '⏸' : '▶';
       if (a && !dragging) { seek.value = Math.round(a.currentTime); timeEl.textContent = F.fmtClock(a.currentTime) + ' / ' + F.fmtClock(a.duration && isFinite(a.duration) ? a.duration : rec.durMs / 1000); }
+      const L = a ? epi.loop : null;   // 구간 반복 버튼: 🔁 → A→(시작 지정됨) → 🔁(on, 반복 중) 순서로 돈다
+      loopBtn.classList.toggle('on', !!(L && L.b != null));
+      loopBtn.classList.toggle('ea-mid', !!(L && L.b == null));
+      loopBtn.textContent = L && L.b == null ? 'A→' : '🔁';
+      loopBtn.title = L && L.b != null ? '구간 반복 중 ' + F.fmtClock(L.a) + '–' + F.fmtClock(L.b) + ' — 누르면 해제'
+        : L ? '시작 ' + F.fmtClock(L.a) + ' 지정됨 — 구간 끝에서 한 번 더 누르면 그 구간을 반복'
+        : '구간 반복 — 한 번: 시작 지정 · 두 번: 끝 지정(그 뒤로 반복) · 세 번: 해제';
+      loopLab.textContent = L && L.b != null ? '반복 ' + F.fmtClock(L.a) + '–' + F.fmtClock(L.b) : (L ? '시작 ' + F.fmtClock(L.a) + ' —' : '');
     };
     const ensure = async () => {
       if (mine()) return epi.audio;
@@ -1553,11 +1563,17 @@
       const a = new Audio(URL.createObjectURL(blob));
       a.playbackRate = recRate();
       try { a.preservesPitch = true; } catch (e) { /* ignore */ }
+      a.addEventListener('timeupdate', () => {   // 구간 반복: 끝에 닿으면 시작으로
+        if (epi.audio === a && epi.loop && epi.loop.b != null && a.currentTime >= epi.loop.b) a.currentTime = epi.loop.a;
+      });
+      a.addEventListener('ended', () => {        // 구간 끝이 파일 끝이어도 반복
+        if (epi.audio === a && epi.loop && epi.loop.b != null) { a.currentTime = epi.loop.a; a.play().catch(() => {}); }
+      });
       a.addEventListener('timeupdate', paint);
       a.addEventListener('ended', paint);
       a.addEventListener('pause', paint);
       a.addEventListener('play', paint);
-      epi.audio = a; epi.id = rec.id; epi.paint = paint;
+      epi.audio = a; epi.id = rec.id; epi.paint = paint; epi.loop = null;
       return a;
     };
     playBtn.onclick = async () => {
@@ -1568,6 +1584,24 @@
       } catch (e) { playBtn.textContent = '▶'; toast(String((e && e.message) || e), 7000); }
     };
     const skip = async (d) => { try { const a = await ensure(); a.currentTime = Math.max(0, a.currentTime + d); if (a.paused) a.play(); paint(); } catch (e) { toast(String((e && e.message) || e), 6000); } };
+    loopBtn.onclick = async () => {
+      try {
+        const a = await ensure();
+        if (!epi.loop) {
+          epi.loop = { a: a.currentTime, b: null };
+        } else if (epi.loop.b == null) {
+          let s0 = epi.loop.a, s1 = a.currentTime;
+          if (s1 < s0) { const t = s0; s0 = s1; s1 = t; }   // 되감은 채 눌렀으면 앞뒤를 바꾼다
+          if (s1 - s0 < 0.5) s1 = s0 + 0.5;                 // 너무 좁으면 최소 0.5초
+          epi.loop = { a: s0, b: s1 };
+          a.currentTime = s0;
+          if (a.paused) a.play().catch(() => {});
+        } else {
+          epi.loop = null;
+        }
+        paint();
+      } catch (e) { toast(String((e && e.message) || e), 6000); }
+    };
     seek.oninput = () => { dragging = true; };
     seek.onchange = async () => { try { const a = await ensure(); a.currentTime = +seek.value; } catch (e) { /* ignore */ } dragging = false; };
     const rateBtn = (d, label, title) => el('button', { class: 'btn mini', title, onclick: () => {
@@ -1582,7 +1616,8 @@
       playBtn,
       el('button', { class: 'btn mini', title: recSkipS() + '초 뒤로 (설정 › 아이폰 동기화에서 초 변경)', onclick: () => skip(-recSkipS()) }, '⏪'),
       el('button', { class: 'btn mini', title: recSkipS() + '초 앞으로', onclick: () => skip(recSkipS()) }, '⏩'),
-      seek, timeEl,
+      loopBtn,
+      seek, timeEl, loopLab,
       rateBtn(-0.1, '−', '더 늦게 듣기'), rateEl, rateBtn(0.1, '＋', '더 빠르게 듣기'),
     );
     return row;

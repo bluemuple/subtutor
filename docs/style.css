@@ -507,3 +507,8 @@ input.rate:focus { outline: none; color: var(--accent2); }
 
 /* 확장 프로그램을 새로 불러와 연결이 끊긴 페이지: 새로고침 안내 */
 .ext-orphan { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 9999; display: flex; gap: 10px; align-items: center; background: var(--accent); color: #fff; font-weight: 600; padding: 10px 14px; border-radius: 10px; box-shadow: 0 6px 24px rgba(0, 0, 0, .35); }
+
+/* 에피소드 플레이어 구간 반복 버튼: 시작 지정(주황) → 반복 중(보라) */
+.epi-audio .ea-loop.ea-mid { color: var(--orange); border-color: var(--orange); }
+.epi-audio .ea-loop.on { color: var(--accent); border-color: var(--accent); }
+.epi-audio .ea-looplab { color: var(--accent); }

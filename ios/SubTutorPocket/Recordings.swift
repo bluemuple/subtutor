@@ -38,6 +38,8 @@ final class RecStore: ObservableObject {
     @Published var paused = false
     @Published var playPos: Double = 0                  // 초
     @Published var playDur: Double = 0
+    @Published var loopA: Double?                       // 구간 반복: 시작 (버튼 1번)
+    @Published var loopB: Double?                       //            끝 (버튼 2번 — 그 뒤로 반복, 3번째에 해제)
     @Published var skipS: Int = max(1, UserDefaults.standard.object(forKey: "recSkip") as? Int ?? 3) {
         didSet { UserDefaults.standard.set(skipS, forKey: "recSkip") }
     }
@@ -121,23 +123,54 @@ final class RecStore: ObservableObject {
         player = p
         playingName = f.name
         paused = false
+        loopA = nil
+        loopB = nil
         playDur = p.duration
         playPos = 0
         p.play()
         watch = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let p = self.player else { return }
+                if let a = self.loopA, let b = self.loopB, p.currentTime >= b {   // 구간 반복: 끝에 닿으면 시작으로
+                    p.currentTime = a
+                    if !p.isPlaying { p.rate = Float(self.rate); p.play(); self.paused = false }
+                }
                 self.playPos = p.currentTime
-                if !p.isPlaying, !self.paused, p.currentTime >= p.duration - 0.3 { self.stop() }   // 끝났다
+                if !p.isPlaying, !self.paused, p.currentTime >= p.duration - 0.3 {
+                    if let a = self.loopA, self.loopB != nil { p.currentTime = a; p.rate = Float(self.rate); p.play() }   // 구간 끝이 파일 끝이어도 반복
+                    else { self.stop() }
+                }
             }
         }
     }
+    // 구간 반복 버튼: 1번 = 시작 지정 → 2번 = 끝 지정(그 뒤로 반복) → 3번 = 해제
+    func loopTap() {
+        guard player != nil else { return }
+        Haptic.tap()
+        if loopA == nil {
+            loopA = playPos
+            loopB = nil
+        } else if loopB == nil {
+            var a = loopA ?? 0, b = playPos
+            if b < a { swap(&a, &b) }           // 되감은 채 눌렀으면 앞뒤를 바꾼다
+            if b - a < 0.5 { b = a + 0.5 }      // 너무 좁으면 최소 0.5초
+            loopA = a
+            loopB = b
+            if let p = player { p.currentTime = a; playPos = a; if !p.isPlaying { p.rate = Float(rate); p.play(); paused = false } }
+        } else {
+            loopA = nil
+            loopB = nil
+        }
+    }
+
     func stop() {
         player?.stop()
         player = nil
         playingName = nil
         paused = false
         playPos = 0
+        loopA = nil
+        loopB = nil
         watch?.invalidate()
         watch = nil
     }
@@ -212,8 +245,20 @@ struct EpiPlayerRow: View {
                 Button { recs.skip(recs.skipS) } label: { Image(systemName: "goforward") }
                     .buttonStyle(.borderless).disabled(!mine)
                     .accessibilityLabel("\(recs.skipS)초 앞으로")
+                Button { recs.loopTap() } label: {   // 한 버튼으로: 시작 → 끝(반복) → 해제
+                    Image(systemName: mine && recs.loopB != nil ? "repeat.circle.fill" : (mine && recs.loopA != nil ? "a.circle.fill" : "repeat"))
+                }
+                .buttonStyle(.borderless).disabled(!mine)
+                .foregroundStyle(mine && recs.loopB != nil ? Color.accentColor : (mine && recs.loopA != nil ? Color.orange : Color.secondary))
+                .accessibilityLabel(mine && recs.loopB != nil ? "구간 반복 해제" : (mine && recs.loopA != nil ? "구간 끝 지정" : "구간 시작 지정"))
                 Text((mine ? SpeakStore.clock(dragging ? dragPos : recs.playPos) : "0:00") + " / " + SpeakStore.clock(mine && recs.playDur > 0 ? recs.playDur : f.durMs / 1000))
                     .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                if mine, let a = recs.loopA {
+                    Text(recs.loopB != nil ? "반복 \(SpeakStore.clock(a))–\(SpeakStore.clock(recs.loopB ?? a))" : "시작 \(SpeakStore.clock(a)) — 끝에서 한 번 더")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(recs.loopB != nil ? Color.accentColor : Color.orange)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 0)
                 // 배속: 더 늦게 · 더 빠르게 (0.5~2.0, 음높이는 그대로)
                 Button { Haptic.tap(); recs.rate = max(0.5, (recs.rate * 10 - 1).rounded() / 10) } label: { Image(systemName: "minus") }

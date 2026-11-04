@@ -1195,6 +1195,7 @@
   function grantHint(shortcut, recShortcut) {
     const ways = [];
     if (recShortcut) ways.push(recShortcut + ' (MP3 녹음 단축키 — 허용과 녹음을 한 번에)');
+    else if (recShortcut === '') ways.push('chrome://extensions/shortcuts 에서 "영상 오디오 통째 MP3 녹음"에 Option+R 을 지정하면 다음부터 허용과 녹음이 한 번에');
     if (shortcut) ways.push(shortcut + ' (저장 단축키)');
     ways.push('영상 우클릭 → "SubTutor: 지금 자막 저장"', '툴바의 SubTutor 아이콘');
     return '오디오 녹음은 크롬 규칙상 이 탭에서 한 번 허용해야 합니다: ' + ways.join(' · ') + (shortcut ? '' : ' (단축키는 chrome://extensions/shortcuts 에서 지정)') + '. 허용되면 바로 녹음합니다';
@@ -1365,6 +1366,11 @@
     ui.toggle = el('button', { id: 'st-toggle', title: 'SubTutor 자막 패널 열기 (`)', onclick: () => setPanelOpen(true) }, '‹');
     document.body.append(ui.panel, ui.toggle);
     bg({ type: 'rec.status' }).then((r) => { if (r && r.on) recBegin(r.startedAt || now()); }).catch(() => { /* ignore */ });
+    bg({ type: 'commands.get' }).then((r) => {
+      const key = (r && r.rec) || '';
+      recFull.shortcut = key;
+      if (ui.btnRec) ui.btnRec.title += ' · 단축키 ' + (key || 'Option+R') + (key ? ' (넷플릭스류는 누르는 순간 녹음 허용까지)' : ' — 크롬 단축키로는 아직 지정 안 됨: chrome://extensions/shortcuts 에서 지정하면 넷플릭스류도 허용까지 한 번에');
+    }).catch(() => { /* ignore */ });
 
     ui.overlay = el('div', { id: 'st-overlay', class: 'st-hidden' });
     ui.ovText = el('span', { class: 'st-ov-text' });
@@ -3469,13 +3475,18 @@
     KeyJ: () => { if (!state.dubRec) runDubLadder(); },
     KeyK: () => { if (!state.dubLadder && !(state.dubRec && state.dubRec.phase === 'save')) recordDubTake(); },
   };
+  // Option(Alt)+R: 영상 오디오 통째 MP3 켜기/끄기. 크롬 단축키로 지정돼 있으면 크롬이 먼저 받아(그때는 녹음 허용까지) 여기로는 안 온다 —
+  // 지정이 안 돼 있어도 패널에서 똑같이 먹게 받아 둔다 (보호된 재생은 이 경우 "단축키를 지정하면 허용까지 한 번에" 안내)
+  const isRecKey = (e) => e.code === 'KeyR' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
   function keyAction(e) {
+    if (isRecKey(e)) return recToggle;
     if (e.code === 'Comma' || e.code === 'Period') return (e.shiftKey && SHIFT_ACTIONS[e.code]) || null;
     if (DUB_KEYS[e.code]) return dubModeOn() ? DUB_KEYS[e.code] : null;
     return KEY_ACTIONS[e.code] || null;
   }
   function shouldHandleKey(e) {
     if (!state.active || !isEnabled()) return false;
+    if (isRecKey(e)) return !(isEditable(e.target) || (e.target && e.target.closest && e.target.closest('#st-panel input, #st-panel select, #st-panel textarea')));   // 자막이 없어도 녹음은 된다
     if (!state.cues.length && !/^(Backquote|BracketLeft|BracketRight|Backslash|Comma|Period)$/.test(e.code)) return false;
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
     if (isEditable(e.target) || (e.target && e.target.closest && e.target.closest('#st-panel input, #st-panel select, #st-panel textarea'))) return false;
