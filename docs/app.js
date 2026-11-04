@@ -1641,7 +1641,7 @@
         ]);
         if (kind === 'learning' && !state.edit.on && state.recs.length) {   // 이 에피소드의 통째 오디오가 있으면 맨 위에 플레이어
           const full = g.title + (g.episode ? ' ' + g.episode : '');
-          const rec = state.recs.filter((r) => !r.skip && r.title === full && r.file && r.file.location === 'folder').sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+          const rec = state.recs.filter((r) => !r.skip && r.title === full && recReadable(r)).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
           if (rec) gEl.append(epiRowEl(rec));
         }
         g.items.forEach((it) => gEl.append(itemEl(it, kind)));
@@ -2473,6 +2473,8 @@
     try { state.recs = ((await B.request('recs.list')) || {}).recs || []; } catch (e) { state.recs = []; }
     if (state.view === 'list') render();
   }
+  // 읽을 수 있는 녹음: 지정 폴더의 파일, 또는 확장 프로그램이 자기 저장소에 둔 복사본 (다운로드 폴더로 간 녹음)
+  const recReadable = (r) => !!(r && r.file && (r.file.location === 'folder' || r.file.opfs));
   const recBlobCache = new Map();   // rec.id → Blob (한 번 읽은 파일은 다시 안 읽는다)
   async function recsFetchBlob(rec) {
     if (recBlobCache.has(rec.id)) return recBlobCache.get(rec.id);
@@ -2498,7 +2500,7 @@
     let recs = [];
     try { recs = ((await B.request('recs.list')) || {}).recs || []; } catch (e) { return { ok: 0, fail: 0 }; }
     state.recs = recs;
-    const todo = recs.filter((r) => !r.sent && !r.skip && r.file && r.file.location === 'folder');
+    const todo = recs.filter((r) => !r.sent && !r.skip && recReadable(r));
     if (todo.length) await supaEnsureToken();
     let ok = 0, fail = 0, lastErr = '';
     for (let i = 0; i < todo.length; i++) {
@@ -2677,8 +2679,8 @@
           }));
         }
         if (recBytes) body.append(el('p', { class: 'count' }, '영상 오디오 합계 ' + fmtMB(recBytes) + ' · 아이폰 앱 목록 맨 위(에피소드 제목 아래)에서 내려받아 듣습니다'));
-        const pending = extRecs.filter((r) => !r.sent && !r.skip && r.file && r.file.location === 'folder');
-        const stuck = extRecs.filter((r) => !r.sent && !r.skip && (!r.file || r.file.location !== 'folder'));
+        const pending = extRecs.filter((r) => !r.sent && !r.skip && recReadable(r));
+        const stuck = extRecs.filter((r) => !r.sent && !r.skip && !recReadable(r));
         const skipped = extRecs.filter((r) => r.skip);
         if (pending.length) {
           body.append(el('div', { class: 'row' }, [
@@ -2693,7 +2695,7 @@
             } }, '지금 올리기'),
           ]));
         }
-        if (stuck.length) body.append(el('p', { class: 'count' }, '크롬 다운로드 폴더라 못 읽는 녹음 ' + stuck.length + '개 — 팝업에서 저장 폴더를 지정하면 다음 녹음부터 올라갑니다'));
+        if (stuck.length) body.append(el('p', { class: 'count' }, '예전 녹음 ' + stuck.length + '개는 크롬 다운로드 폴더에만 있어 읽지 못합니다 (이제부터 뽑는 녹음은 폴더를 지정하지 않아도 확장 프로그램이 복사본을 두어 자동으로 올라갑니다)'));
         for (const r of skipped) {
           body.append(el('div', { class: 'row supa-obj' }, [
             el('span', { class: 'supa-obj-name', text: r.title }),

@@ -1462,6 +1462,32 @@ async function runSites() {
       }
     });
 
+    await step('저장 폴더가 없으면 통째 MP3 는 다운로드 폴더로 가고, 확장 프로그램이 복사본을 두어 웹이 그대로 읽는다 (사용자 손 안 감)', async () => {
+      await opt.evaluate(async () => { window.__savedHandle = await window.SubTutorFS.getHandle(); await window.SubTutorFS.setHandle(null); });
+      try {
+        const started = await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'rec.start', test: 'sweep', title: 'No Folder' }, { tab: { id: 778 } }));
+        assert(started && started.ok, 'rec start: ' + JSON.stringify(started));
+        await sleep(1600);
+        const saved = await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'rec.stop' }, {}));
+        assert(saved && saved.ok && saved.location === 'downloads' && !saved.copyError, '다운로드 폴더로 저장: ' + JSON.stringify(saved));
+        const recs = await sw.evaluate(async () => (await chrome.storage.local.get('recordings')).recordings || []);
+        assert(recs.length === 1 && recs[0].file.location === 'downloads' && recs[0].file.opfs === true, '복사본 표시가 있다: ' + JSON.stringify(recs.map((r) => r.file)));
+        const read = await sw.evaluate((id) => globalThis.__subtutorHandle({ type: 'web.recs.data', payload: { id, seq: 0 } }, {}), recs[0].id);
+        assert(read && read.done && read.size === saved.bytes && read.data.length > 1000, '복사본을 그대로 읽는다: ' + JSON.stringify({ done: read && read.done, size: read && read.size, len: read && read.data && read.data.length }));
+        const head = Buffer.from(read.data.slice(0, 8), 'base64');
+        assert(head[0] === 0xff && (head[1] & 0xe0) === 0xe0, 'mp3 sync bytes: ' + head.slice(0, 2).toString('hex'));
+        // 목록에서 지우면 복사본도 지워진다
+        await sw.evaluate((id) => globalThis.__subtutorHandle({ type: 'web.recs.remove', payload: { id } }, {}), recs[0].id);
+        const again = await sw.evaluate((id) => globalThis.__subtutorHandle({ type: 'web.recs.data', payload: { id, seq: 0 } }, {}), recs[0].id);
+        assert(again && again.reason === 'missing', '지운 뒤에는 없다: ' + JSON.stringify(again));
+      } finally {
+        await opt.evaluate(async () => { if (window.__savedHandle) await window.SubTutorFS.setHandle(window.__savedHandle); });
+        await sw.evaluate(() => chrome.storage.local.remove('recordings'));
+        const dls = await sw.evaluate(() => new Promise((r) => chrome.downloads.search({}, r)));
+        for (const d of dls) { await sw.evaluate((id) => chrome.downloads.removeFile(id).catch(() => {}), d.id).catch(() => {}); await sw.evaluate((id) => new Promise((r) => chrome.downloads.erase({ id }, r)), d.id).catch(() => {}); }
+      }
+    });
+
     console.log('▶ 모의 유튜브 페이지');
     const yt = await browser.newPage();
     let ytClipB64 = null; // 유튜브 저장 단계의 MP3 (파일 = 웹 복사본) — 뒤 단계에서 비교에 쓴다

@@ -358,6 +358,43 @@
       .catch(() => {});
   }
 
+  // ── 녹음 복사본 보관 (확장 프로그램 자기 저장소 OPFS): 저장 폴더가 없어 크롬 다운로드 폴더로 간 녹음도
+  //    여기 복사본을 두면 웹이 읽어 아이폰으로 올릴 수 있다 (다운로드 폴더는 확장 프로그램이 읽지 못한다)
+  const recWriters = new Map();   // recId → FileSystemWritableFileStream
+  async function recDir() {
+    const root = await navigator.storage.getDirectory();
+    return root.getDirectoryHandle('rec', { create: true });
+  }
+  async function recStoreOpen(recId) {
+    const fh = await (await recDir()).getFileHandle(recId + '.mp3', { create: true });
+    recWriters.set(recId, await fh.createWritable());
+    return { ok: true };
+  }
+  async function recStorePart(recId, data) {
+    const w = recWriters.get(recId);
+    if (!w) throw new Error('열린 복사본이 없습니다');
+    await w.write(A.base64ToBytes(data));
+    return { ok: true };
+  }
+  async function recStoreClose(recId) {
+    const w = recWriters.get(recId);
+    recWriters.delete(recId);
+    if (w) await w.close();
+    return { ok: true };
+  }
+  async function recRead(recId, seq) {
+    const SLICE = 6 * 1024 * 1024;
+    let file;
+    try { file = await (await (await recDir()).getFileHandle(recId + '.mp3')).getFile(); } catch (e) { return { reason: 'missing' }; }
+    const off = (seq || 0) * SLICE;
+    const bytes = new Uint8Array(await file.slice(off, off + SLICE).arrayBuffer());
+    return { data: A.bytesToBase64(bytes), done: off + SLICE >= file.size, size: file.size };
+  }
+  async function recDelete(recId) {
+    try { await (await recDir()).removeEntry(recId + '.mp3'); } catch (e) { /* 없음 */ }
+    return { ok: true };
+  }
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || msg.target !== 'offscreen') return false;
     const run = (p) => p.then((r) => sendResponse(r), (err) => sendResponse({ ok: false, error: String((err && err.message) || err) }));
@@ -369,6 +406,11 @@
     else if (msg.cmd === 'recBeat') { if (recSess && !recSess.finishing) { recSess.lastBeat = nowWall(); recSess.paused = !!msg.paused; } sendResponse({ ok: true, recording: !!recSess && !recSess.finishing }); }
     else if (msg.cmd === 'recStop') run(recFinish(recSess, 'user').then((m) => m || { ok: false, error: '영상 오디오를 녹음하고 있지 않습니다' }));
     else if (msg.cmd === 'recPing') sendResponse({ ok: true, recording: !!recSess && !recSess.finishing });
+    else if (msg.cmd === 'recStoreOpen') run(recStoreOpen(msg.recId));
+    else if (msg.cmd === 'recStorePart') run(recStorePart(msg.recId, msg.data));
+    else if (msg.cmd === 'recStoreClose') run(recStoreClose(msg.recId));
+    else if (msg.cmd === 'recRead') run(recRead(msg.recId, msg.seq));
+    else if (msg.cmd === 'recDelete') run(recDelete(msg.recId));
     else return false;
     return true;
   });

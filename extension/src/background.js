@@ -539,6 +539,8 @@ async function recSave(meta) {
   const b64 = parts.join('');
   recState = null;
   const out = { ok: true, fileName, durMs: meta.durMs || 0, skippedMs: meta.skippedMs || 0, bytes: meta.bytes || 0, reason: meta.reason || '' };
+  const recId = 'r' + Date.now().toString(36);
+  let opfs = false;
   const folder = await saveToFolder(fileName, b64);
   if (folder.ok) { out.location = 'folder'; out.fileName = folder.path; }
   else {
@@ -548,11 +550,18 @@ async function recSave(meta) {
     } catch (e) {
       return { ok: false, error: '파일 저장 실패: ' + ((e && e.message) || e) };
     }
+    // 다운로드 폴더는 확장 프로그램이 다시 읽지 못한다 — 아이폰으로 올릴 수 있게 자기 저장소(OPFS)에 복사본을 둔다
+    try {
+      await offscreenCall({ cmd: 'recStoreOpen', recId }, 2);
+      for (const part of parts) await offscreenCall({ cmd: 'recStorePart', recId, data: part }, 2);
+      await offscreenCall({ cmd: 'recStoreClose', recId }, 2);
+      opfs = true;
+    } catch (e) { out.copyError = String((e && e.message) || e); }
   }
   // 녹음 목록에 적어 둔다 — 웹(설정 › 서버 소리 관리)이 읽어 Supabase 로 올리고, 아이폰이 내려받는다
   const recs = await getRecs();
-  recs.push({ id: 'r' + Date.now().toString(36), title, at: Date.now(), durMs: out.durMs, bytes: out.bytes,
-    file: { location: out.location, path: out.fileName, downloadId: out.downloadId || 0 }, sent: 0, skip: false });
+  recs.push({ id: recId, title, at: Date.now(), durMs: out.durMs, bytes: out.bytes,
+    file: { location: out.location, path: out.fileName, downloadId: out.downloadId || 0, opfs }, sent: 0, skip: false });
   await setRecs(recs);
   return out;
 }
@@ -760,6 +769,7 @@ async function handleMessage(msg, sender) {
     case 'web.recs.data': {   // 웹이 올리기 전에 폴더의 MP3 를 6MB 조각으로 읽어 간다
       const rec = (await getRecs()).find((x) => x.id === p.id);
       if (!rec) return { reason: 'missing' };
+      if (rec.file && rec.file.location !== 'folder' && rec.file.opfs) return offscreenCall({ cmd: 'recRead', recId: rec.id, seq: p.seq || 0 }, 2);   // 자기 저장소의 복사본
       if (!rec.file || rec.file.location !== 'folder') return { reason: 'downloads' };
       const r = await FS.readFile(rec.file.path);
       if (!r.ok) return { reason: r.reason || 'error' };
@@ -774,7 +784,9 @@ async function handleMessage(msg, sender) {
       return { ok: true };
     }
     case 'web.recs.remove': {
+      const gone = (await getRecs()).find((x) => x.id === p.id);
       await setRecs((await getRecs()).filter((x) => x.id !== p.id));
+      if (gone && gone.file && gone.file.opfs) await offscreenCall({ cmd: 'recDelete', recId: gone.id }, 2).catch(() => {});
       return { ok: true };
     }
     case 'rec.auto': {   // 심장박동 끊김·용량 초과로 offscreen 이 스스로 끝냈다 — 저장하고 플레이어 탭에 알린다
