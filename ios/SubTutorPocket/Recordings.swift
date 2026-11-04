@@ -75,7 +75,17 @@ final class RecStore: ObservableObject {
     // 저장한 자막 작품 머리와 맞추기: 녹음 제목 = "작품제목 에피소드"
     func match(title: String, episode: String) -> RecFile? {
         let full = title + (episode.isEmpty ? "" : " " + episode)
-        return files.filter { $0.title == full }.sorted { $0.at > $1.at }.first
+        return files.filter { RecStore.matches($0.title, full) }.sorted { $0.at > $1.at }.first
+    }
+    // 녹음 제목 ↔ 작품·에피소드: 문장부호·띄어쓰기·대소문자 무시 ("S1:E1 사랑이란?" ≈ "S1 E1 사랑이란"),
+    // 예전 녹음은 제목이 잘려 있어 충분히 길면(16자↑) 앞부분이 같아도 같은 에피소드 — 웹 recMatches 와 같은 규칙
+    static func key(_ s: String) -> String {
+        let scalars = s.precomposedStringWithCanonicalMapping.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
+        return String(String.UnicodeScalarView(scalars))
+    }
+    static func matches(_ recTitle: String, _ full: String) -> Bool {
+        let a = key(recTitle), b = key(full)
+        return !a.isEmpty && (a == b || (a.count >= 16 && b.hasPrefix(a)))
     }
 
     func refresh(url: String, key: String, force: Bool = true) async {

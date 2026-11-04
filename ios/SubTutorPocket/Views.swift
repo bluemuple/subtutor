@@ -430,11 +430,11 @@ struct RootView: View {
     private var learning: [Item] { store.items.filter { $0.box != "known" } }
     // 저장한 자막이 없는 에피소드의 통째 오디오 (제목별 최신 하나)
     private func orphanRecs(_ sections: [Work]) -> [RecFile] {
-        let have = Set(sections.map { $0.title + ($0.episode.isEmpty ? "" : " " + $0.episode) })
+        let have = sections.map { $0.title + ($0.episode.isEmpty ? "" : " " + $0.episode) }
         var seen = Set<String>()
         var out: [RecFile] = []
-        for f in recs.files.sorted(by: { $0.at > $1.at }) where !have.contains(f.title) && !seen.contains(f.title) {
-            seen.insert(f.title)
+        for f in recs.files.sorted(by: { $0.at > $1.at }) where !have.contains(where: { RecStore.matches(f.title, $0) }) && !seen.contains(RecStore.key(f.title)) {
+            seen.insert(RecStore.key(f.title))
             out.append(f)
         }
         return out

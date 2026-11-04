@@ -531,7 +531,10 @@ async function recSave(meta) {
   recParts.delete(meta.recId);
   if (!parts.length) return { ok: false, error: '받은 오디오 조각이 없습니다' };
   const safe = (x) => String(x || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) || '영상 오디오';
-  const title = safe(recState && recState.title);
+  // 목록·아이폰에는 원래 제목("프렌즈 S1:E1 사랑이란?")을 그대로 — 예전엔 파일 이름용으로 다듬은 제목(: ? 를 지우고 60자에서 자름)을
+  // 그대로 써서, 작품·에피소드 머리와 글자가 어긋나 플레이어가 붙지 않았다
+  const rawTitle = String((recState && recState.title) || '').replace(/\s+/g, ' ').trim().slice(0, 120) || '영상 오디오';
+  const title = safe(rawTitle);   // 파일 이름용
   const d = new Date();
   const two = (n) => String(n).padStart(2, '0');
   const stamp = d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + ' ' + two(d.getHours()) + '.' + two(d.getMinutes());
@@ -560,7 +563,7 @@ async function recSave(meta) {
   }
   // 녹음 목록에 적어 둔다 — 웹(설정 › 서버 소리 관리)이 읽어 Supabase 로 올리고, 아이폰이 내려받는다
   const recs = await getRecs();
-  recs.push({ id: recId, title, at: Date.now(), durMs: out.durMs, bytes: out.bytes,
+  recs.push({ id: recId, title: rawTitle, at: Date.now(), durMs: out.durMs, bytes: out.bytes,
     file: { location: out.location, path: out.fileName, downloadId: out.downloadId || 0, opfs }, sent: 0, skip: false });
   await setRecs(recs);
   notifyRecSync();   // 설정이 켜져 있으면(기본) 웹이 바로 아이폰으로 올린다

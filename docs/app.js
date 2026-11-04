@@ -1686,7 +1686,7 @@
         ]);
         if (kind === 'learning' && !state.edit.on && state.recs.length) {   // 이 에피소드의 통째 오디오가 있으면 맨 위에 플레이어
           const full = g.title + (g.episode ? ' ' + g.episode : '');
-          const rec = state.recs.filter((r) => !r.skip && r.title === full && recReadable(r)).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+          const rec = state.recs.filter((r) => !r.skip && recMatches(r.title, full) && recReadable(r)).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
           if (rec) gEl.append(epiRowEl(rec));
         }
         if (!folded) g.items.forEach((it) => gEl.append(itemEl(it, kind)));
@@ -1694,11 +1694,11 @@
       }
       // 자막을 저장하지 않은 에피소드도, 통째 오디오가 있으면 작품 머리 + 플레이어로 보여 준다
       if (kind === 'learning' && !state.edit.on && !state.filterTitle && !state.filterTag && !q && state.recs.length) {
-        const have = new Set(list.map((g) => g.title + (g.episode ? ' ' + g.episode : '')));
+        const have = list.map((g) => g.title + (g.episode ? ' ' + g.episode : ''));
         const seen = new Set();
         for (const r of state.recs.slice().sort((a, b) => (b.at || 0) - (a.at || 0))) {
-          if (r.skip || !recReadable(r) || have.has(r.title) || seen.has(r.title)) continue;
-          seen.add(r.title);
+          if (r.skip || !recReadable(r) || have.some((h) => recMatches(r.title, h)) || seen.has(recKey(r.title))) continue;
+          seen.add(recKey(r.title));
           const gEl = el('div', { class: 'group rec-only' }, [
             el('h3', { class: 'group-title' }, [r.title, el('small', null, '에피소드 오디오 — 저장한 자막 없음')]),
           ]);
@@ -2366,7 +2366,7 @@
   // 영상 오디오(통째 MP3) 서버 파일 이름: rec/<id>.<길이 base36>.<제목 base64url>.mp3 — 표 없이 Storage 목록만으로 제목·길이를 안다
   const b64u = (x) => btoa(unescape(encodeURIComponent(x))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const unb64u = (x) => { try { return decodeURIComponent(escape(atob(String(x).replace(/-/g, '+').replace(/_/g, '/')))); } catch (e) { return ''; } };
-  const recStoreName = (r) => 'rec/' + r.id + '.' + Math.max(0, Math.round(r.durMs)).toString(36) + '.' + b64u(String(r.title || '').slice(0, 60)) + '.mp3';
+  const recStoreName = (r) => 'rec/' + r.id + '.' + Math.max(0, Math.round(r.durMs)).toString(36) + '.' + b64u(String(r.title || '').slice(0, 100)) + '.mp3';
   const parseRecStore = (name) => {
     const m = /^(r[0-9a-z]+)\.([0-9a-z]+)\.([A-Za-z0-9_-]*)\.mp3$/.exec(String(name || ''));
     if (!m) return null;
@@ -2554,6 +2554,10 @@
     } catch (e) { /* 다음 자동 동기화 때 */ }
     recsAutoBusy = false;
   }
+  // 녹음 제목 ↔ 작품·에피소드 머리 맞추기: 문장부호·띄어쓰기·대소문자를 무시한다 ("S1:E1 사랑이란?" ≈ "S1 E1 사랑이란").
+  // 예전 녹음은 제목이 60자에서 잘려 있으므로, 충분히 길면(16자↑) 앞부분이 같아도 같은 에피소드로 본다
+  const recKey = (s) => String(s || '').normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  const recMatches = (recTitle, full) => { const a = recKey(recTitle), b = recKey(full); return !!a && (a === b || (a.length >= 16 && b.startsWith(a))); };
   // 읽을 수 있는 녹음: 지정 폴더의 파일, 또는 확장 프로그램이 자기 저장소에 둔 복사본 (다운로드 폴더로 간 녹음)
   const recReadable = (r) => !!(r && r.file && (r.file.location === 'folder' || r.file.opfs));
   const recBlobCache = new Map();   // rec.id → Blob (한 번 읽은 파일은 다시 안 읽는다)
@@ -2753,7 +2757,9 @@
           if (!info) continue;
           remoteIds.add(info.id);
           recBytes += size(o);
-          body.append(delRow(info.title + ' — ' + fmtWhen(info.at), F.fmtClock(info.durMs / 1000) + ' · ' + fmtMB(size(o)), async () => {
+          const home = state.items.find((it) => recMatches(info.title, (it.title || '') + (it.episode ? ' ' + it.episode : '')));
+          const where = home ? ' · 저장한 자막 "' + home.title + (home.episode ? ' · ' + home.episode : '') + '" 머리에 플레이어' : ' · 저장한 자막 없음 → 목록 맨 아래에 따로';
+          body.append(delRow(info.title + ' — ' + fmtWhen(info.at), F.fmtClock(info.durMs / 1000) + ' · ' + fmtMB(size(o)) + where, async () => {
             await removeObjects([uid + '/rec/' + o.name]);
             const ext = extRecs.find((x) => x.id === info.id);
             if (ext) await B.request('recs.mark', { id: ext.id, patch: { skip: true, sent: 0 } }).catch(() => {});   // 다시 자동으로 올라가지 않게

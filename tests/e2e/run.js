@@ -3013,11 +3013,16 @@ async function runSites() {
       }, Array.from(Buffer.concat([Buffer.from([0xff, 0xfb, 0x90, 0x44]), Buffer.alloc(3000, 7)])));
       await sw.evaluate(async (recId2, recAt2) => {
         await chrome.storage.local.set({
-          items: [{ id: 'rec:show:1', platform: 'netflix', title: 'Rec Show', episode: 'S1 E1', text: 'Hello there.', translation: '', startMs: 1000, endMs: 2000, savedAt: Date.now(), tags: [], box: 'learning' }],
+          items: [
+            { id: 'rec:show:1', platform: 'netflix', title: 'Rec Show', episode: 'S1 E1', text: 'Hello there.', translation: '', startMs: 1000, endMs: 2000, savedAt: Date.now(), tags: [], box: 'learning' },
+            // 넷플릭스식 에피소드 이름(: ? 포함) — 예전 녹음 제목은 파일 이름용으로 다듬어져 "Colon Show S1 E2 Why" 였다
+            { id: 'colon:show:1', platform: 'netflix', title: 'Colon Show', episode: 'S1:E2 Why?', text: 'Hi.', translation: '', startMs: 1000, endMs: 2000, savedAt: Date.now() - 5000, tags: [], box: 'learning' },
+          ],
           recordings: [
             { id: recId2, title: 'Rec Show S1 E1', at: recAt2, durMs: 754000, bytes: 3004, file: { location: 'folder', path: 'e2e-docs/SubTutor/영상 오디오/Rec Show S1 E1.mp3', downloadId: 0 }, sent: 0, skip: false },
             // 자막을 저장한 적 없는 에피소드의 녹음 (이미 올라간 것으로 표시해 "안 올라간 1개" 검사를 안 흔든다)
             { id: 'r' + (recAt2 + 1).toString(36), title: 'Orphan Show S1 E1', at: recAt2 - 1000, durMs: 120000, bytes: 3004, file: { location: 'folder', path: 'e2e-docs/SubTutor/영상 오디오/Rec Show S1 E1.mp3', downloadId: 0 }, sent: recAt2, skip: false },
+            { id: 'r' + (recAt2 + 2).toString(36), title: 'Colon Show S1 E2 Why', at: recAt2 - 2000, durMs: 60000, bytes: 3004, file: { location: 'folder', path: 'e2e-docs/SubTutor/영상 오디오/Rec Show S1 E1.mp3', downloadId: 0 }, sent: recAt2, skip: false },
           ],
         });
       }, recId, recAt);
@@ -3077,6 +3082,9 @@ async function runSites() {
         // 자막을 저장하지 않은 에피소드도 작품 머리 + 플레이어로 보인다
         const orphan = await w5.evaluate(() => [...document.querySelectorAll('.group.rec-only')].map((g) => ({ t: g.querySelector('.group-title').textContent, p: !!g.querySelector('.epi-audio') })));
         assert(orphan.length === 1 && /Orphan Show S1 E1/.test(orphan[0].t) && /저장한 자막 없음/.test(orphan[0].t) && orphan[0].p, '자막 없는 에피소드 묶음: ' + JSON.stringify(orphan));
+        // "S1:E2 Why?" 에피소드에 예전 방식 제목 "Colon Show S1 E2 Why" 녹음 — 문장부호를 무시하고 그 머리에 붙는다
+        const colon = await w5.evaluate(() => { const g = [...document.querySelectorAll('.group')].find((x) => /Colon Show/.test(x.querySelector('.group-title').textContent) && !x.classList.contains('rec-only')); return g ? !!g.querySelector('.epi-audio') : null; });
+        assert(colon === true, '콜론·물음표 에피소드 머리에도 플레이어: ' + colon);
         // 영상 오디오를 서버에서 지우면 skip 이 남아 자동으로 다시 올라가지 않는다
         await w5.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
         await waitFor(async () => [...(await bodyText()).matchAll(/Rec Show S1 E1 — /g)].length >= 1, 15000, 'rec row listed again');
@@ -3089,7 +3097,7 @@ async function runSites() {
         await sw.evaluate(async () => {
           await chrome.storage.local.remove('recordings');
           const { items } = await chrome.storage.local.get('items');
-          await chrome.storage.local.set({ items: (items || []).filter((i) => i.id !== 'rec:show:1') });
+          await chrome.storage.local.set({ items: (items || []).filter((i) => i.id !== 'rec:show:1' && i.id !== 'colon:show:1') });
         });
         await opt.evaluate(async () => { try { const root = await navigator.storage.getDirectory(); const d = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); await d.removeEntry('영상 오디오', { recursive: true }); } catch (e) { /* 없음 */ } });
       }
