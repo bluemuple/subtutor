@@ -2857,9 +2857,15 @@ async function runSites() {
       await waitFor(() => w4.evaluate(() => document.querySelectorAll('.speak-take').length >= 1), 5000, 'take row appears');
       const t1 = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes[0]);
       assert(t1.mode === 'free' && t1.durMs >= 900, '자유 녹음 길이: ' + Math.round(t1.durMs) + 'ms');
-      // 별점 4 + 메모
-      await w4.evaluate(() => { document.querySelectorAll('.speak-take .speak-stars button')[3].click(); });
-      await w4.evaluate(() => { document.querySelector('.speak-take .icon[title="메모"]').click(); });
+      // 별점 4 + 메모 + 받아 적기 T + ▶ — 실제 마우스 클릭으로 (기록 줄의 "밀어서 삭제"가 클릭을 가로채던 버그를 잡는다)
+      const takeSel = '.speak-take';
+      await w4.$eval(takeSel, (r) => r.scrollIntoView({ block: 'center' }));
+      await w4.click(takeSel + ' .speak-stars button:nth-child(4)');
+      await waitFor(() => w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes[0].rating === 4), 3000, 'real click: star 4');
+      await w4.click(takeSel + ' .icon[title="받아 적은 문장 (음성 인식)"]');
+      await waitFor(() => w4.evaluate(() => !!document.querySelector('.speak-take .t-heard')), 3000, 'real click: T opens the transcript');
+      await w4.click(takeSel + ' .icon[title="메모"]');
+      await waitFor(() => w4.evaluate(() => !!document.querySelector('.speak-take .t-memo')), 3000, 'real click: memo box opens');
       await w4.evaluate(() => {
         const ta = document.querySelector('.speak-take .t-memo');
         ta.value = '막힌 데: rules 설명';
@@ -2867,8 +2873,15 @@ async function runSites() {
       });
       const t1b = await w4.evaluate(() => JSON.parse(localStorage.getItem('st.speak')).takes[0]);
       assert(t1b.rating === 4 && t1b.memo === '막힌 데: rules 설명', '별점·메모 저장: ' + JSON.stringify([t1b.rating, t1b.memo]));
-      // 재생 단추가 생긴다 (오디오가 이 브라우저에 있다)
+      // 재생 단추가 생긴다 (오디오가 이 브라우저에 있다) — 실제 클릭으로 누르면 재생이 시작된다
       assert(await w4.evaluate(() => !!document.querySelector('.speak-take .icon[title="재생"]')), '오디오가 있어 ▶ 가 보인다');
+      await w4.evaluate(() => {   // 재생이 실제로 시작되는지 보려고 Audio.play 를 엿본다
+        window.__played = 0;
+        const orig = HTMLMediaElement.prototype.play;
+        HTMLMediaElement.prototype.play = function () { window.__played++; return orig.apply(this, arguments); };
+      });
+      await w4.click(takeSel + ' .icon[title="재생"]');
+      await waitFor(() => w4.evaluate(() => window.__played > 0), 4000, 'real click: ▶ starts playback');
     });
 
     await step('입트기(웹) 범주 접기·주사위·스와이프 삭제: 제목을 누르면 접히고, 🎲 가 뽑은 범주는 자동으로 펼쳐지고, 기록을 왼쪽으로 밀면 빨간 삭제', async () => {

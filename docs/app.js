@@ -1404,14 +1404,19 @@
       row.dataset.swiped = cur <= -W / 2 ? '1' : '';
     };
     row.addEventListener('pointerdown', (e) => {
-      if (e.target.closest('.t-del') || e.target.closest('textarea')) return;
+      if (e.button !== 0 || e.target.closest('.t-del') || e.target.closest('textarea')) return;
       drag = true; horiz = false; sx = e.clientX; sy = e.clientY; base = cur;
-      try { row.setPointerCapture(e.pointerId); } catch (e2) { /* 합성 이벤트 */ }
+      // 여기서 포인터를 붙잡으면(setPointerCapture) 그냥 누른 클릭도 줄로 가서 ▶·T·📝·별 버튼이 먹지 않는다 —
+      // 가로로 밀기 시작했다고 판단한 뒤에만 붙잡는다
     });
     row.addEventListener('pointermove', (e) => {
       if (!drag) return;
       const dx = e.clientX - sx, dy = e.clientY - sy;
-      if (!horiz) { if (Math.abs(dx) < 9 || Math.abs(dx) <= Math.abs(dy)) return; horiz = true; }
+      if (!horiz) {
+        if (Math.abs(dx) < 9 || Math.abs(dx) <= Math.abs(dy)) return;
+        horiz = true;
+        try { row.setPointerCapture(e.pointerId); } catch (e2) { /* 합성 이벤트 */ }
+      }
       cur = Math.min(0, Math.max(-W - 14, base + dx));
       apply(false);
     });
