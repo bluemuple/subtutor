@@ -9,6 +9,7 @@
 
   const S = globalThis.SubTutorSubs;
   const A = globalThis.SubTutorAdapters;
+  const Sites = globalThis.SubTutorSites;   // 사이트 목록 + 자동 녹음 캡슐 판단 (lib/sites.js)
   const adapter = A && A.detect();
   if (!S || !adapter) return;
   const page = A.page;
@@ -35,7 +36,9 @@
     leadMs: 150,
     tailMs: 200,
     audioMode: 'off',           // off | store | download | both : 별표 저장 시 오디오 처리
-    recAuto: false,             // 에피소드를 재생하면 자동으로 영상 오디오 통째 MP3 녹음
+    recAuto: false,             // (예전 스위치) 모든 서비스에서 자동 녹음 — 이제는 아래 캡슐로 고른다 (lib/sites.js recAutoWhy)
+    recAutoSites: null,         // 자동 녹음할 서비스 캡슐 ['netflix', 'tvnz', …] — null 이면 아직 안 고름(예전 스위치를 따른다)
+    recTitles: [],              // 최근 본 작품 캡슐 [{ site, title, at, on }] — on 이면 그 작품만 자동 녹음 (목록은 서비스 워커가 고친다)
     recAutoSync: true,          // 녹음을 마치면 바로 아이폰으로 올리기 (SubTutor 웹 탭이 올린다)
     saveSentence: true,         // 문장 단위 저장: 자막이 문장 중간에서 끝나면 문장이 끝나는 자막까지 묶어서 저장 (근거: lib/explain.js saveSentence)
     savePick: true,             // 한 자막에 문장이 여러 개면, 저장할 때 영상을 멈추고 어떤 문장을 저장할지 고른다 (뒷문장만도 가능)
@@ -1010,7 +1013,7 @@
   const DRM_SITES = ['netflix', 'prime', 'disney'];
   const IS_MAC = /Mac/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '');
   const REC_KEY_TEXT = IS_MAC ? 'Control+R' : 'Alt+R';   // 에피소드 통째 녹음 단축키 (Mac 은 ⌃R)
-  const recFull = { on: false, startedAt: 0, timer: null, tick: 0, pending: false, elem: null, title0: '', autoFor: null };
+  const recFull = { on: false, startedAt: 0, timer: null, tick: 0, pending: false, elem: null, title0: '', autoFor: null, seenFor: null };
   // AudioData 한 조각 → 모노 Float32
   function recElemMono(ad) {
     const n = ad.numberOfFrames, nch = ad.numberOfChannels || 1;
@@ -1084,12 +1087,26 @@
     }
     return bg({ type: 'rec.elemSave', title: recFull.title0 || recTitle(), meta: { recId, bytes: bytes.length, durMs, skippedMs: Math.round((cur.skipped / (cur.sampleRate || 48000)) * 1000), reason } });
   }
-  // 에피소드를 재생하면 자동으로 담기 시작 (⚙ 설정 · 에피소드마다 한 번 — 사용자가 멈추면 그 에피소드에서는 다시 켜지 않는다)
+  // 자동 녹음 캡슐의 "작품": 유튜브는 영상마다 제목이 달라 채널을 작품으로 본다 (채널을 고르면 그 채널 영상을 모두 담는다)
+  function recWork() {
+    const m = state.meta;
+    if (!m || !m.title) return null;
+    const title = adapter.name === 'youtube' ? (m.episode || m.title) : m.title;
+    return { site: adapter.name, title: String(title).trim() };
+  }
+  // 에피소드를 재생하면 자동으로 담기 시작 (⚙ 캡슐로 고른 서비스·작품 · 에피소드마다 한 번 — 사용자가 멈추면 그 에피소드에서는 다시 켜지 않는다)
   function recAutoTick() {
-    if (!settings.recAuto || recFull.on || recFull.pending || !state.active || !isEnabled() || !state.videoId) return;
-    if (recFull.autoFor === state.videoId) return;
+    if (!state.active || !isEnabled() || !state.videoId) return;
     const v = adapter.video();
     if (!v || v.paused || v.ended) return;
+    const work = recWork();
+    // 최근 본 작품에 올린다 (에피소드마다 한 번) — ⚙ 에서 서비스를 고르지 않고 그 작품만 고를 수 있게
+    if (work && recFull.seenFor !== state.videoId) {
+      recFull.seenFor = state.videoId;
+      bg({ type: 'recAuto.seen', site: work.site, title: work.title }).catch(() => {});
+    }
+    if (recFull.on || recFull.pending || recFull.autoFor === state.videoId) return;
+    if (!Sites || !Sites.recAutoWhy(settings, adapter.name, work && work.title)) return;
     recFull.autoFor = state.videoId;
     recToggle();
   }
@@ -1315,6 +1332,7 @@
     const name = state.meta.title + (state.meta.episode ? ' · ' + state.meta.episode : '');
     if (ui.panel) ui.panel.dataset.title = name;
     if (ui.status) ui.status.title = name;
+    renderRecAutoCaps();
   }
   async function loadMeta() {
     const token = state.runToken;
@@ -1351,7 +1369,7 @@
     // 쉬는 시간을 고르면 따라하기도 켠다 — 시간만 바꾸고 모드는 꺼져 있어 그냥 재생되던 혼동을 막는다
     ui.shadowSec = el('select', { class: 'st-shadow-sec', title: '따라하기: 자막이 끝난 뒤 쉬는 시간 (고르면 따라하기가 켜집니다)', onchange: (e) => { saveSettings(shadowPausePatch(e.target.value)); if (!settings.shadowing) setMode('shadowing', true); } });
     shadowPauseOptions(false).forEach((g) => ui.shadowSec.append(g));
-    ui.btnSettings = el('button', { class: 'st-icon', title: '설정', onclick: () => { ui.settings.classList.toggle('st-hidden'); syncSettingsForm(); } }, '⚙');
+    ui.btnSettings = el('button', { class: 'st-icon', title: '설정', onclick: () => { ui.settings.classList.toggle('st-hidden'); syncSettingsForm(); if (!ui.settings.classList.contains('st-hidden')) refreshRecCustomSites(); } }, '⚙');
     ui.btnClose = el('button', { class: 'st-icon', title: '패널 닫기 (`)', onclick: () => setPanelOpen(false) }, '✕');
     const head = el('div', { class: 'st-head' }, [ui.dubToggle, ui.btnAP, ui.btnShadow, ui.shadowSec, ui.btnSettings, ui.btnClose]);
     ui.status = el('div', { class: 'st-status' });
@@ -1874,6 +1892,85 @@
       el('div', { class: 'st-vocab-list' }, rows.length ? rows : [el('p', { text: '3천 단어 밖의 단어가 없습니다.' })]),
     ]);
   }
+  // ── ⚙ › 에피소드를 재생하면 자동으로 오디오 MP3 녹음: 서비스 캡슐(그 서비스 전부) · 최근 본 작품 캡슐(그 작품만) ──
+  let recCustomSites = [];   // 팝업에서 켠 사이트("아무 사이트") — 서비스 캡슐에 함께 둔다
+  function refreshRecCustomSites() {
+    bg({ type: 'sites.list' }).then((r) => {
+      recCustomSites = ((r && r.sites) || []).filter((x) => x && x.host).map((x) => ({ key: 'site:' + x.host, label: String(x.host).replace(/^www\./, '') }));
+      renderRecAutoCaps();
+    }).catch(() => {});
+  }
+  function buildRecAutoField(f) {
+    f.recCapsSites = el('div', { class: 'st-caps st-caps-sites' });
+    f.recCapsTitles = el('div', { class: 'st-caps st-caps-titles' });
+    f.recCapsNow = el('div', { class: 'st-caps-now' });
+    refreshRecCustomSites();
+    return el('div', { class: 'st-field st-field-stack st-recauto' }, [
+      el('label', null, ['에피소드를 재생하면 자동으로 오디오 MP3 녹음', infoBtn('recFull')]),
+      f.recCapsSites,
+      el('div', { class: 'st-caps-head', text: '최근 본 작품' }),
+      f.recCapsTitles,
+      f.recCapsNow,
+    ]);
+  }
+  const recSiteName = (key) => (key === 'youtube' ? '유튜브 채널' : (Sites ? Sites.serviceLabel(key) : key));
+  function recCap(text, sub, on, opts) {
+    const cls = 'st-cap' + (on ? ' st-on' : '') + (opts.covered ? ' st-covered' : '') + (opts.here ? ' st-here' : '');
+    return el('button', { type: 'button', class: cls, 'aria-pressed': on ? 'true' : 'false', title: opts.title || '', 'data-key': opts.key || '', onclick: opts.onclick }, [(on ? '✓ ' : '') + text, sub ? el('span', { class: 'st-cap-sub' }, sub) : null]);
+  }
+  function recPickSite(key, on) {
+    // 바로 다시 그리고(누른 느낌), 저장은 서비스 워커가 — 돌아오는 설정으로 한 번 더 그린다
+    const known = Sites.SERVICES.map((x) => x.key).concat(recCustomSites.map((x) => x.key));
+    const set = new Set(Sites.recAutoSiteKeys(settings, known));
+    if (on) set.add(key); else set.delete(key);
+    settings = Object.assign({}, settings, { recAutoSites: Array.from(set), recAuto: false });
+    renderRecAutoCaps();
+    bg({ type: 'recAuto.site', site: key, on }).then((r) => { if (r && r.settings) { settings = Object.assign({}, DEFAULT_SETTINGS, r.settings); renderRecAutoCaps(); } }).catch((e) => toast('저장하지 못했습니다: ' + (e && e.message), 4000));
+  }
+  function recPickTitle(site, title, on) {
+    settings = Object.assign({}, settings, { recTitles: Sites.recentSet(settings.recTitles, site, title, on, Date.now()) || settings.recTitles });
+    renderRecAutoCaps();
+    bg({ type: 'recAuto.title', site, title, on }).then((r) => { if (r && r.settings) { settings = Object.assign({}, DEFAULT_SETTINGS, r.settings); renderRecAutoCaps(); } }).catch((e) => toast('저장하지 못했습니다: ' + (e && e.message), 4000));
+  }
+  function renderRecAutoCaps() {
+    const f = ui.form;
+    if (!f || !f.recCapsSites || !Sites) return;
+    const legacyAll = !Array.isArray(settings.recAutoSites) && !!settings.recAuto;   // 예전 스위치를 켜 둔 채 = 모든 서비스
+    const picked = new Set(Array.isArray(settings.recAutoSites) ? settings.recAutoSites : []);
+    const siteOn = (k) => legacyAll || picked.has(k);
+    const sites = Sites.SERVICES.map((x) => ({ key: x.key, label: x.label }));
+    const addSite = (k, lab) => { if (!sites.some((x) => x.key === k)) sites.push({ key: k, label: lab }); };
+    recCustomSites.forEach((x) => addSite(x.key, x.label));
+    if (adapter.custom) addSite(adapter.name, adapter.label);
+    picked.forEach((k) => addSite(k, Sites.serviceLabel(k)));
+    f.recCapsSites.replaceChildren(...sites.map((x) => {
+      const on = siteOn(x.key), here = x.key === adapter.name;
+      return recCap(x.label, '', on, { key: x.key, here, onclick: () => recPickSite(x.key, !on),
+        title: (on ? x.label + '에서 재생하는 에피소드를 모두 자동으로 녹음합니다 — 누르면 끕니다' : '누르면 ' + x.label + '에서 재생하는 에피소드를 모두 자동으로 녹음합니다') + (here ? ' (지금 보는 곳)' : '') });
+    }));
+    const work = recWork();
+    const titles = (Array.isArray(settings.recTitles) ? settings.recTitles : []).filter((x) => x && x.site && x.title);
+    const isHere = (x) => !!work && x.site === work.site && Sites.workMatches(x.title, work.title);
+    // 지금 보는 작품은 아직 목록에 없어도(재생 전) 맨 앞에 보여 바로 고를 수 있게
+    const list = work && !titles.some(isHere) ? [{ site: work.site, title: work.title, on: false }].concat(titles) : titles;
+    f.recCapsTitles.replaceChildren(...(list.length ? list.map((x) => {
+      const covered = !x.on && siteOn(x.site);
+      const name = recSiteName(x.site);
+      return recCap(x.title, name, !!x.on, { key: x.site + '|' + x.title, here: isHere(x), covered, onclick: () => recPickTitle(x.site, x.title, !x.on),
+        title: x.on ? '이 작품의 에피소드를 자동으로 녹음합니다 — 누르면 끕니다'
+          : (covered ? Sites.serviceLabel(x.site) + ' 전체를 골라 이 작품도 자동으로 녹음합니다 (서비스를 꺼도 이 작품만 담으려면 누르세요)' : '누르면 이 작품(' + name + ')의 에피소드만 자동으로 녹음합니다') });
+    }) : [el('span', { class: 'st-caps-empty', text: '아직 없음' })]));
+    // 지금 영상을 담는가 (짧은 상태만 — 설명은 ⓘ)
+    let line = '';
+    if (state.videoId) {
+      const why = Sites.recAutoWhy(settings, adapter.name, work && work.title);
+      if (why === 'site') line = '● 지금 영상: 자동 녹음 (' + Sites.serviceLabel(adapter.name) + ' 전체)';
+      else if (why === 'title') line = '● 지금 영상: 자동 녹음 (작품 ' + work.title + ')';
+      else line = '지금 영상: 자동 녹음 안 함';
+      f.recCapsNow.classList.toggle('st-caps-now-on', !!why);
+    }
+    f.recCapsNow.textContent = line;
+  }
   function buildSettings() {
     const box = el('div', { class: 'st-settings st-hidden' });
     const f = {};
@@ -1929,7 +2026,7 @@
       field('명료도 피드백 (실험적 · 인터넷 필요)', sw('dubFeedback'), 'dubFeedback'),
       el('h4', { text: '저장' }),
       field('별표 저장 시 오디오', f.audioMode, 'audioStore'),
-      field('에피소드를 재생하면 자동으로 오디오 MP3 녹음', sw('recAuto'), 'recFull'),
+      buildRecAutoField(f),
       field('녹음을 마치면 바로 아이폰으로 올리기', sw('recAutoSync'), 'recFull'),
       field('문장 단위로 저장 (다음 자막으로 이어지면 함께)', sw('saveSentence'), 'saveSentence'),
       field('저장할 문장 고르기 (한 자막에 여러 문장일 때)', sw('savePick'), 'savePick'),
@@ -1955,7 +2052,7 @@
     f.koMode.value = settings.koMode || 'hold';
     f.cloze.value = settings.cloze || 'off';
     f.secondPass.checked = !!settings.secondPass; f.soundsLike.checked = !!settings.soundsLike; f.kiwiNotes.checked = !!settings.kiwiNotes; f.nzNotes.checked = settings.nzNotes !== false; f.vocabProfile.checked = !!settings.vocabProfile; renderLadderCfgExt();
-    f.recAuto.checked = !!settings.recAuto;
+    renderRecAutoCaps();
     f.recAutoSync.checked = settings.recAutoSync !== false;
     f.saveSentence.checked = settings.saveSentence !== false; f.saveNextTexts.checked = settings.saveNextTexts !== false; f.savePick.checked = settings.savePick !== false;
     f.saveTailSec.value = String(clamp(+settings.saveTailSec || 0, 0, 10));

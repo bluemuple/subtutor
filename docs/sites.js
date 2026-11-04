@@ -90,5 +90,69 @@
   function label(key) { const s = byKey(key); return s ? s.label : String(key || ''); }
   const allPatterns = () => SITES.reduce((a, s) => a.concat(s.patterns), []);
 
-  return { SITES, custom, byKey, forHost, videoIdFor, label, allPatterns, isCustomKey, customVideoId };
+  // ── 자동 녹음 고르기 (패널 ⚙ › "에피소드를 재생하면 자동으로 오디오 MP3 녹음"의 캡슐) ──
+  // 서비스 캡슐을 고르면 그 서비스에서 재생하는 에피소드를 모두, 작품 캡슐(최근 본 작품)을 고르면 그 작품만 자동으로 녹음한다.
+  // settings.recAutoSites: 고른 서비스 키 배열. null 이면 아직 캡슐을 안 써 본 것 — 예전 스위치(recAuto)가 켜져 있었으면 모든 서비스
+  // settings.recTitles: 최근 본 작품 [{ site, title, at, on }] — 맨 앞이 가장 최근, on 이면 자동 녹음. 고르지 않은 작품은 12개까지만 남긴다
+  const SERVICES = [
+    { key: 'netflix', label: '넷플릭스' },
+    { key: 'youtube', label: '유튜브' },
+    { key: 'prime', label: '프라임 비디오' },
+    { key: 'disney', label: '디즈니+' },
+  ].concat(SITES.map((x) => ({ key: x.key, label: x.label })));
+  const RECENT_MAX = 12;
+  function serviceLabel(key) { const x = SERVICES.find((v) => v.key === key); return x ? x.label : label(key); }
+  // 작품 이름 비교용 낱말: 대소문자·악센트(MĀORI = MAORI)·문장 부호를 뗀다
+  function workWords(title) {
+    return String(title || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').normalize('NFC').split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  }
+  const workKey = (site, title) => String(site || '') + '|' + workWords(title).join(' ');
+  // 고른 작품이 지금 제목과 같은가: 낱말 단위로 앞부분이 같으면 같은 작품 ("Shortland Street" ↔ "Shortland Street - Episode 12").
+  // 글자 단위가 아니라서 "Heart" 를 골라도 "Heartbreak High" 는 녹음하지 않는다
+  function workMatches(saved, title) {
+    const a = workWords(saved), b = workWords(title);
+    if (!a.length || a.length > b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  // 고른 서비스 키 — 캡슐을 처음 누를 때 예전 스위치가 켜져 있었으면 known(모든 서비스)에서 시작한다
+  function recAutoSiteKeys(st, known) {
+    if (st && Array.isArray(st.recAutoSites)) return st.recAutoSites.slice();
+    return st && st.recAuto ? (known || SERVICES.map((x) => x.key)).slice() : [];
+  }
+  // 지금 영상을 자동으로 녹음할까 → 'site'(서비스를 골랐다) · 'title'(작품을 골랐다) · ''(안 한다)
+  function recAutoWhy(st, site, title) {
+    if (!st || !site) return '';
+    if (Array.isArray(st.recAutoSites) ? st.recAutoSites.includes(site) : !!st.recAuto) return 'site';
+    if (title && Array.isArray(st.recTitles) && st.recTitles.some((x) => x && x.on && x.site === site && workMatches(x.title, title))) return 'title';
+    return '';
+  }
+  const cleanTitle = (t) => String(t || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  const cleanList = (list) => (Array.isArray(list) ? list.filter((x) => x && x.site && x.title) : []);
+  // 작품을 봤다: 맨 앞으로 (처음 보면 새로 넣는다). 이미 맨 앞이면 null — 저장할 것이 없다
+  function recentTouch(list, site, title, at) {
+    const t = cleanTitle(title);
+    if (!site || !workWords(t).length) return null;
+    const arr = cleanList(list);
+    const k = workKey(site, t);
+    const i = arr.findIndex((x) => workKey(x.site, x.title) === k);
+    if (i === 0) return null;
+    const old = i > 0 ? arr.splice(i, 1)[0] : null;
+    arr.unshift({ site, title: old ? old.title : t, at: at || 0, on: !!(old && old.on) });
+    let free = 0;
+    return arr.filter((x) => x.on || ++free <= RECENT_MAX);   // 고른 작품은 오래돼도 남긴다
+  }
+  // 작품 캡슐 켜기/끄기 (없으면 맨 앞에 넣는다). 끈 작품은 다음에 새 작품을 볼 때 12개 밖이면 빠진다 — 누르자마자 캡슐이 사라지지 않게
+  function recentSet(list, site, title, on, at) {
+    const t = cleanTitle(title);
+    if (!site || !workWords(t).length) return null;
+    const arr = cleanList(list);
+    const k = workKey(site, t);
+    const i = arr.findIndex((x) => workKey(x.site, x.title) === k);
+    if (i >= 0) arr[i] = Object.assign({}, arr[i], { on: !!on });
+    else arr.unshift({ site, title: t, at: at || 0, on: !!on });
+    return arr;
+  }
+
+  return { SITES, custom, byKey, forHost, videoIdFor, label, allPatterns, isCustomKey, customVideoId, SERVICES, RECENT_MAX, serviceLabel, workWords, workKey, workMatches, recAutoSiteKeys, recAutoWhy, recentTouch, recentSet };
 });

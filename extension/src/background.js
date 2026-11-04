@@ -9,7 +9,7 @@ const Sites = globalThis.SubTutorSites;
 const SITE_URL = 'https://bluemuple.github.io/subtutor/';
 const DEFAULT_SETTINGS = {
   showTranslation: true, translationSource: 'auto', hideNative: true, overlay: true, panelOpen: true,
-  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', saveSentence: true, savePick: true, saveTailSec: 4, saveNextTexts: true, recAuto: false, recAutoSync: true, enabled: {},
+  fontScale: 100, autoPause: false, shadowing: false, shadowPauseSec: 2, shadowPauseMode: 'ratio', shadowPauseRatio: 1, dubPlayback: true, dubRecRate: 1, dubListenFirst: false, dubAutoPreview: false, dubAutoNext: false, dubFeedback: true, wordSort: 'hard', leadMs: 150, tailMs: 200, audioMode: 'off', saveSentence: true, savePick: true, saveTailSec: 4, saveNextTexts: true, recAuto: false, recAutoSites: null, recTitles: [], recAutoSync: true, enabled: {},
   audioDirName: '', // 사용자가 고른 오디오 저장 폴더 이름 (핸들은 IndexedDB). 비어 있으면 다운로드 폴더
   koMode: 'hold', koRepeats: 3, secondPass: false, cloze: 'off', soundsLike: false, kiwiNotes: true, nzNotes: true, vocabProfile: true, missedTag: '못 알아들음',
   web: { srs: true, dashboard: true, recommend: true, weakWords: true, shadow: true, ladder: true, goalDate: '2027-01-28', ladderRates: [0.8, 0.9, 1, 1.15], ladderPitch: true, dubRecRates: [0.5, 0.7, 1], fastRates: [1, 1.25, 1.5, 1] },
@@ -907,6 +907,36 @@ async function handleMessage(msg, sender) {
       const s = Object.assign(await getSettings(), msg.patch || {});
       await chrome.storage.local.set({ settings: s });
       return { settings: s };
+    });
+    // ⚙ 자동 녹음 캡슐 — 목록은 여기서만 고친다 (탭마다 자기 사본으로 통째 저장하면 다른 탭이 막 넣은 작품이 지워진다)
+    case 'recAuto.seen': return withSettings(async () => {
+      const s = await getSettings();
+      const list = Sites.recentTouch(s.recTitles, String(msg.site || ''), String(msg.title || ''), Date.now());
+      if (!list) return { ok: true, same: true };
+      s.recTitles = list;
+      await chrome.storage.local.set({ settings: s });
+      return { ok: true };
+    });
+    case 'recAuto.title': return withSettings(async () => {
+      const s = await getSettings();
+      const list = Sites.recentSet(s.recTitles, String(msg.site || ''), String(msg.title || ''), !!msg.on, Date.now());
+      if (!list) return { ok: false, error: '작품 이름이 없습니다' };
+      s.recTitles = list;
+      await chrome.storage.local.set({ settings: s });
+      return { ok: true, settings: s };
+    });
+    case 'recAuto.site': return withSettings(async () => {
+      const s = await getSettings();
+      const key = String(msg.site || '');
+      if (!key) return { ok: false, error: '서비스가 없습니다' };
+      // 예전 스위치(모든 서비스)가 켜져 있었으면 모든 서비스(팝업에서 켠 사이트 포함)를 고른 상태에서 시작한다
+      const known = Sites.SERVICES.map((x) => x.key).concat((await getCustomSites()).map((c) => 'site:' + c.host));
+      const set = new Set(Sites.recAutoSiteKeys(s, known));
+      if (msg.on) set.add(key); else set.delete(key);
+      s.recAutoSites = Array.from(set);
+      s.recAuto = false;
+      await chrome.storage.local.set({ settings: s });
+      return { ok: true, settings: s };
     });
     case 'openSite': await openSite(); return { ok: true };
     case 'commands.get': return { save: await saveShortcut(), rec: await commandShortcut('rec-episode') };

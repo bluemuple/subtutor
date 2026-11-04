@@ -68,6 +68,20 @@
 .st-btn:hover { background: #363636; }
 .st-btn.st-primary { background: #7c3aed; border-color: #7c3aed; color: #fff; }
 .st-btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+/* ⚙ › 자동 녹음 캡슐 (서비스 · 최근 본 작품) — #st-panel button { font: inherit } 보다 세게 */
+.st-field.st-field-stack { flex-direction: column; align-items: stretch; gap: 6px; }
+.st-caps { display: flex; flex-wrap: wrap; gap: 6px; }
+#st-panel .st-cap { display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%; padding: 3px 10px; border: 1px solid #4b4b4b; border-radius: 999px; background: #232323; color: #d4d4d8; font-size: 12px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; transition: background .12s, border-color .12s; }
+#st-panel .st-cap:hover { border-color: #8b5cf6; }
+#st-panel .st-cap:focus-visible { outline: 2px solid #a78bfa; outline-offset: 1px; }
+#st-panel .st-cap.st-on { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+#st-panel .st-cap.st-covered { border-style: dashed; border-color: #7c3aed; background: rgba(124,58,237,.18); color: #e9d5ff; }
+#st-panel .st-cap.st-here::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #34d399; align-self: center; flex: none; }
+#st-panel .st-cap-sub { font-size: 10px; opacity: .7; }
+.st-caps-head { font-size: 11px; color: #a1a1aa; margin-top: 2px; }
+.st-caps-empty { font-size: 11px; color: #777; }
+.st-caps-now { font-size: 11px; color: #a1a1aa; }
+.st-caps-now.st-caps-now-on { color: #34d399; }
 .st-diag { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #9ca3af; white-space: pre-wrap; background: #111; padding: 8px; border-radius: 6px; margin-top: 6px; max-height: 220px; overflow: auto; user-select: text; }
 .st-diag:empty { display: none; }
 

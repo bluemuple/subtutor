@@ -1621,14 +1621,24 @@ async function runSites() {
       assert(!(await yt.evaluate(() => { const t = document.querySelector('.st-toast'); return t && t.classList.contains('show'); })), 'no toast after saving the MP3');
     });
 
-    await step('유튜브(DRM 없음): 패널 발치에 "두 번 보기" 대신 ⏺ MP3 · 허용(아이콘) 없이 영상 요소에서 통째 MP3 · ⚙ "자동으로 오디오 MP3 녹음"을 켜면 재생 중에 알아서 담는다 · Option+R(패널이 직접)·크롬 명령으로 켜고 끈다', async () => {
+    await step('유튜브(DRM 없음): 패널 발치에 "두 번 보기" 대신 ⏺ MP3 · 허용(아이콘) 없이 영상 요소에서 통째 MP3 · ⚙ 자동 녹음 캡슐(최근 본 작품만 골라도 · 서비스를 고르면 전부 · 예전 스위치는 모든 서비스로) · Control+R(패널이 직접)·크롬 명령으로 켜고 끈다', async () => {
       const recDirGone = () => opt.evaluate(async () => { try { const root = await navigator.storage.getDirectory(); const d = await (await root.getDirectoryHandle('e2e-docs')).getDirectoryHandle('SubTutor'); await d.removeEntry('영상 오디오', { recursive: true }); } catch (e) { /* 없음 */ } });
       try {
         const foot = await yt.$$eval('#st-panel .st-foot-btn', (els) => els.map((e) => e.textContent.trim()));
         assert(!foot.some((t) => t === '두 번 보기') && foot.some((t) => t === '⏺ MP3'), '발치 버튼: ' + JSON.stringify(foot));
-        // ⚙ 저장 칸에 자동 녹음 스위치가 있다 (켜기 전에 확인만)
-        const autoRow = await yt.evaluate(() => { const lab = [...document.querySelectorAll('#st-panel .st-settings .st-field label')].find((l) => /자동으로 오디오 MP3 녹음/.test(l.textContent)); return lab ? !!lab.closest('.st-field').querySelector('input.st-switch') : null; });
-        assert(autoRow === true, '⚙ 저장에 자동 녹음 스위치가 있다: ' + autoRow);
+        // ⚙ 저장 칸: 자동 녹음은 스위치가 아니라 캡슐 — 서비스(전용 4 + 범용 6) · 최근 본 작품 (켜기 전에 확인만)
+        const capsInfo = await yt.evaluate(() => {
+          const box = document.querySelector('#st-panel .st-settings .st-recauto');
+          if (!box) return null;
+          return {
+            label: box.querySelector('label').textContent, switch: !!box.querySelector('input.st-switch'),
+            sites: [...box.querySelectorAll('.st-caps-sites .st-cap')].map((b) => b.dataset.key + (b.classList.contains('st-on') ? '*' : '') + (b.classList.contains('st-here') ? '@' : '')),
+            now: box.querySelector('.st-caps-now').textContent,
+          };
+        });
+        assert(capsInfo && /자동으로 오디오 MP3 녹음/.test(capsInfo.label) && !capsInfo.switch, '⚙ 저장에 자동 녹음 캡슐 칸(스위치 없음): ' + JSON.stringify(capsInfo));
+        assert(['netflix', 'youtube@', 'prime', 'disney', 'tvnz', 'threenow', 'nzonscreen', 'maoriplus', 'ted', 'vimeo'].every((k) => capsInfo.sites.includes(k)), '서비스 캡슐 10개 · 아무것도 안 고름 · 유튜브에 초록 점: ' + JSON.stringify(capsInfo.sites));
+        assert(/지금 영상: 자동 녹음 안 함/.test(capsInfo.now), '안내 줄: ' + capsInfo.now);
         // 허용 없이(탭 캡처 아님) 영상 요소에서 바로 담는다
         await yt.evaluate(() => { const v = document.querySelector('video'); v.currentTime = 4; v.play(); });
         await sleep(400);
@@ -1649,15 +1659,61 @@ async function runSites() {
           return { size: f.size, b0: head[0], b1: head[1] };
         }, rec.file.path);
         assert(bytes.size > 4000 && bytes.b0 === 0xff && (bytes.b1 & 0xe0) === 0xe0, '폴더의 MP3: ' + JSON.stringify(bytes));
-        // 자동 녹음: ⚙ 스위치를 켜면 재생 중인 에피소드를 알아서 담기 시작한다
-        await yt.evaluate(() => { const lab = [...document.querySelectorAll('#st-panel .st-settings .st-field label')].find((l) => /자동으로 오디오 MP3 녹음/.test(l.textContent)); lab.closest('.st-field').querySelector('input.st-switch').click(); });
-        await waitFor(() => sw.evaluate(async () => !!(((await chrome.storage.local.get('settings')).settings || {}).recAuto)), 4000, 'recAuto saved');
-        await yt.evaluate(() => { const v = document.querySelector('video'); if (v.paused) v.play(); });
-        await waitFor(() => yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on')), 6000, 'auto recording starts');
+        // 자동 녹음 ① 작품 캡슐: 서비스(유튜브)는 고르지 않고 최근 본 작품(유튜브는 채널)만 골라도 재생 중인 에피소드를 알아서 담는다 — 실제 클릭
+        const getSt = () => sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings || {});
+        const capSel = (row, key) => '#st-panel .st-recauto .' + row + ' .st-cap[data-key="' + key + '"]';
+        const clickCap = async (row, key) => {
+          const sel = capSel(row, key);
+          await waitFor(() => yt.evaluate((q) => !!document.querySelector(q), sel), 4000, 'capsule ' + key);
+          await yt.evaluate((q) => document.querySelector(q).scrollIntoView({ block: 'center' }), sel);
+          await yt.click(sel);
+        };
+        const capCls = (row, key) => yt.evaluate((q) => { const b = document.querySelector(q); return b ? b.className : ''; }, capSel(row, key));
+        const nowLine = () => yt.$eval('#st-panel .st-recauto .st-caps-now', (e) => e.textContent);
+        const MC = 'youtube|Mock Channel';
+        // 앞에서 재생한 이 영상의 채널이 "최근 본 작품"에 올라 있다 (아직 안 고름)
+        const seen = await waitFor(async () => ((await getSt()).recTitles || []).find((x) => x.site === 'youtube' && x.title === 'Mock Channel') || null, 6000, 'recent title saved');
+        assert(seen.on === false, '처음에는 안 고름: ' + JSON.stringify(seen));
+        await yt.click('.st-head .st-icon');
+        await yt.waitForSelector('.st-settings:not(.st-hidden)');
+        assert(/st-here/.test(await capCls('st-caps-titles', MC)), '지금 보는 작품에 초록 점: ' + await capCls('st-caps-titles', MC));
+        assert(await yt.$eval(capSel('st-caps-titles', MC) + ' .st-cap-sub', (e) => e.textContent) === '유튜브 채널', '유튜브는 채널이 작품');
+        await yt.evaluate(() => { const v = document.querySelector('video'); v.currentTime = 4; if (v.paused) v.play(); });
+        await clickCap('st-caps-titles', MC);
+        await waitFor(async () => ((await getSt()).recTitles || []).some((x) => x.title === 'Mock Channel' && x.on), 4000, 'title capsule saved on');
+        await waitFor(() => yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on')), 6000, 'auto recording starts (title capsule)');
+        assert(/st-on/.test(await capCls('st-caps-titles', MC)), '고른 작품 캡슐이 켜짐');
+        assert(/자동 녹음 \(작품 Mock Channel\)/.test(await nowLine()), '안내 줄(작품): ' + await nowLine());
+        assert((await getSt()).recAutoSites == null, '서비스는 고르지 않았다');
         await sleep(1500);
-        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: false } }, {}));
+        await clickCap('st-caps-titles', MC);   // 끄기 — 이미 녹음 중인 것은 그대로 (아래에서 직접 멈춘다)
+        await waitFor(async () => ((await getSt()).recTitles || []).some((x) => x.title === 'Mock Channel' && !x.on), 4000, 'title capsule saved off');
+        assert(await yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on')), '캡슐을 꺼도 녹음 중인 것은 계속');
         await yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').click());
         await waitFor(async () => (await sw.evaluate(async () => ((await chrome.storage.local.get('recordings')).recordings || []).length)) === 2, 15000, 'auto recording saved');
+        // 자동 녹음 ② 서비스 캡슐: 유튜브를 고르면 유튜브 전부 — 작품 캡슐은 점선(함께 담김), 안내 줄은 서비스. 사용자가 멈춘 이 에피소드는 다시 켜지 않는다
+        await clickCap('st-caps-sites', 'youtube');
+        await waitFor(async () => JSON.stringify((await getSt()).recAutoSites) === '["youtube"]', 4000, 'service capsule saved');
+        assert(/st-on/.test(await capCls('st-caps-sites', 'youtube')), '유튜브 캡슐 켜짐');
+        assert(/st-covered/.test(await capCls('st-caps-titles', MC)), '작품 캡슐은 점선(서비스 전체로 담김): ' + await capCls('st-caps-titles', MC));
+        assert(/자동 녹음 \(유튜브 전체\)/.test(await nowLine()), '안내 줄(서비스): ' + await nowLine());
+        await sleep(3000);
+        assert(!(await yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on'))), '사용자가 멈춘 에피소드에서는 자동 녹음이 다시 켜지지 않는다');
+        await yt.evaluate(() => document.querySelector('#st-panel .st-recauto').scrollIntoView({ block: 'center' }));
+        await sleep(150);
+        await (await yt.$('#st-panel .st-recauto')).screenshot({ path: path.join(TMP, 'shots', 'yt-recauto-caps.png') });
+        await clickCap('st-caps-sites', 'youtube');
+        await waitFor(async () => JSON.stringify((await getSt()).recAutoSites) === '[]', 4000, 'service capsule saved off');
+        assert(/자동 녹음 안 함/.test(await nowLine()), '끄면 안내 줄도: ' + await nowLine());
+        // 예전 스위치를 켜 둔 사용자: 모든 서비스가 골라진 캡슐로 보이고, 하나를 끄면 나머지는 그대로 남는다
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: true, recAutoSites: null } }, {}));
+        await waitFor(async () => /st-on/.test(await capCls('st-caps-sites', 'ted')) && /st-on/.test(await capCls('st-caps-sites', 'netflix')), 4000, 'legacy switch shows all services on');
+        await clickCap('st-caps-sites', 'ted');
+        const mig = await waitFor(async () => { const st = await getSt(); return Array.isArray(st.recAutoSites) ? st : null; }, 4000, 'legacy migrated');
+        assert(!mig.recAutoSites.includes('ted') && ['netflix', 'youtube', 'prime', 'disney', 'tvnz', 'threenow', 'nzonscreen', 'maoriplus', 'vimeo'].every((k) => mig.recAutoSites.includes(k)) && mig.recAuto === false, '옮겨진 서비스: ' + JSON.stringify({ sites: mig.recAutoSites, recAuto: mig.recAuto }));
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: false, recAutoSites: null, recTitles: [] } }, {}));
+        await yt.click('.st-head .st-icon');
+        await yt.evaluate(() => { const v = document.querySelector('video'); v.currentTime = 4; });
         const recCount = () => sw.evaluate(async () => ((await chrome.storage.local.get('recordings')).recordings || []).length);
         const recOn = () => yt.evaluate(() => document.querySelector('#st-panel .st-rec-btn').classList.contains('st-on'));
         // 단축키 ① Control+R (Mac — 윈도우 등은 Alt+R) — 크롬 단축키로 지정이 안 돼 있어도 패널이 직접 받아 켜고 끈다
@@ -1692,7 +1748,8 @@ async function runSites() {
         await waitFor(() => yt.evaluate(() => { const b = document.querySelector('.st-infobox'); return b && !b.classList.contains('st-hidden') && /Control\+R/.test(b.textContent); }), 4000, 'shortcut list mentions Control+R');
         await yt.evaluate(() => { const x = document.querySelector('.st-infobox-head .st-icon'); if (x) x.click(); });
       } finally {
-        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: false } }, {})).catch(() => {});
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { recAuto: false, recAutoSites: null, recTitles: [] } }, {})).catch(() => {});
+        await yt.evaluate(() => { const s = document.querySelector('#st-panel .st-settings'); if (s && !s.classList.contains('st-hidden')) document.querySelector('.st-head .st-icon').click(); }).catch(() => {});
         await yt.evaluate(() => { const b = document.querySelector('#st-panel .st-rec-btn'); if (b && b.classList.contains('st-on')) b.click(); document.querySelector('video').pause(); }).catch(() => {});
         await sleep(800);
         await sw.evaluate(() => chrome.storage.local.remove('recordings'));
