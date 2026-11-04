@@ -198,6 +198,31 @@ final class SpeakStore: ObservableObject {
         let secs = { (a: [STake]) in Int((a.reduce(0) { $0 + $1.durMs } / 1000).rounded()) }
         return "오늘 \(today.count)회 · \(SpeakStore.clock(secs(today))) — 이번 주 \(week.count)회 · \(SpeakStore.clock(secs(week)))"
     }
+    // 프롬프트 + 녹음들(날짜·모드·말한 시간·wpm·별점·메모·받아 적은 문장) — 웹 spCopyText 와 같은 꼴, 오래된 녹음부터
+    func copyText(for p: SPrompt) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        var lines = [
+            "아래는 내가 영어 말하기 연습에서 한 대답을 음성 인식으로 받아 적은 것입니다. 뉴질랜드 학교에서 일할 교사로서 자연스러움·문법·더 나은 표현(키위 표현 포함)을 짚어 주고, 더 좋은 대답 예시를 보여 주세요.",
+            "",
+            "Prompt: " + p.text,
+        ]
+        for (k, t) in takesOf(p.id).sorted(by: { $0.at < $1.at }).enumerated() {
+            var parts = [f.string(from: Date(timeIntervalSince1970: t.at / 1000))]
+            let step = t.mode == "step" && t.targetS > 0
+            parts.append(step ? "줄여 말하기 (목표 \(SpeakStore.clock(t.targetS)))" : "자유 말하기")
+            var said = "말한 시간 " + SpeakStore.clock(t.durMs / 1000)
+            if step { said += " (" + SpeakStore.overUnder(targetS: t.targetS, actualS: t.durMs / 1000).text + ")" }
+            parts.append(said)
+            if let w = SpeakStore.wpm(t.heard, durMs: t.durMs) { parts.append("\(w) wpm") }
+            if t.rating > 0 { parts.append("스스로 평가 ★\(t.rating)/5") }
+            lines.append("")
+            lines.append("\(k + 1)) " + parts.joined(separator: " · "))
+            if !t.memo.isEmpty { lines.append("내 메모: " + t.memo) }
+            lines.append(t.heard.isEmpty ? "(받아 적지 못함)" : t.heard)
+        }
+        return lines.joined(separator: "\n")
+    }
     static func clock(_ s: Int) -> String { "\(max(0, s) / 60):" + String(format: "%02d", max(0, s) % 60) }
     static func clock(_ s: Double) -> String { clock(Int(s.rounded())) }
     // 줄여 말하기 결과: +N초 초과 / N초 부족 / 딱 맞춤 (웹 fluency.js 와 같은 규칙)

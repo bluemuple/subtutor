@@ -17,6 +17,7 @@ struct SpeakView: View {
     @State private var heardOpen: Set<String> = []
     @State private var recTarget: RecTarget?
     @State private var showInfo = false
+    @State private var copiedId: String?        // 방금 복사한 프롬프트 (잠깐 "복사됨" 표시)
 
     struct RecTarget: Identifiable, Hashable {
         let prompt: SPrompt
@@ -177,6 +178,19 @@ struct SpeakView: View {
                 Spacer()
                 if let last = takes.first {
                     Text("\(takes.count)회 · " + when(last.at)).font(.caption2).foregroundStyle(.tertiary)
+                    // 프롬프트·녹음 시간·받아 적은 문장 모두 복사 — GPT 에 붙여 넣어 내 대답이 어떤지 물어보기
+                    Button {
+                        UIPasteboard.general.string = speak.copyText(for: p)
+                        Haptic.success()
+                        copiedId = p.id
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { if copiedId == p.id { copiedId = nil } }
+                    } label: {
+                        Image(systemName: copiedId == p.id ? "checkmark" : "doc.on.doc")
+                            .font(.caption)
+                            .foregroundStyle(copiedId == p.id ? Color.green : Color.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("프롬프트와 받아 적은 문장 복사")
                 }
             }
             .padding(.vertical, 2)

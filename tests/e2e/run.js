@@ -2981,6 +2981,23 @@ async function runSites() {
       assert(steps.length === 2 && JSON.stringify(steps.map((t) => t.targetS)) === '[1,3]', '줄여 기록 2개(목표 1·3초): ' + JSON.stringify(steps.map((t) => [t.targetS, Math.round(t.durMs)])));
       const badges = await w4.evaluate(() => [...document.querySelectorAll('.speak-take .t-over, .speak-take .t-under')].map((x) => x.textContent));
       assert(badges.some((x) => /초과/.test(x)) && badges.some((x) => /부족/.test(x)), '기록 줄에 초과·부족 배지: ' + JSON.stringify(badges));
+      // 프롬프트 줄 오른쪽 ⧉: 프롬프트 + 녹음 3개(오래된 순 — 자유 1 · 줄여 2)의 시간·받아 적은 문장을 모두 복사 (실제 마우스 클릭)
+      await w4.evaluate(() => { window.__copied = null; navigator.clipboard.writeText = (t) => { window.__copied = t; return Promise.resolve(); }; });
+      const cardSel = '[data-sp="' + mine[0].id + '"]';
+      assert(await w4.evaluate((sel) => !!document.querySelector(sel + ' .p-copy'), cardSel), '녹음이 있는 프롬프트에 ⧉');
+      await w4.$eval(cardSel, (c) => c.scrollIntoView({ block: 'center' }));
+      const openBefore = await w4.evaluate((sel) => document.querySelector(sel).classList.contains('open'), cardSel);
+      await w4.click(cardSel + ' .p-copy');
+      const copied = await waitFor(() => w4.evaluate(() => window.__copied), 3000, 'copied text');
+      assert(copied.includes('Prompt: ' + mine[0].text), '프롬프트가 들어간다: ' + copied.slice(0, 200));
+      const nums = (copied.match(/^\d\) /gm) || []).length;
+      assert(nums === 3, '녹음 3개가 번호대로: ' + nums + ' ┃' + copied);
+      const firstIdx = copied.indexOf('1) '), secondIdx = copied.indexOf('2) ');
+      assert(/자유 말하기/.test(copied.slice(firstIdx, secondIdx)) && /스스로 평가 ★4\/5/.test(copied.slice(firstIdx, secondIdx)) && /내 메모: 막힌 데: rules 설명/.test(copied.slice(firstIdx, secondIdx)), '1) 은 가장 오래된 자유 말하기 (별점·메모 포함): ' + copied.slice(firstIdx, secondIdx));
+      assert((copied.match(/줄여 말하기 \(목표 0:0[13]\)/g) || []).length === 2 && /초과\)/.test(copied) && /부족\)/.test(copied), '줄여 말하기 목표·초과/부족: ' + copied);
+      assert(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(copied) && /말한 시간 \d+:\d{2}/.test(copied), '날짜·말한 시간: ' + copied);
+      assert(await w4.evaluate((sel) => document.querySelector(sel).classList.contains('open'), cardSel) === openBefore, '⧉ 를 눌러도 카드가 접히거나 펼쳐지지 않는다');
+      assert(/GPT/.test(await w4.evaluate(() => document.querySelector('#toast').textContent)), '복사 안내 토스트');
     });
 
     await step('입트기(웹) 동기화: 바뀐 프롬프트·기록만 모의 Supabase 로(오디오 없음), 폰에서 고친 프롬프트는 updated_at 비교로 받아 온다', async () => {

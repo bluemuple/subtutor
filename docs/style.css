@@ -517,3 +517,7 @@ input.rate:focus { outline: none; color: var(--accent2); }
 .group .group-title { cursor: pointer; user-select: none; }
 .group.folded .group-title { opacity: 0.8; }
 .group.rec-only .group-title { cursor: default; }
+
+/* 입트기 프롬프트 줄의 복사 아이콘 (녹음이 있을 때) */
+.speak-p .p-copy { background: none; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font-size: 14px; line-height: 1; padding: 3px 7px; cursor: pointer; flex: none; align-self: center; }
+.speak-p .p-copy:hover { color: var(--text); border-color: var(--hover-line); }

@@ -1359,6 +1359,48 @@
     return wrap;
   }
 
+  // 프롬프트 + 이 프롬프트의 녹음들(날짜·모드·말한 시간·wpm·별점·메모·받아 적은 문장)을 GPT 에 붙여 넣기 좋게 — 오래된 녹음부터
+  function spCopyText(p) {
+    const two = (n) => String(n).padStart(2, '0');
+    const stamp = (ms) => { const d = new Date(ms); return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + ' ' + two(d.getHours()) + ':' + two(d.getMinutes()); };
+    const takes = spTakesOf(p.id).slice().sort((a, b) => a.at - b.at);
+    const lines = [
+      '아래는 내가 영어 말하기 연습에서 한 대답을 음성 인식으로 받아 적은 것입니다. 뉴질랜드 학교에서 일할 교사로서 자연스러움·문법·더 나은 표현(키위 표현 포함)을 짚어 주고, 더 좋은 대답 예시를 보여 주세요.',
+      '',
+      'Prompt: ' + p.text,
+    ];
+    takes.forEach((t, k) => {
+      const parts = [stamp(t.at)];
+      if (t.mode === 'step' && t.targetS) parts.push('줄여 말하기 (목표 ' + F.fmtClock(t.targetS) + ')');
+      else parts.push('자유 말하기');
+      let said = '말한 시간 ' + F.fmtClock(t.durMs / 1000);
+      if (t.mode === 'step' && t.targetS) said += ' (' + F.overUnder(t.targetS, t.durMs / 1000).text + ')';
+      parts.push(said);
+      const w = F.wpm(t.heard, t.durMs);
+      if (w) parts.push(w + ' wpm');
+      if (t.rating) parts.push('스스로 평가 ★' + t.rating + '/5');
+      lines.push('', (k + 1) + ') ' + parts.join(' · '));
+      if (t.memo) lines.push('내 메모: ' + t.memo);
+      lines.push(t.heard ? t.heard : '(받아 적지 못함)');
+    });
+    return lines.join('\n');
+  }
+  async function spCopy(p) {
+    const text = spCopyText(p);
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) { ok = false; }
+    if (!ok) {   // 권한이 없거나 http 등: 숨긴 칸으로 복사
+      const ta = el('textarea', { style: 'position:fixed;left:-9999px;top:0' });
+      ta.value = text;
+      document.body.append(ta);
+      ta.select();
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      ta.remove();
+    }
+    const n = spTakesOf(p.id).length;
+    toast(ok ? '프롬프트와 녹음 ' + n + '개의 받아 적은 문장을 복사했습니다 — GPT 에 붙여 넣어 물어보세요' : '복사하지 못했습니다', 5000);
+  }
+
   function speakPromptCard(p) {
     const takes = spTakesOf(p.id);
     const open = sp.open === p.id && !sp.edit;
@@ -1375,6 +1417,8 @@
     const headRow = el('div', { class: 'p-head', onclick: () => { sp.open = open ? null : p.id; render(); } }, [
       el('span', { class: 'p-text', text: p.text }),
       el('span', { class: 'p-meta', text: takes.length ? takes.length + '회 · ' + fmtWhen(takes[0].at) : '' }),
+      // 녹음이 있으면: 프롬프트·녹음 시간·받아 적은 문장을 모두 복사 (GPT 에게 내 대답이 어떤지 물어보기)
+      takes.length ? el('button', { class: 'icon p-copy', title: '프롬프트와 녹음 ' + takes.length + '개(시간·받아 적은 문장)를 복사 — GPT 에 붙여 넣어 내 대답이 어떤지 물어보세요', onclick: (e) => { e.stopPropagation(); spCopy(p); } }, '⧉') : null,
     ]);
     card.append(headRow);
     if (!open) return card;
