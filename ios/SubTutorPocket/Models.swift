@@ -98,6 +98,7 @@ final class Store: ObservableObject {
     @Published var veilText: Bool { didSet { UserDefaults.standard.set(veilText, forKey: "veilText") } }
     @Published var veilKo: Bool { didSet { UserDefaults.standard.set(veilKo, forKey: "veilKo") } }
     @Published var veilPeek: Bool { didSet { UserDefaults.standard.set(veilPeek, forKey: "veilPeek") } }       // 가릴 때 단어 띄엄띄엄 보이기
+    @Published var foldedWorks: Set<String> = [] { didSet { UserDefaults.standard.set(Array(foldedWorks).sorted(), forKey: "foldedWorks") } }   // 접어 둔 작품·에피소드 (머리를 누르면 자막 섹션 접힘)
     @Published var showThumbs: Bool { didSet { UserDefaults.standard.set(showThumbs, forKey: "showThumbs") } } // 장면 썸네일 모두 보이기/감추기
     @Published var rate: Double { didSet { UserDefaults.standard.set(rate, forKey: "rate") } }
     @Published var lineRepeats: Int { didSet { UserDefaults.standard.set(lineRepeats, forKey: "lineRepeats") } }   // 연속 듣기에서 한 대사를 몇 번씩
@@ -117,6 +118,7 @@ final class Store: ObservableObject {
         veilText = d.object(forKey: "veilText") as? Bool ?? false
         veilKo = d.object(forKey: "veilKo") as? Bool ?? true
         veilPeek = d.object(forKey: "veilPeek") as? Bool ?? false
+        foldedWorks = Set(d.stringArray(forKey: "foldedWorks") ?? [])
         showThumbs = d.object(forKey: "showThumbs") as? Bool ?? true
         rate = d.object(forKey: "rate") as? Double ?? 1.0
         lineRepeats = d.object(forKey: "lineRepeats") as? Int ?? 1
@@ -258,6 +260,9 @@ final class Store: ObservableObject {
     @Published var busyIds: Set<String> = []     // 지금 받는 중인 대사 (줄에 스피너)
     private var dlCancel = false
 
+    func foldToggle(_ id: String) {
+        if foldedWorks.contains(id) { foldedWorks.remove(id) } else { foldedWorks.insert(id) }
+    }
     func pendingAudio(_ list: [Item]) -> [Item] { list.filter { $0.hasAudio && !hasLocalAudio($0) } }
 
     @discardableResult

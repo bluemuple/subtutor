@@ -1785,6 +1785,19 @@ async function runSites() {
       const off = await web.$eval('[data-id="netflix:12345:22000"] .veil-text-btn', (e) => e.textContent);
       assert(off.includes('자막 감춤'), '끄면 원래 가림막: ' + off);
     });
+    await step('작품 머리를 누르면 자막 섹션이 접히고(상태 저장), 다시 누르면 펼쳐진다', async () => {
+      const counts = () => web.$$eval('.group', (gs) => gs.map((g) => g.querySelectorAll('.item').length).join(','));
+      const before = await counts();
+      await web.click('.group .group-title');
+      await waitFor(() => web.evaluate(() => document.querySelector('.group').classList.contains('folded') && document.querySelector('.group').querySelectorAll('.item').length === 0), 4000, 'folded');
+      assert(await web.evaluate(() => /^▸ /.test(document.querySelector('.group .group-title').textContent)), '접힘 표시 ▸');
+      assert(await web.evaluate(() => { try { return JSON.parse(localStorage.getItem('st.groupFold')).length === 1; } catch (e) { return false; } }), '접힘 상태 저장');
+      await web.click('.group .group-title');
+      await waitFor(() => web.evaluate(() => !document.querySelector('.group').classList.contains('folded')), 4000, 'unfolded');
+      assert((await counts()) === before, '펼치면 자막이 돌아온다: ' + before);
+      assert(await web.evaluate(() => { try { return JSON.parse(localStorage.getItem('st.groupFold')).length === 0; } catch (e) { return false; } }), '저장 상태도 비워진다');
+    });
+
     await step('정렬 옵션(작품별/전체 · 최신 위/아래)과 태그 지정·필터', async () => {
       const firstId = () => web.$eval('.item', (e) => e.dataset.id);
       const lastId = () => web.$$eval('.item', (els) => els[els.length - 1].dataset.id);
@@ -2981,7 +2994,11 @@ async function runSites() {
       await sw.evaluate(async (recId2, recAt2) => {
         await chrome.storage.local.set({
           items: [{ id: 'rec:show:1', platform: 'netflix', title: 'Rec Show', episode: 'S1 E1', text: 'Hello there.', translation: '', startMs: 1000, endMs: 2000, savedAt: Date.now(), tags: [], box: 'learning' }],
-          recordings: [{ id: recId2, title: 'Rec Show S1 E1', at: recAt2, durMs: 754000, bytes: 3004, file: { location: 'folder', path: 'e2e-docs/SubTutor/영상 오디오/Rec Show S1 E1.mp3', downloadId: 0 }, sent: 0, skip: false }],
+          recordings: [
+            { id: recId2, title: 'Rec Show S1 E1', at: recAt2, durMs: 754000, bytes: 3004, file: { location: 'folder', path: 'e2e-docs/SubTutor/영상 오디오/Rec Show S1 E1.mp3', downloadId: 0 }, sent: 0, skip: false },
+            // 자막을 저장한 적 없는 에피소드의 녹음 (이미 올라간 것으로 표시해 "안 올라간 1개" 검사를 안 흔든다)
+            { id: 'r' + (recAt2 + 1).toString(36), title: 'Orphan Show S1 E1', at: recAt2 - 1000, durMs: 120000, bytes: 3004, file: { location: 'folder', path: 'e2e-docs/SubTutor/영상 오디오/Rec Show S1 E1.mp3', downloadId: 0 }, sent: recAt2, skip: false },
+          ],
         });
       }, recId, recAt);
       await fetch('http://127.0.0.1:8769/rest/v1/items', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify([{ id: 'rec:show:1', title: 'Rec Show', episode: 'S1 E1', has_audio: true, audio_ms: 1000, box: 'learning', tags: [] }]) });
@@ -3037,6 +3054,9 @@ async function runSites() {
         await w5.click(loopSel);
         await waitFor(() => w5.$eval(loopSel, (b) => !b.classList.contains('on') && !b.classList.contains('ea-mid') && b.textContent === '🔁'), 4000, 'loop cleared');
         assert(await w5.evaluate(() => document.querySelector('.epi-audio .ea-looplab').textContent === ''), '해제하면 구간 글도 사라진다');
+        // 자막을 저장하지 않은 에피소드도 작품 머리 + 플레이어로 보인다
+        const orphan = await w5.evaluate(() => [...document.querySelectorAll('.group.rec-only')].map((g) => ({ t: g.querySelector('.group-title').textContent, p: !!g.querySelector('.epi-audio') })));
+        assert(orphan.length === 1 && /Orphan Show S1 E1/.test(orphan[0].t) && /저장한 자막 없음/.test(orphan[0].t) && orphan[0].p, '자막 없는 에피소드 묶음: ' + JSON.stringify(orphan));
         // 영상 오디오를 서버에서 지우면 skip 이 남아 자동으로 다시 올라가지 않는다
         await w5.goto('http://localhost:8766/#/settings', { waitUntil: 'load' });
         await waitFor(async () => [...(await bodyText()).matchAll(/Rec Show S1 E1 — /g)].length >= 1, 15000, 'rec row listed again');

@@ -512,3 +512,8 @@ input.rate:focus { outline: none; color: var(--accent2); }
 .epi-audio .ea-loop.ea-mid { color: var(--orange); border-color: var(--orange); }
 .epi-audio .ea-loop.on { color: var(--accent); border-color: var(--accent); }
 .epi-audio .ea-looplab { color: var(--accent); }
+
+/* 작품 머리를 눌러 자막 섹션 접기 + 자막 없는 에피소드 오디오 묶음 */
+.group .group-title { cursor: pointer; user-select: none; }
+.group.folded .group-title { opacity: 0.8; }
+.group.rec-only .group-title { cursor: default; }

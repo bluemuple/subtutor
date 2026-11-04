@@ -29,6 +29,7 @@
     filterTitle: '', search: '', sort: loadPref('subtutor.sort', 'group-time'), filterTag: '',
     recs: [],                             // 익스텐션이 뽑은 영상 오디오(통째 MP3) 목록 — 맥 폴더에 있는 파일
     thumbsOn: localStorage.getItem('st.thumbs') !== '0',   // 저장 때 찍은 장면 썸네일 모두 보이기/감추기
+    groupFold: new Set((() => { try { return JSON.parse(localStorage.getItem('st.groupFold') || '[]'); } catch (e) { return []; } })()),   // 접어 둔 작품·에피소드
     tagNames: [],                         // 저장된 태그 이름 (확장 프로그램 설정 tagNames ∪ 항목들의 태그)
     trimOpen: null,                       // 구간 조정 슬라이더가 열린 항목
     web: Object.assign({}, WEB_DEFAULTS),  // 웹 학습 기능 켜기/끄기 (확장 프로그램 설정 web 에 저장)
@@ -1666,21 +1667,44 @@
       if (sort === 'title') list.sort((a, b) => a.title.localeCompare(b.title, 'ko') || a.episode.localeCompare(b.episode, 'ko', { numeric: true }));
       else if (sort === 'group-new-bottom') list.sort((a, b) => a.latest - b.latest); // 최신 작품이 아래
       else list.sort((a, b) => b.latest - a.latest); // 최신 작품이 위
+      const saveFold = () => { try { localStorage.setItem('st.groupFold', JSON.stringify([...state.groupFold])); } catch (e) { /* ignore */ } };
       for (const g of list) {
         if (sort === 'group-new-top') g.items.sort(bySaved(-1));
         else if (sort === 'group-new-bottom') g.items.sort(bySaved(1));
         else g.items.sort((a, b) => a.startMs - b.startMs);
         const plat = g.items.every((i) => i.platform === g.items[0].platform) ? platformName(g.items[0].platform) : '';
-        const gEl = el('div', { class: 'group' }, [
-          el('h3', { class: 'group-title' }, [g.title + (plat ? ' (' + plat + ')' : ''), g.episode ? el('small', null, g.episode) : null, el('small', null, g.items.length + '개'), state.edit.on ? el('button', { class: 'btn mini group-pick', title: '이 묶음의 대사를 모두 선택/해제', onclick: () => togglePickMany(g.items.map((i) => i.id)) }, '묶음 선택') : null]),
+        const foldKey = g.title + '\u0000' + g.episode;
+        const folded = state.groupFold.has(foldKey);
+        // 작품·에피소드 머리를 누르면 아래 자막 섹션이 접힌다 (에피소드 오디오 플레이어는 남는다)
+        const gEl = el('div', { class: 'group' + (folded ? ' folded' : '') }, [
+          el('h3', { class: 'group-title', title: folded ? '펼치기' : '접기', onclick: (e) => {
+            if (e.target.closest('button, a, input')) return;
+            if (folded) state.groupFold.delete(foldKey); else state.groupFold.add(foldKey);
+            saveFold();
+            renderBody();
+          } }, [(folded ? '▸ ' : '▾ ') + g.title + (plat ? ' (' + plat + ')' : ''), g.episode ? el('small', null, g.episode) : null, el('small', null, g.items.length + '개'), state.edit.on ? el('button', { class: 'btn mini group-pick', title: '이 묶음의 대사를 모두 선택/해제', onclick: () => togglePickMany(g.items.map((i) => i.id)) }, '묶음 선택') : null]),
         ]);
         if (kind === 'learning' && !state.edit.on && state.recs.length) {   // 이 에피소드의 통째 오디오가 있으면 맨 위에 플레이어
           const full = g.title + (g.episode ? ' ' + g.episode : '');
           const rec = state.recs.filter((r) => !r.skip && r.title === full && recReadable(r)).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
           if (rec) gEl.append(epiRowEl(rec));
         }
-        g.items.forEach((it) => gEl.append(itemEl(it, kind)));
+        if (!folded) g.items.forEach((it) => gEl.append(itemEl(it, kind)));
         body.append(gEl);
+      }
+      // 자막을 저장하지 않은 에피소드도, 통째 오디오가 있으면 작품 머리 + 플레이어로 보여 준다
+      if (kind === 'learning' && !state.edit.on && !state.filterTitle && !state.filterTag && !q && state.recs.length) {
+        const have = new Set(list.map((g) => g.title + (g.episode ? ' ' + g.episode : '')));
+        const seen = new Set();
+        for (const r of state.recs.slice().sort((a, b) => (b.at || 0) - (a.at || 0))) {
+          if (r.skip || !recReadable(r) || have.has(r.title) || seen.has(r.title)) continue;
+          seen.add(r.title);
+          const gEl = el('div', { class: 'group rec-only' }, [
+            el('h3', { class: 'group-title' }, [r.title, el('small', null, '에피소드 오디오 — 저장한 자막 없음')]),
+          ]);
+          gEl.append(epiRowEl(r));
+          body.append(gEl);
+        }
       }
       syncVeils();
     };

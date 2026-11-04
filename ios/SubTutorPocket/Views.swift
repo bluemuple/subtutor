@@ -158,6 +158,7 @@ enum ActiveSheet: Identifiable {
 
 struct RootView: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var recs: RecStore
     @EnvironmentObject var player: Player
     @State private var sheet: ActiveSheet?
     @State private var query = ""
@@ -339,7 +340,7 @@ struct RootView: View {
             ForEach(sections) { work in
                 Section {
                     WorkEpiRow(work: work)   // 이 에피소드의 통째 오디오가 서버에 있으면 맨 위에 플레이어
-                    ForEach(work.items) { item in
+                    ForEach(store.foldedWorks.contains(work.id) ? [] : work.items) { item in
                         ItemRow(item: item, showWork: work.id == "all")
                             .swipeActions(edge: .trailing) {
                                 Button { sheet = .tags(item) } label: { Label("태그", systemImage: "tag") }.tint(.indigo)
@@ -353,6 +354,20 @@ struct RootView: View {
                             }
                     }
                 } header: { WorkHeader(work: work) }
+            }
+            // 자막을 저장하지 않은 에피소드도, 통째 오디오가 있으면 작품 머리 + 플레이어로
+            if query.isEmpty, !showKnown, workFilter == nil, tagFilter == nil {
+                ForEach(orphanRecs(sections)) { f in
+                    Section {
+                        EpiPlayerRow(f: f)
+                    } header: {
+                        HStack(spacing: 8) {
+                            Text(f.title).lineLimit(1)
+                            Text("에피소드 오디오").font(.caption2).foregroundStyle(.tertiary)
+                            Spacer()
+                        }
+                    }
+                }
             }
         }
         .listStyle(.plain)
@@ -413,6 +428,17 @@ struct RootView: View {
     }
     // 학습 중(알아요가 아닌) 대사, 지금 보이는 묶음, 학습 중 대사의 태그(많이 쓴 순)
     private var learning: [Item] { store.items.filter { $0.box != "known" } }
+    // 저장한 자막이 없는 에피소드의 통째 오디오 (제목별 최신 하나)
+    private func orphanRecs(_ sections: [Work]) -> [RecFile] {
+        let have = Set(sections.map { $0.title + ($0.episode.isEmpty ? "" : " " + $0.episode) })
+        var seen = Set<String>()
+        var out: [RecFile] = []
+        for f in recs.files.sorted(by: { $0.at > $1.at }) where !have.contains(f.title) && !seen.contains(f.title) {
+            seen.insert(f.title)
+            out.append(f)
+        }
+        return out
+    }
     private var pool: [Item] { showKnown ? store.items.filter { $0.box == "known" } : learning }
     private var learningTags: [String] {
         var count: [String: Int] = [:]
@@ -461,8 +487,21 @@ struct WorkHeader: View {
 
     var body: some View {
         let pending = store.pendingAudio(work.items).count
+        let folded = store.foldedWorks.contains(work.id)
         HStack(spacing: 10) {
-            Text(work.title + (work.episode.isEmpty ? "" : " · " + work.episode)).lineLimit(1)
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
+                    .rotationEffect(.degrees(folded ? -90 : 0))
+                    .foregroundStyle(.tertiary)
+                Text(work.title + (work.episode.isEmpty ? "" : " · " + work.episode)).lineLimit(1)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {   // 에피소드 머리를 누르면 아래 자막 섹션이 접힌다 (오디오 플레이어는 남음)
+                Haptic.tap()
+                var still = Transaction(); still.disablesAnimations = true
+                withTransaction(still) { store.foldToggle(work.id) }
+            }
             Spacer()
             if pending > 0 {
                 Button {
