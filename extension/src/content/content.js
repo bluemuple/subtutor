@@ -1489,13 +1489,23 @@
     if (t - state.clearanceLowSince > 1200) { state.clearanceCur = raw; state.clearanceLowSince = 0; return raw; }
     return state.clearanceCur;
   }
+  // 창에 실제로 보이는 영상 부분: <video> 사각형을 창(뷰포트) 안으로 자른다. 넷플릭스는 패널을 열어 플레이어를 줄이면 <video> 요소가
+  // 창 아래로 삐져나가서, 컨트롤이 사라져 자막이 영상 아래 끝으로 내려갈 때 화면 밖으로 떨어졌다(컨트롤이 보일 땐 컨트롤 위에 붙어 멀쩡해 보임).
+  // 스크롤로 영상이 거의 다 창 밖이면 예전처럼 <video> 사각형을 그대로 따라간다
+  function shownVideoRect(v) {
+    const r = v.getBoundingClientRect();
+    const left = Math.max(r.left, 0), top = Math.max(r.top, 0);
+    const right = Math.min(r.right, window.innerWidth), bottom = Math.min(r.bottom, window.innerHeight);
+    if (right - left < Math.min(r.width * 0.5, 320) || bottom - top < Math.min(r.height * 0.3, 240)) return r;
+    return { left, top, right, bottom, width: right - left, height: bottom - top };
+  }
   let lastRectKey = '';
-  // 오버레이는 플레이어 DOM 안에 넣지 않고(플랫폼 CSS 간섭 방지) 화면에 고정한 채 <video>의 위치를 따라간다
+  // 오버레이는 플레이어 DOM 안에 넣지 않고(플랫폼 CSS 간섭 방지) 화면에 고정한 채 <video>의 위치(창에 보이는 부분)를 따라간다
   function positionOverlay(force) {
     if (!ui.overlay) return;
     const v = adapter.video();
     if (!v) return;
-    const r = v.getBoundingClientRect();
+    const r = shownVideoRect(v);
     if (!r.width || !r.height) return;
     const clearance = measureClearance(r);
     const key = [r.left, r.top, r.width, r.height, clearance].map(Math.round).join(',');
@@ -1783,7 +1793,7 @@
     if (!ui.floatBtn || !ui.floatBtn.isConnected) return;
     const v = adapter.video();
     if (!v) return;
-    const r = v.getBoundingClientRect();
+    const r = shownVideoRect(v);
     ui.floatBtn.style.left = Math.round(r.left + 10) + 'px';
     ui.floatBtn.style.top = Math.round(r.top + 10) + 'px';
   }
@@ -2119,13 +2129,14 @@
       'clock ' + (adapter.usesPageTime ? 'k=' + fx(A.shared.ctMap.k) + ' samples=' + A.shared.ctMap.samples.length + ' resets=' + A.shared.ctMap.resets + ' precise=' + A.preciseClock() + (A.shared.ctMap.cand ? ' cand=' + fx(A.shared.ctMap.cand[1]) : '') + ' playerEvents=' + JSON.stringify(A.shared.pageEv) + ' report=' + fx(A.shared.pageTime.ms) + ' (' + fx(now() - A.shared.pageTime.at) + 'ms ago, adv=' + A.shared.pageTime.advancing + ')' + (state.seekTarget ? ' lastSeek=' + fx(state.seekTarget.ms) + ' (' + fx(now() - state.seekTarget.at) + 'ms ago)' : '') : 'video element') + ' raw=' + fx(rawMs()) + ' videosDeep=' + A.qsaDeep('video').length + (v ? ' muted=' + v.muted + ' vol=' + fx(v.volume, 2) + ' rate=' + v.playbackRate : ''),
       'dub segs=' + state.dubSegs.length + ' chosen=' + state.dubSegs.filter((s) => chosenTake(s)).length + ' playback=' + (settings.dubPlayback !== false) + ' play=' + (state.dubPlay ? state.dubPlay.take.id + '@' + state.dubPlay.offset.toFixed(2) : '-') + ' rec=' + (state.dubRec ? state.dubRec.phase : '-') + ' ladder=' + (state.dubLadder ? state.dubLadder.step : '-') + ' mic=' + (state.dubMic ? 'open' : 'closed') + ' ctx=' + (dubCtx ? dubCtx.state : '-') + ' resyncs=' + dubRestartsTotal,
       'idx current=' + state.current + ' lastShown=' + state.lastShown + ' pausedFor=' + state.pausedFor + ' display=' + state.lastDisplayIdx + ' clip=' + JSON.stringify(state.clip) + ' capturing=' + !!state.capturing + ' tabId=' + state.tabId,
-      'layout panel=' + !!(settings.panelOpen && state.active) + ' videoRight=' + (v ? Math.round(v.getBoundingClientRect().right) : '-') + '/' + window.innerWidth + ' fit=' + (fit.el ? describeEl(fit.el) : '-') + ' shadowRoots=' + (adapter.deep ? A.deepRoots().length - 1 : 0) + ' nativeHidden=' + nativeHiddenCount() + ' cueEl=' + (adapter.nativeCueSelector ? A.qsaDeep(adapter.nativeCueSelector).map(describeEl).slice(0, 2).join(',') : '-'),
+      'layout panel=' + !!(settings.panelOpen && state.active) + ' video=' + (v ? rectText(v.getBoundingClientRect()) + ' shown=' + rectText(shownVideoRect(v)) : '-') + ' window=' + window.innerWidth + 'x' + window.innerHeight + ' fs=' + describeEl(document.fullscreenElement) + ' fit=' + (fit.el ? describeEl(fit.el) : '-') + ' shadowRoots=' + (adapter.deep ? A.deepRoots().length - 1 : 0) + ' nativeHidden=' + nativeHiddenCount() + ' cueEl=' + (adapter.nativeCueSelector ? A.qsaDeep(adapter.nativeCueSelector).map(describeEl).slice(0, 2).join(',') : '-'),
       adapter.generic ? 'site=' + adapter.name + ' pageTracks=' + JSON.stringify(state.pageTracks.map((t) => t.lang + ':' + (t.dash ? 'dash' : (t.text ? 'text' : (t.urls ? 'hls' : 'url'))) + (t.source ? '/' + t.source : ''))) + ' dash=' + (A.shared.dash ? 'periods ' + A.shared.dash.periods + ' content ' + A.shared.dash.map.map((m) => fx(m.presStart, 1) + '-' + fx(m.presEnd, 1) + '→' + fx(m.contentStart, 1)).join(' ') + (A.shared.dash.hasAds ? ' (ads)' : '') : '-') + ' ad=' + !!(adapter.isAdPlaying && adapter.isAdPlaying()) + ' ctl=' + !!(ui.ctlMount && ui.ctlMount.isConnected) + ' float=' + !!(ui.floatBtn && ui.floatBtn.isConnected) : null,
       '── 최근 40초 기록 (초 · 0 = 복사한 순간) ──',
       dlogText(40) || '(기록 없음)',
     ].filter((x) => x !== null).join('\n');
   }
 
+  function rectText(r) { return [r.left, r.top, r.width, r.height].map(Math.round).join(','); }
   function describeEl(e) {
     if (!e || !e.tagName) return '-';
     const cls = (typeof e.className === 'string' ? e.className : '').trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.');

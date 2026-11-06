@@ -919,6 +919,31 @@ async function runSites() {
       assert(Math.abs(r.a[0] - r.b[0]) <= 2 && Math.abs(r.a[2] - r.b[2]) <= 2 && Math.abs(r.a[1] - r.b[1]) <= 2, 'overlay rect should match video rect: ' + JSON.stringify(r));
       assert(r.b[2] < 1100, 'video should have shrunk for the panel: ' + r.b[2]);
     });
+    await step('컨트롤이 사라져도 자막은 창 안에 남는다 (<video> 가 창 아래로 삐져나온 넷플릭스 배치)', async () => {
+      // 실제 넷플릭스에서 패널을 열면 <video> 요소가 창 아래로 삐져나간다: 컨트롤이 보일 땐 자막이 컨트롤 위에 붙어 멀쩡하고,
+      // 컨트롤이 사라지면 영상 아래 끝을 따라 내려가 화면 밖으로 떨어졌다 — 같은 배치를 만들어 본다
+      const before = await page.evaluate(() => { const v = document.querySelector('video'); return { t: v.currentTime, paused: v.paused }; });
+      const box = () => page.evaluate(() => {
+        const b = document.querySelector('#st-overlay .st-ov-box').getBoundingClientRect();
+        const c = document.querySelector('[data-uia="controls-standard"]');
+        return { top: Math.round(b.top), bottom: Math.round(b.bottom), h: Math.round(b.height), vh: innerHeight, video: Math.round(document.querySelector('video').getBoundingClientRect().bottom), ctl: c && c.style.display !== 'none' ? Math.round(c.getBoundingClientRect().top) : null, text: document.querySelector('.st-ov-text').textContent };
+      });
+      try {
+        await page.evaluate(() => { const s = document.createElement('style'); s.id = 'e2e-tall-video'; s.textContent = '#v { height: 135vh !important; }'; document.head.append(s); const v = document.querySelector('video'); v.pause(); v.currentTime = 15; });
+        await waitFor(async () => { const b = await box(); return b.video > b.vh + 100 && /facts/.test(b.text) && b.h > 0; }, 5000, 'tall video with a cue on screen');
+        await sleep(600); // 오버레이 위치는 3틱마다 다시 잰다
+        const shown = await box();
+        assert(shown.ctl && shown.bottom <= shown.ctl && shown.top >= 0, '컨트롤이 보일 땐 자막이 컨트롤 위: ' + JSON.stringify(shown));
+        await page.evaluate(() => { document.querySelector('[data-uia="controls-standard"]').style.display = 'none'; });
+        await sleep(2000); // 컨트롤이 사라지고 1.2초 지나야 자막을 내린다 (+ 0.15초 전환)
+        const hidden = await box();
+        assert(hidden.bottom > shown.bottom + 20, '컨트롤이 사라지면 자막이 영상 아래쪽으로 내려온다: ' + JSON.stringify({ shown, hidden }));
+        assert(hidden.top >= 0 && hidden.bottom <= hidden.vh - 8, '컨트롤이 사라져도 자막 전체가 창 안에: ' + JSON.stringify(hidden));
+      } finally {
+        await page.evaluate((b) => { const s = document.getElementById('e2e-tall-video'); if (s) s.remove(); const c = document.querySelector('[data-uia="controls-standard"]'); if (c) c.style.display = ''; const v = document.querySelector('video'); v.currentTime = b.t; if (!b.paused) v.play().catch(() => {}); }, before);
+        await sleep(300);
+      }
+    });
     await step('컨트롤 바의 ST 버튼으로 켜고 끌 수 있다', async () => {
       await waitFor(() => page.$('.st-ctl'), 5000, 'control button');
       const placed = await page.evaluate(() => { const w = document.querySelector('.st-ctl-wrap'); const nxt = w && w.nextElementSibling && w.nextElementSibling.querySelector('[data-uia]'); return { next: nxt && nxt.getAttribute('data-uia'), wrapClass: w && w.className, icon: !!document.querySelector('.st-ctl .st-ctl-svg text') }; });
