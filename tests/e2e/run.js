@@ -635,6 +635,38 @@ async function runSites() {
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { koMode: 'always' } }, {}));
       await waitFor(() => page.evaluate(() => document.querySelector('.st-ov-ko').textContent.includes('래피')), 3000, 'always mode again');
     });
+    await step('G: 영상 위 자막 보이기/감추기 (감춘 동안 T 를 누르면 그 줄만 잠깐) · Shift+R: 더빙 켬/끔 · ⌨ 단축키 목록은 묶음별 여러 줄', async () => {
+      await page.evaluate(() => { const v = document.querySelector('video'); v.pause(); v.currentTime = 6.5; });
+      const ov = () => page.evaluate(() => { const o = document.getElementById('st-overlay'); return { hidden: o.classList.contains('st-hidden'), text: o.querySelector('.st-ov-text').textContent, chip: !!o.querySelector('.st-ov-chip.on-subs-off') }; });
+      try {
+        await waitFor(async () => { const o = await ov(); return !o.hidden && /Raffie/.test(o.text); }, 4000, 'Raffie on screen');
+        await page.keyboard.press('KeyG');
+        await waitFor(async () => { const o = await ov(); return o.hidden && o.chip; }, 2000, 'G hides the subtitles (chip says so)');
+        assert((await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings.overlay)) === false, 'G saves overlay off (same as ⚙)');
+        await page.keyboard.down('KeyT');
+        await waitFor(async () => { const o = await ov(); return !o.hidden && /Raffie/.test(o.text); }, 2000, 'holding T peeks at the line');
+        await page.keyboard.up('KeyT');
+        await waitFor(async () => (await ov()).hidden, 2000, 'hidden again after T');
+        await page.keyboard.press('KeyG');
+        await waitFor(async () => { const o = await ov(); return !o.hidden && !o.chip; }, 2000, 'G shows them again');
+        const dubOn = () => page.$eval('.st-dub-toggle', (b) => b.classList.contains('on'));
+        assert(await dubOn(), 'dub playback on by default');
+        await page.keyboard.down('Shift'); await page.keyboard.press('KeyR'); await page.keyboard.up('Shift');
+        await waitFor(async () => !(await dubOn()), 2000, 'Shift+R turns dub off');
+        assert(!(await page.$('.st-list > .st-dubbox:not(.st-hidden)')), 'Shift+R does not open the dub box');
+        await page.keyboard.down('Shift'); await page.keyboard.press('KeyR'); await page.keyboard.up('Shift');
+        await waitFor(dubOn, 2000, 'Shift+R turns dub on again');
+        await page.evaluate(() => [...document.querySelectorAll('#st-panel .st-foot-btn')].find((b) => /단축키/.test(b.textContent)).click());
+        const help = await waitFor(() => page.evaluate(() => { const p = document.querySelector('.st-infobox:not(.st-hidden) .st-info-what'); return p ? { text: p.textContent, ws: getComputedStyle(p).whiteSpace } : null; }), 3000, 'shortcut list');
+        assert(/Z 자동 일시정지/.test(help.text) && /G 영상 위 자막/.test(help.text) && /Shift\+R 더빙 켬\/끔/.test(help.text) && !/P 자동/.test(help.text), 'shortcut list has the new keys: ' + help.text.slice(0, 200));
+        assert(help.text.split('\n').length >= 6 && help.ws === 'pre-line', 'shortcut list is grouped on separate lines: ' + help.ws);
+      } finally {
+        await page.evaluate(() => { const x = document.querySelector('.st-infobox-head .st-icon'); if (x) x.click(); });
+        await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { overlay: true, dubPlayback: true } }, {}));
+        await setTime(page, 6.3, true);   // 다음 스텝(Q)은 Raffie 줄에서 시작한다 (T 스텝이 끝난 모습 그대로)
+        await sleep(300);
+      }
+    });
     await step('Q: 못 알아들음 표시 → 빨간 별만, 오디오 모드가 켜져 있어도 녹음하지 않는다 · 다시 누르면 해제', async () => {
       await page.evaluate(() => document.querySelector('video').pause());   // 이 스텝은 몇 초 걸린다 — 재생이 흘러 다음 스텝의 자막(Raffie)을 지나치지 않게
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { audioMode: 'store' } }, {}));   // 오디오 모드가 켜져 있어도
@@ -766,8 +798,8 @@ async function runSites() {
       const chip = await page.$('.st-ov-chip.on-loop');
       assert(!chip, 'loop chip should be gone');
     });
-    await step('P: 자동 일시정지 — 자막 끝에서 멈추고 F로 다시 듣는다', async () => {
-      await page.keyboard.press('KeyP');
+    await step('Z: 자동 일시정지 — 자막 끝에서 멈추고 F로 다시 듣는다', async () => {
+      await page.keyboard.press('KeyZ');
       await waitFor(() => page.$eval('.st-mode', (b) => b.classList.contains('on')), 2000, 'AP on');
       await setTime(page, 13.6, true);
       await waitFor(async () => (await videoPaused(page)), 5000, 'paused at cue end');
@@ -781,7 +813,7 @@ async function runSites() {
       await waitFor(async () => (await videoPaused(page)), 5000, 'paused again');
       const t3 = await videoTime(page);
       assert(t3 >= 15.85 && t3 < 16.5, 'paused again at ' + t3);
-      await page.keyboard.press('KeyP');
+      await page.keyboard.press('KeyZ');
       await sleep(200);
     });
     await step('W: 따라하기(고정 시간) — 자막 끝에서 1초 쉬고 자동으로 이어 재생', async () => {
@@ -929,8 +961,18 @@ async function runSites() {
         return { top: Math.round(b.top), bottom: Math.round(b.bottom), h: Math.round(b.height), vh: innerHeight, video: Math.round(document.querySelector('video').getBoundingClientRect().bottom), ctl: c && c.style.display !== 'none' ? Math.round(c.getBoundingClientRect().top) : null, text: document.querySelector('.st-ov-text').textContent };
       });
       try {
-        await page.evaluate(() => { const s = document.createElement('style'); s.id = 'e2e-tall-video'; s.textContent = '#v { height: 135vh !important; }'; document.head.append(s); const v = document.querySelector('video'); v.pause(); v.currentTime = 15; });
-        await waitFor(async () => { const b = await box(); return b.video > b.vh + 100 && /facts/.test(b.text) && b.h > 0; }, 5000, 'tall video with a cue on screen');
+        await page.evaluate(() => { const s = document.createElement('style'); s.id = 'e2e-tall-video'; s.textContent = '#v { height: 135vh !important; }'; document.head.append(s); });
+        let last = null;
+        await waitFor(async () => {
+          // 앞 스텝의 재생·탐색이 남아 위치가 다시 움직일 수 있다 → 'facts' 줄(14~16초)에 멈춰 있도록 매번 맞춘다
+          await page.evaluate(() => { const v = document.querySelector('video'); if (!v.paused) v.pause(); if (v.currentTime < 14.3 || v.currentTime > 15.7) v.currentTime = 15; });
+          last = await box();
+          return last.video > last.vh + 100 && /facts/.test(last.text) && last.h > 0;
+        }, 8000, 'tall video with a cue on screen').catch(async (e) => {
+          const more = await page.evaluate(() => { const v = document.querySelector('video'); const o = document.getElementById('st-overlay'); return { t: v.currentTime, paused: v.paused, hidden: o.classList.contains('st-hidden'), modes: o.querySelector('.st-ov-modes').textContent }; }).catch(() => null);
+          const ovSetting = await sw.evaluate(async () => ((await chrome.storage.local.get('settings')).settings || {}).overlay).catch(() => '?');
+          throw new Error(e.message + ' last=' + JSON.stringify(last) + ' now=' + JSON.stringify(more) + ' overlaySetting=' + ovSetting);
+        });
         await sleep(600); // 오버레이 위치는 3틱마다 다시 잰다
         const shown = await box();
         assert(shown.ctl && shown.bottom <= shown.ctl && shown.top >= 0, '컨트롤이 보일 땐 자막이 컨트롤 위: ' + JSON.stringify(shown));

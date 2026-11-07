@@ -30,6 +30,7 @@ button.small { flex: none; padding: 3px 9px; font-size: 12px; border-radius: 6px
 .infobox-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid #333; }
 .infobox-head .small { flex: none; }
 .infobox-body { padding: 10px 12px; overflow-y: auto; font-size: 12.5px; line-height: 1.55; color: #ddd; }
+.infobox-body p { white-space: pre-line; }
 .infobox-body h5 { margin: 10px 0 4px; font-size: 11px; color: #a78bfa; text-transform: uppercase; }
 .infobox-body ul { margin: 0; padding-left: 16px; color: #999; font-size: 11.5px; }
 .buttons .small { flex: 0 0 auto; width: 40px; }

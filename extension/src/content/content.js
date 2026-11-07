@@ -1,6 +1,6 @@
 /*
  * SubTutor – 콘텐츠 스크립트 (ISOLATED world)
- * 자막 패널, 영상 위 영어+한국어 자막, 단축키(A/S/D/F/E/P/W), 자동 일시정지, 쉐도잉, 자막 저장(+오디오 캡처), 웹사이트 원격 재생.
+ * 자막 패널, 영상 위 영어+한국어 자막, 단축키(왼손 묶음 — ⌨ 단축키), 자동 일시정지, 쉐도잉, 자막 저장(+오디오 캡처), 웹사이트 원격 재생.
  */
 (() => {
   'use strict';
@@ -1364,7 +1364,7 @@
     ui.panel = el('div', { id: 'st-panel', class: 'st-pf-' + adapter.name });
     // 맨 왼쪽: 내 더빙 재생 켬/끔 (예전에는 작품 이름이 있던 자리 — 이름은 상태줄에 마우스를 올리면 보인다)
     ui.dubToggle = el('button', { class: 'st-dub-toggle', role: 'switch', onclick: () => setDubPlayback(settings.dubPlayback === false) }, [el('span', { class: 'st-dub-toggle-knob' }), el('span', { class: 'st-dub-toggle-text' })]);
-    ui.btnAP = el('button', { class: 'st-mode', title: '자동 일시정지 (P): 자막이 끝나면 멈춥니다. F로 다시 듣기', onclick: () => setMode('autoPause', !settings.autoPause) }, 'AP');
+    ui.btnAP = el('button', { class: 'st-mode', title: '자동 일시정지 (Z): 자막이 끝나면 멈춥니다. F로 다시 듣기', onclick: () => setMode('autoPause', !settings.autoPause) }, 'AP');
     ui.btnShadow = el('button', { class: 'st-mode st-shadow st-switchy', role: 'switch', title: '따라하기 켜기/끄기 (단축키 W): 켜면 자막이 끝날 때마다 옆에서 고른 시간만큼 쉬었다가 다음 자막으로 이어 재생합니다', onclick: () => setMode('shadowing', !settings.shadowing) }, [el('span', { class: 'st-dub-toggle-knob' }), el('span', { class: 'st-shadow-text' }, '따라하기')]);
     // 쉬는 시간을 고르면 따라하기도 켠다 — 시간만 바꾸고 모드는 꺼져 있어 그냥 재생되던 혼동을 막는다
     ui.shadowSec = el('select', { class: 'st-shadow-sec', title: '따라하기: 자막이 끝난 뒤 쉬는 시간 (고르면 따라하기가 켜집니다)', onchange: (e) => { saveSettings(shadowPausePatch(e.target.value)); if (!settings.shadowing) setMode('shadowing', true); } });
@@ -1632,7 +1632,7 @@
     ui.dubToggle.classList.toggle('on', on);
     ui.dubToggle.setAttribute('aria-checked', String(on));
     ui.dubToggle.querySelector('.st-dub-toggle-text').textContent = on ? '더빙 켬' : '더빙 끔';
-    ui.dubToggle.title = (on ? '더빙 켬: 녹음한 줄(★)은 내 목소리로 재생합니다' : '더빙 끔: 원래 영상 소리만 재생합니다') + ' · 이 영상에서 더빙한 줄 ' + n + '개 · 누르면 ' + (on ? '끕니다' : '켭니다');
+    ui.dubToggle.title = (on ? '더빙 켬: 녹음한 줄(★)은 내 목소리로 재생합니다' : '더빙 끔: 원래 영상 소리만 재생합니다') + ' · 이 영상에서 더빙한 줄 ' + n + '개 · 누르면 ' + (on ? '끕니다' : '켭니다') + ' (Shift+R)';
   }
   function updateModeUI() {
     if (!ui.root) return;
@@ -1648,6 +1648,7 @@
     if (Math.abs(state.rate - 1) > 0.01) ui.ovModes.append(el('span', { class: 'st-ov-chip on-rate' }, '⏩ ' + rateText(state.rate) + '×'));
     if (ui.rateNow) { ui.rateNow.textContent = rateText(state.rate) + '×'; ui.rateNow.classList.toggle('on', Math.abs(state.rate - 1) > 0.01); ui.rateNow.title = '지금 ' + rateText(state.rate) + '배속 · 누르면 보통 속도로 (\\)'; }
     if (settings.cloze && settings.cloze !== 'off') ui.ovModes.append(el('span', { class: 'st-ov-chip on-cloze' }, '▭ 빈칸 (V 공개)'));
+    if (!settings.overlay) ui.ovModes.append(el('span', { class: 'st-ov-chip on-subs-off' }, '🙈 자막 감춤 (G)'));
     if (settings.secondPass) ui.ovModes.append(el('span', { class: 'st-ov-chip on-pass' }, '2회차'));
     if (ui.ctlBtn) { ui.ctlBtn.classList.toggle('off', !isEnabled()); ui.ctlBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기'; }
     if (ui.floatBtn) { ui.floatBtn.classList.toggle('off', !isEnabled()); ui.floatBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기'; }
@@ -2009,7 +2010,7 @@
       field('번역 출처', f.translationSource, 'translation'),
       el('div', { class: 'st-btn-row' }, [el('button', { class: 'st-btn', onclick: translateAll }, '이 영상 전체 기계 번역')]),
       el('h4', { text: '화면' }),
-      field('영상 위 자막 표시', sw('overlay'), 'overlay'),
+      field('영상 위 자막 표시 (G)', sw('overlay'), 'overlay'),
       field('플랫폼 기본 자막 숨기기', sw('hideNative'), 'hideNative'),
       field('자막 크기', f.fontScale, 'fontScale'),
       el('h4', { text: '듣기 훈련' }),
@@ -2251,7 +2252,8 @@
     const i = displayIndex();
     if (!force && i === state.lastDisplayIdx) return;
     state.lastDisplayIdx = i;
-    if (!settings.overlay || !isEnabled() || i < 0 || !state.cues[i] || (adapter.isAdPlaying && adapter.isAdPlaying())) { ui.overlay.classList.add('st-hidden'); return; }
+    // G 로 자막을 감춘 동안에도 T 를 누르고 있으면 그 줄만 잠깐 보인다
+    if ((!settings.overlay && !state.koHold) || !isEnabled() || i < 0 || !state.cues[i] || (adapter.isAdPlaying && adapter.isAdPlaying())) { ui.overlay.classList.add('st-hidden'); return; }
     const c = state.cues[i];
     const id = itemIdFor(c);
     const missed = state.missed.has(id);
@@ -2558,7 +2560,7 @@
     else { patch.shadowing = !!on; if (on) patch.autoPause = false; }
     saveSettings(patch);
     if (!on) cancelModesPending();
-    toast(mode === 'autoPause' ? (on ? '⏸ 자동 일시정지 켬 (F: 다시 듣기)' : '자동 일시정지 끔') : (on ? '🗣 따라하기 켬 · 자막이 끝나면 ' + shadowPauseText() + '만큼 쉬고 다음 자막 (W 로 끄기)' : '따라하기 끔 (W 로 켜기)'));
+    toast(mode === 'autoPause' ? (on ? '⏸ 자동 일시정지 켬 (F 다시 듣기 · Z 로 끄기)' : '자동 일시정지 끔 (Z 로 켜기)') : (on ? '🗣 따라하기 켬 · 자막이 끝나면 ' + shadowPauseText() + '만큼 쉬고 다음 자막 (W 로 끄기)' : '따라하기 끔 (W 로 켜기)'));
     updateModeUI();
   }
   function pauseFor(i) {
@@ -3606,7 +3608,23 @@
     const i = shown >= 0 ? shown : anchorIndex();
     if (i >= 0) toggleSave(i); else chip('info', '저장할 자막이 없습니다');
   }
-  const KEY_ACTIONS = { KeyA: prevCue, KeyS: toggleLoop, KeyX: toggleLoopLadder, KeyD: nextCue, KeyF: replayCue, KeyE: saveShownCue, Enter: saveShownCue, KeyQ: toggleMissed, KeyR: () => toggleDubBox(), KeyV: () => { state.clozeRevealIdx = displayIndex(); renderOverlay(true); }, KeyT: () => { if (!state.koHold) { state.koHold = true; renderOverlay(true); } }, KeyP: () => setMode('autoPause', !settings.autoPause), KeyW: () => setMode('shadowing', !settings.shadowing), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
+  // G: 영상 위 자막 보이기/감추기 (⚙ "영상 위 자막 표시" 와 같은 설정) — 감춘 동안에도 T 를 누르고 있으면 그 줄만 잠깐 보인다
+  function toggleOverlaySubs() {
+    const on = !settings.overlay;
+    saveSettings({ overlay: on });
+    toast(on ? '자막 보임 (G 로 감추기)' : '🙈 자막 감춤 — T 를 누르고 있으면 그 줄만 잠깐 · G 로 다시 보이기', 2500);
+  }
+  // Shift+R: 더빙 켬/끔 (패널 맨 위 스위치와 같다 — ★ 녹음한 줄을 내 목소리로 ↔ 원래 소리)
+  function toggleDubPlaybackKey() {
+    const on = settings.dubPlayback === false;
+    setDubPlayback(on);
+    const n = state.dubSegs.filter((s) => chosenTake(s)).length;
+    toast((on ? '🎙 더빙 켬 — ★ 녹음한 줄은 내 목소리' : '더빙 끔 — 원래 소리만') + (n ? '' : ' (이 영상에는 아직 더빙한 줄이 없어요)') + ' · Shift+R', 2500);
+  }
+  // 배치: 왼손만으로 쓰도록 하는 일이 같은 키끼리 붙여 둔다 (⌨ 단축키 목록 = lib/explain.js keys 도 같이 고칠 것)
+  //   줄 이동 A·D·F | 줄 끝 동작 W·S·X·Z (따라하기·반복·사다리 반복·자동 일시정지) | 저장 E·Q
+  //   자막 보기 T·G·V (위아래로 붙은 한 줄: 한국어 잠깐·자막 보이기/감추기·빈칸 공개) | 더빙·녹음은 R 키 하나에 (Shift+R 더빙 켬/끔 · Control+R 통째 MP3)
+  const KEY_ACTIONS = { KeyA: prevCue, KeyD: nextCue, KeyF: replayCue, KeyW: () => setMode('shadowing', !settings.shadowing), KeyS: toggleLoop, KeyX: toggleLoopLadder, KeyZ: () => setMode('autoPause', !settings.autoPause), KeyE: saveShownCue, Enter: saveShownCue, KeyQ: toggleMissed, KeyT: () => { if (!state.koHold) { state.koHold = true; renderOverlay(true); } }, KeyG: toggleOverlaySubs, KeyV: () => { state.clozeRevealIdx = displayIndex(); renderOverlay(true); }, KeyR: () => toggleDubBox(), Backquote: () => setPanelOpen(!settings.panelOpen), BracketLeft: () => changeRate(-0.1), BracketRight: () => changeRate(0.1), Backslash: () => changeRate(0) };
   // Shift 와 함께: < 한 단계 느리게 · > 한 단계 빠르게. 단계는 설정 › 속도 사다리의 배속을 그대로 쓴다.
   // 유튜브는 Shift+< , Shift+> 가 이미 유튜브 자체 기능이라 건드리지 않는다 (두 번 적용되는 것을 막는다).
   const SHIFT_ACTIONS = RATE_UI ? { Comma: () => stepRate(-1), Period: () => stepRate(1) } : {};
@@ -3622,6 +3640,7 @@
   function keyAction(e) {
     if (isRecKey(e)) return recToggle;
     if (e.code === 'Comma' || e.code === 'Period') return (e.shiftKey && SHIFT_ACTIONS[e.code]) || null;
+    if (e.code === 'KeyR' && e.shiftKey) return toggleDubPlaybackKey;
     if (DUB_KEYS[e.code]) return dubModeOn() ? DUB_KEYS[e.code] : null;
     return KEY_ACTIONS[e.code] || null;
   }
