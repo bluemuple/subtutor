@@ -1608,6 +1608,7 @@
     const open = settings.panelOpen && state.active && enabled;
     ui.panel.classList.toggle('st-closed', !open);
     ui.toggle.classList.toggle('st-hidden', open || !state.active || !enabled);
+    ui.overlay.classList.toggle('st-off', !(state.active && enabled)); // 끄면 영상 위 상태 캡슐(반복·AP 등)·더빙 표시도 함께 감춘다
     document.documentElement.classList.toggle('st-panel-open', open);
     document.documentElement.style.setProperty('--st-font-scale', String((settings.fontScale || 100) / 100));
     ui.nativeStyle.textContent = nativeHideCssNow();
@@ -1647,7 +1648,6 @@
     if (settings.shadowing) ui.ovModes.append(el('span', { class: 'st-ov-chip on-shadow' }, '🗣 따라하기 ' + shadowPauseText()));
     if (Math.abs(state.rate - 1) > 0.01) ui.ovModes.append(el('span', { class: 'st-ov-chip on-rate' }, '⏩ ' + rateText(state.rate) + '×'));
     if (ui.rateNow) { ui.rateNow.textContent = rateText(state.rate) + '×'; ui.rateNow.classList.toggle('on', Math.abs(state.rate - 1) > 0.01); ui.rateNow.title = '지금 ' + rateText(state.rate) + '배속 · 누르면 보통 속도로 (\\)'; }
-    if (settings.cloze && settings.cloze !== 'off') ui.ovModes.append(el('span', { class: 'st-ov-chip on-cloze' }, '▭ 빈칸 (V 공개)'));
     if (!settings.overlay) ui.ovModes.append(el('span', { class: 'st-ov-chip on-subs-off' }, '🙈 자막 감춤 (G)'));
     if (settings.secondPass) ui.ovModes.append(el('span', { class: 'st-ov-chip on-pass' }, '2회차'));
     if (ui.ctlBtn) { ui.ctlBtn.classList.toggle('off', !isEnabled()); ui.ctlBtn.title = isEnabled() ? 'SubTutor 끄기' : 'SubTutor 켜기'; }

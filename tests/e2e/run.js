@@ -693,7 +693,8 @@ async function runSites() {
     });
     await step('빈칸 자막: 단어를 가리고 V 로 공개', async () => {
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { cloze: 'function' } }, {}));
-      await waitFor(() => page.evaluate(() => /_{3,}/.test(document.querySelector('.st-ov-text').textContent) && document.querySelector('.st-ov-chip.on-cloze')), 4000, 'blanks shown');
+      await waitFor(() => page.evaluate(() => /_{3,}/.test(document.querySelector('.st-ov-text').textContent)), 4000, 'blanks shown');
+      assert(await page.evaluate(() => !document.querySelector('.st-ov-chip.on-cloze') && !/빈칸/.test(document.querySelector('.st-ov-modes').textContent)), '빈칸 모드 캡슐은 영상 위에 나오지 않는다');
       await page.keyboard.press('KeyV');
       await waitFor(() => page.evaluate(() => !/_{3,}/.test(document.querySelector('.st-ov-text').textContent) && document.querySelector('.st-ov-text').textContent.includes('Raffie')), 3000, 'revealed');
       await sw.evaluate(() => globalThis.__subtutorHandle({ type: 'settings.set', patch: { cloze: 'off' } }, {}));
@@ -990,15 +991,18 @@ async function runSites() {
       await waitFor(() => page.$('.st-ctl'), 5000, 'control button');
       const placed = await page.evaluate(() => { const w = document.querySelector('.st-ctl-wrap'); const nxt = w && w.nextElementSibling && w.nextElementSibling.querySelector('[data-uia]'); return { next: nxt && nxt.getAttribute('data-uia'), wrapClass: w && w.className, icon: !!document.querySelector('.st-ctl .st-ctl-svg text') }; });
       assert(placed.next === 'control-next' && /\bmedium\b/.test(placed.wrapClass) && placed.icon, 'ST placed left of next-episode with the neighbour wrapper class: ' + JSON.stringify(placed));
+      await page.keyboard.press('KeyS');   // 반복을 켜 둔 채 끈다 → "🔁 반복" 캡슐이 남아 있으면 안 된다
+      await waitFor(() => page.$('.st-ov-chip.on-loop'), 2000, 'loop chip before disabling');
       await page.click('.st-ctl');
       await waitFor(() => page.evaluate(() => document.getElementById('st-panel').classList.contains('st-closed') && document.getElementById('st-overlay').classList.contains('st-hidden') && getComputedStyle(document.querySelector('.player-timedtext')).visibility === 'visible' && document.querySelector('.st-ctl').classList.contains('off')), 4000, 'disabled state');
+      assert(await page.evaluate(() => getComputedStyle(document.getElementById('st-overlay')).display === 'none'), '끄면 영상 위 상태 캡슐도 모두 감춘다');
       const tBefore = await videoTime(page);
       await page.keyboard.press('KeyD');
       await sleep(400);
       const tAfter = await videoTime(page);
       assert(Math.abs(tAfter - tBefore) < 1.5, 'keys must be inactive while disabled');
       await page.click('.st-ctl');
-      await waitFor(() => page.evaluate(() => !document.getElementById('st-panel').classList.contains('st-closed') && !document.querySelector('.st-ctl').classList.contains('off')), 4000, 'enabled again');
+      await waitFor(() => page.evaluate(() => !document.getElementById('st-panel').classList.contains('st-closed') && !document.querySelector('.st-ctl').classList.contains('off') && getComputedStyle(document.getElementById('st-overlay')).display !== 'none'), 4000, 'enabled again');
       await sleep(400);
     });
     await step('영상별 자막 시간 보정이 표시·저장에 반영된다', async () => {
